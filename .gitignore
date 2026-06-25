@@ -1,0 +1,17 @@
+# Build output
+/darbaan
+/dist/
+*.exe
+
+# Go test / coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Local secrets and age identities — never commit (ADR 0012)
+*.age
+*.key
+*.pem
+age-identity*
+.env
+*.env
