@@ -37,4 +37,6 @@ jobs:
           fi
 
       - name: Test
-        run: go test ./...
+        # -race: the listener + bbolt code is concurrent, so the gate runs the
+        # race detector.
+        run: go test -race ./...
