@@ -20,6 +20,7 @@ type Record struct {
 	Event     string `json:"event"`
 	Agent     string `json:"agent"`
 	MessageID string `json:"message_id"`
+	Detail    string `json:"detail,omitempty"` // e.g. reject reason, send-attempt result
 }
 
 // Entry is a persisted, hash-chained audit log entry. Hash binds PrevHash and

@@ -2,15 +2,18 @@
 //
 // Subcommands:
 //
-//	darbaan serve            run the SMTP submission face + sluice
-//	darbaan queue ls         list held (pending) outbound messages
-//	darbaan queue show <id>  dump a held message's raw RFC 822
-//	darbaan version          print version
+//	darbaan serve                       run the SMTP submission face + sluice
+//	darbaan queue ls                    list held outbound messages
+//	darbaan queue show <id>             dump a held message's raw RFC 822
+//	darbaan queue approve <id>          approve a held message (runs the chain)
+//	darbaan queue reject -reason "" <id>  reject a held message
+//	darbaan version                     print version
 //
 // See the adr/ directory for the design.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -22,7 +25,10 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/yaad-index/darbaan/internal/approver"
+	"github.com/yaad-index/darbaan/internal/backend"
 	"github.com/yaad-index/darbaan/internal/listener"
+	"github.com/yaad-index/darbaan/internal/policy"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
@@ -55,8 +61,10 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: darbaan <serve|queue|version> [flags]")
 	fmt.Fprintln(os.Stderr, "  serve            run the SMTP submission face + sluice")
-	fmt.Fprintln(os.Stderr, "  queue ls         list held (pending) outbound messages")
+	fmt.Fprintln(os.Stderr, "  queue ls         list held outbound messages")
 	fmt.Fprintln(os.Stderr, "  queue show <id>  dump a held message's raw RFC 822")
+	fmt.Fprintln(os.Stderr, "  queue approve <id>            approve a held message")
+	fmt.Fprintln(os.Stderr, "  queue reject -reason \"\" <id>   reject a held message")
 	fmt.Fprintln(os.Stderr, "  version          print version")
 }
 
@@ -123,15 +131,24 @@ func runServe(args []string) error {
 }
 
 func runQueue(args []string) error {
-	fs := flag.NewFlagSet("queue", flag.ExitOnError)
+	if len(args) == 0 {
+		return errors.New("usage: darbaan queue <ls|show|approve|reject> [flags] [id]")
+	}
+	sub := args[0]
+
+	// Flags precede the positional id, e.g. `queue reject -reason "no" <id>`.
+	fs := flag.NewFlagSet("queue "+sub, flag.ExitOnError)
 	dbPath := fs.String("db", "darbaan.db", "path to the sluice database file")
-	if err := fs.Parse(args); err != nil {
+	var reason string
+	var retryable bool
+	if sub == "reject" {
+		fs.StringVar(&reason, "reason", "", "rejection reason (required)")
+		fs.BoolVar(&retryable, "retryable", false, "mark the rejection transient (revise & resubmit) rather than permanent")
+	}
+	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	rest := fs.Args()
-	if len(rest) == 0 {
-		return errors.New("usage: darbaan queue <ls|show <id>> [-db path]")
-	}
+	id := fs.Arg(0)
 
 	q, err := sluice.Open(*dbPath)
 	if err != nil {
@@ -139,16 +156,125 @@ func runQueue(args []string) error {
 	}
 	defer func() { _ = q.Close() }()
 
-	switch rest[0] {
+	switch sub {
 	case "ls":
 		return queueList(q)
 	case "show":
-		if len(rest) < 2 {
+		if id == "" {
 			return errors.New("usage: darbaan queue show <id>")
 		}
-		return queueShow(q, rest[1])
+		return queueShow(q, id)
+	case "approve":
+		if id == "" {
+			return errors.New("usage: darbaan queue approve <id>")
+		}
+		return runApprove(q, id)
+	case "reject":
+		if id == "" || reason == "" {
+			return errors.New(`usage: darbaan queue reject -reason "..." <id>`)
+		}
+		return runReject(q, id, reason, retryable)
 	default:
-		return fmt.Errorf("unknown queue subcommand %q", rest[0])
+		return fmt.Errorf("unknown queue subcommand %q", sub)
+	}
+}
+
+// defaultStrictChain and defaultLightChain are the v1 approval chains. Both
+// resolve to the manual approver until a pre-screener and more approvers land;
+// these become operator-configurable later. If a named approver is not compiled
+// in, the chain fails closed (nothing can be approved).
+var (
+	defaultStrictChain = []string{"manual"}
+	defaultLightChain  = []string{"manual"}
+)
+
+func runApprove(q *sluice.Sluice, id string) error {
+	m, err := decideAndApply(context.Background(), q, backend.StubSender{},
+		policy.NewRouter(defaultStrictChain, defaultLightChain),
+		id, approver.Verdict{Disposition: approver.Approve})
+	if err != nil {
+		return err
+	}
+	switch m.Status {
+	case sluice.StatusApproved:
+		fmt.Printf("message %s approved by %s\n", m.ID, m.DecidedBy)
+		if m.SendErr != "" {
+			fmt.Printf("  send: %s — nothing left Darbaan\n", m.SendErr)
+		}
+	default:
+		fmt.Printf("message %s: still %s, no verdict applied\n", m.ID, m.Status)
+	}
+	return nil
+}
+
+func runReject(q *sluice.Sluice, id, reason string, retryable bool) error {
+	m, err := decideAndApply(context.Background(), q, backend.StubSender{},
+		policy.NewRouter(defaultStrictChain, defaultLightChain),
+		id, approver.Verdict{Disposition: approver.Reject, Reason: reason, Retryable: retryable})
+	if err != nil {
+		return err
+	}
+	switch m.Status {
+	case sluice.StatusRejected:
+		kind := "permanent"
+		if m.Retryable {
+			kind = "transient"
+		}
+		fmt.Printf("message %s rejected by %s (%s): %s\n", m.ID, m.DecidedBy, kind, m.Reason)
+	default:
+		fmt.Printf("message %s: still %s, no verdict applied\n", m.ID, m.Status)
+	}
+	return nil
+}
+
+// decideAndApply runs the approval chain for one message and applies the
+// outcome. The human verdict is injected into the human stage of the chain — it
+// is one stage, never an override of the others (ADR 0004). On approval the
+// message is marked approved and handed to the (stubbed) Sender; the send result
+// is recorded and audited, never silently dropped (ADR 0003). On rejection the
+// reason is recorded. A Hold leaves the message pending.
+func decideAndApply(ctx context.Context, q *sluice.Sluice, sender backend.Sender, router *policy.Router, id string, human approver.Verdict) (sluice.Message, error) {
+	msg, err := q.Get(id)
+	if err != nil {
+		return sluice.Message{}, err
+	}
+	if msg.Status != sluice.StatusPending {
+		return sluice.Message{}, fmt.Errorf("message %s is %s, not pending", id, msg.Status)
+	}
+
+	// No pre-screener exists, so the router runs with no risk signal and
+	// returns the strict chain (the ADR 0005 fail-safe).
+	_, names := router.Select(nil)
+	stages := make([]approver.Approver, 0, len(names))
+	for _, name := range names {
+		a, err := approver.New(name)
+		if err != nil {
+			return sluice.Message{}, err
+		}
+		if h, ok := a.(approver.HumanApprover); ok {
+			h.SetVerdict(human)
+		}
+		stages = append(stages, a)
+	}
+
+	outcome, err := approver.Run(ctx, msg, stages)
+	if err != nil {
+		return sluice.Message{}, err
+	}
+
+	switch outcome.Disposition {
+	case approver.Approve:
+		if _, err := q.Approve(id, outcome.DecidedBy, outcome.Released); err != nil {
+			return sluice.Message{}, err
+		}
+		// Attempt the (stubbed) upstream send; record the result either way.
+		approved, _ := q.Get(id)
+		sendErr := sender.Send(ctx, approved)
+		return q.RecordSendAttempt(id, sendErr)
+	case approver.Reject:
+		return q.Reject(id, outcome.DecidedBy, outcome.Reason, outcome.Retryable)
+	default: // Hold — stays pending, fail-closed
+		return msg, nil
 	}
 }
 

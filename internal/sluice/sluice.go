@@ -1,6 +1,7 @@
 package sluice
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,12 +21,22 @@ var bucketMessages = []byte("messages")
 // ErrNotFound is returned by Get when no message has the given id.
 var ErrNotFound = errors.New("sluice: message not found")
 
-// Status is the disposition of a queued message. v1 only ever holds Pending:
-// the sluice is default-deny and nothing is released without an approval pass
-// (ADR 0003), which lands in a later component.
+// ErrNotPending is returned when a verdict is applied to a message that is no
+// longer pending (already approved or rejected) — fail-closed against double
+// decisions.
+var ErrNotPending = errors.New("sluice: message is not pending")
+
+// Status is the disposition of a queued message. New messages are Pending;
+// the approval pipeline transitions them to Approved or Rejected. Default-deny
+// means nothing leaves on Approved either until a real Sender is wired
+// (ADR 0003) — Approved records the verdict, it does not imply "sent".
 type Status string
 
-const StatusPending Status = "pending"
+const (
+	StatusPending  Status = "pending"
+	StatusApproved Status = "approved"
+	StatusRejected Status = "rejected"
+)
 
 // Submission is a new outbound message to trap, as captured from the SMTP face.
 type Submission struct {
@@ -44,6 +55,13 @@ type Message struct {
 	Raw        []byte    `json:"raw"`
 	ReceivedAt time.Time `json:"received_at"`
 	Status     Status    `json:"status"`
+
+	// Set on a terminal transition (approved/rejected):
+	DecidedBy string `json:"decided_by,omitempty"` // approver that decided
+	Reason    string `json:"reason,omitempty"`     // rejection reason
+	Retryable bool   `json:"retryable,omitempty"`  // rejection: transient vs permanent
+	Released  []byte `json:"released,omitempty"`   // edited body approved instead of Raw (ADR 0004); nil = original
+	SendErr   string `json:"send_err,omitempty"`   // result of the last send attempt (e.g. "upstream send pending")
 }
 
 // Meta is the listing view of a queued message: everything but the raw body.
@@ -153,17 +171,11 @@ func (s *Sluice) List() ([]Meta, error) {
 
 // Get returns the full message (including the raw body) for id, or ErrNotFound.
 func (s *Sluice) Get(id string) (Message, error) {
-	seq, err := strconv.ParseUint(id, 10, 64)
-	if err != nil {
-		return Message{}, fmt.Errorf("%w: invalid id %q", ErrNotFound, id)
-	}
 	var msg Message
-	err = s.db.View(func(tx *bbolt.Tx) error {
-		v := tx.Bucket(bucketMessages).Get(seqkey.Encode(seq))
-		if v == nil {
-			return ErrNotFound
-		}
-		return json.Unmarshal(v, &msg)
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		var e error
+		msg, _, e = loadMessage(tx, id)
+		return e
 	})
 	if err != nil {
 		return Message{}, err
@@ -171,9 +183,125 @@ func (s *Sluice) Get(id string) (Message, error) {
 	return msg, nil
 }
 
+// Approve marks a pending message approved, recording the deciding approver and
+// (when edited) the released body, plus a hash-chained audit entry — all in one
+// transaction. It does NOT send: releasing upstream is a separate, stubbed seam,
+// so default-deny stays structural (ADR 0003). Approving a non-pending message
+// returns ErrNotPending.
+func (s *Sluice) Approve(id, decidedBy string, released []byte) (Message, error) {
+	return s.transitionFromPending(id, "approve", decidedBy, func(m *Message) {
+		m.Status = StatusApproved
+		m.DecidedBy = decidedBy
+		if released != nil && !bytes.Equal(released, m.Raw) {
+			m.Released = released
+		}
+	})
+}
+
+// Reject marks a pending message rejected with a reason and retryable flag, plus
+// a hash-chained audit entry, in one transaction. Rejecting a non-pending
+// message returns ErrNotPending.
+func (s *Sluice) Reject(id, decidedBy, reason string, retryable bool) (Message, error) {
+	return s.transitionFromPending(id, "reject", reason, func(m *Message) {
+		m.Status = StatusRejected
+		m.DecidedBy = decidedBy
+		m.Reason = reason
+		m.Retryable = retryable
+	})
+}
+
+// RecordSendAttempt records the result of attempting to release an approved
+// message to the upstream Sender, with an audit entry. While the Sender is
+// stubbed this always records the pending-send error; the message is never
+// quietly dropped (ADR 0003).
+func (s *Sluice) RecordSendAttempt(id string, sendErr error) (Message, error) {
+	var out Message
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		m, key, err := loadMessage(tx, id)
+		if err != nil {
+			return err
+		}
+		detail := "sent"
+		if sendErr != nil {
+			detail = sendErr.Error()
+			m.SendErr = sendErr.Error()
+		}
+		if err := putMessage(tx, key, m); err != nil {
+			return err
+		}
+		if _, err := audit.Append(tx, audit.Record{
+			Event: "send_attempt", Agent: m.Agent, MessageID: id, Detail: detail,
+		}); err != nil {
+			return err
+		}
+		out = m
+		return nil
+	})
+	if err != nil {
+		return Message{}, fmt.Errorf("sluice: record send attempt: %w", err)
+	}
+	return out, nil
+}
+
+// transitionFromPending loads a pending message, applies mutate, stores it, and
+// appends an audit entry (event, with detail) — atomically. It errors if the
+// message is not pending, so a verdict can never be applied twice.
+func (s *Sluice) transitionFromPending(id, event, detail string, mutate func(*Message)) (Message, error) {
+	var out Message
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		m, key, err := loadMessage(tx, id)
+		if err != nil {
+			return err
+		}
+		if m.Status != StatusPending {
+			return fmt.Errorf("%w: %s is %s", ErrNotPending, id, m.Status)
+		}
+		mutate(&m)
+		if err := putMessage(tx, key, m); err != nil {
+			return err
+		}
+		if _, err := audit.Append(tx, audit.Record{
+			Event: event, Agent: m.Agent, MessageID: id, Detail: detail,
+		}); err != nil {
+			return err
+		}
+		out = m
+		return nil
+	})
+	if err != nil {
+		return Message{}, fmt.Errorf("sluice: %s: %w", event, err)
+	}
+	return out, nil
+}
+
 // VerifyAudit walks the audit chain and reports the first inconsistency, if any.
 func (s *Sluice) VerifyAudit() error {
 	return s.db.View(func(tx *bbolt.Tx) error {
 		return audit.Verify(tx)
 	})
+}
+
+func loadMessage(tx *bbolt.Tx, id string) (Message, []byte, error) {
+	seq, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return Message{}, nil, fmt.Errorf("%w: invalid id %q", ErrNotFound, id)
+	}
+	key := seqkey.Encode(seq)
+	v := tx.Bucket(bucketMessages).Get(key)
+	if v == nil {
+		return Message{}, nil, ErrNotFound
+	}
+	var m Message
+	if err := json.Unmarshal(v, &m); err != nil {
+		return Message{}, nil, err
+	}
+	return m, key, nil
+}
+
+func putMessage(tx *bbolt.Tx, key []byte, m Message) error {
+	enc, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return tx.Bucket(bucketMessages).Put(key, enc)
 }
