@@ -1,7 +1,6 @@
 package sluice
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +10,7 @@ import (
 	"go.etcd.io/bbolt"
 
 	"github.com/yaad-index/darbaan/internal/audit"
+	"github.com/yaad-index/darbaan/internal/seqkey"
 )
 
 // bucketMessages holds the pending outbound messages, keyed by big-endian
@@ -108,7 +108,7 @@ func (s *Sluice) Enqueue(sub Submission) (Message, error) {
 		if err != nil {
 			return err
 		}
-		if err := b.Put(itob(seq), enc); err != nil {
+		if err := b.Put(seqkey.Encode(seq), enc); err != nil {
 			return err
 		}
 		_, err = audit.Append(tx, audit.Record{
@@ -159,7 +159,7 @@ func (s *Sluice) Get(id string) (Message, error) {
 	}
 	var msg Message
 	err = s.db.View(func(tx *bbolt.Tx) error {
-		v := tx.Bucket(bucketMessages).Get(itob(seq))
+		v := tx.Bucket(bucketMessages).Get(seqkey.Encode(seq))
 		if v == nil {
 			return ErrNotFound
 		}
@@ -176,10 +176,4 @@ func (s *Sluice) VerifyAudit() error {
 	return s.db.View(func(tx *bbolt.Tx) error {
 		return audit.Verify(tx)
 	})
-}
-
-func itob(v uint64) []byte {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, v)
-	return b
 }

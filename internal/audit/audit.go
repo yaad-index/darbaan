@@ -2,13 +2,14 @@ package audit
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
 
 	"go.etcd.io/bbolt"
+
+	"github.com/yaad-index/darbaan/internal/seqkey"
 )
 
 // bucketName is the bbolt bucket holding the hash-chained log.
@@ -68,7 +69,7 @@ func Append(tx *bbolt.Tx, rec Record) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
-	if err := b.Put(itob(seq), enc); err != nil {
+	if err := b.Put(seqkey.Encode(seq), enc); err != nil {
 		return Entry{}, err
 	}
 	return e, nil
@@ -107,16 +108,17 @@ func computeHash(prevHash string, e Entry) string {
 		Time   time.Time `json:"time"`
 		Record Record    `json:"record"`
 	}{e.Seq, e.Time, e.Record}
-	pj, _ := json.Marshal(payload)
+	pj, err := json.Marshal(payload)
+	if err != nil {
+		// payload is a fixed struct of marshalable types, so this cannot fail
+		// in practice. But a security hash must never silently fall back to
+		// hashing an empty payload: that would yield a wrong-but-internally-
+		// consistent chain that still passes Verify. Fail loud instead.
+		panic(fmt.Sprintf("audit: marshal hash payload: %v", err))
+	}
 
 	h := sha256.New()
 	h.Write([]byte(prevHash))
 	h.Write(pj)
 	return hex.EncodeToString(h.Sum(nil))
-}
-
-func itob(v uint64) []byte {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, v)
-	return b
 }
