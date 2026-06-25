@@ -17,3 +17,10 @@ agent only ever gets **Darbaan** credentials.
 - An injection that steals an agent's credentials gets a box that is already
   policy-limited, never the actual mailbox.
 - Darbaan is a trust boundary; its own integrity is the thing to protect.
+
+## Amendment (2026-06-25, review)
+**Defining "Darbaan credentials" (how an agent authenticates).** Each agent
+authenticates to Darbaan's IMAP and SMTP faces with **per-agent credentials** (a
+username + secret/token) issued by Darbaan, over TLS. These identify the agent
+principal and grant **only** Darbaan access, never upstream access. v1 is
+single-agent (one credential set); the mechanism generalizes to many (ADR 0010).

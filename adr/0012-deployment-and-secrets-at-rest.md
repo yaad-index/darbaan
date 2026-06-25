@@ -17,3 +17,11 @@ stored plaintext on disk or in the repo.
 ## Consequences
 - A stolen disk image or leaked repo yields nothing usable.
 - **Post-v1:** full at-rest encryption of the entire message store, not just secrets.
+
+## Amendment (2026-06-25, review)
+**Resolving the two open choices.** At-rest encryption uses **age** (portable,
+scriptable, simple file-based identities) rather than an OS keyring — keyring
+support can come later as an option. The **startup decryption key** is delivered
+as an **age identity file** whose path is given via config/env, or an
+interactive passphrase prompt; the key/identity is never written by Darbaan and
+lives in memory only while running.

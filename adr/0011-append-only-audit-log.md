@@ -13,3 +13,9 @@ both the original and any human-edited version of a draft (ADR 0004).
 ## Consequences
 - Full provenance for every send and rejection.
 - The log is a record to protect and, for permanent rejections, to surface (ADR 0006).
+
+## Amendment (2026-06-25, review)
+**Integrity:** the log is **hash-chained** — each entry carries the hash of the
+previous, so tampering or truncation is evident. This is in v1 (cheap, high
+value). **Retention:** configurable; v1 default is keep-all. Rotation/retention
+is an operator setting; any rotation must preserve the chain across segments.

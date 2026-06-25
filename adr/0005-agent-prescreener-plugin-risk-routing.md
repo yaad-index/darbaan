@@ -17,3 +17,11 @@ path (one human tap); medium/high or any flag takes the strict path.
 ## Consequences
 - Coarse buckets avoid false precision; refine once real traffic is seen.
 - Deployments choose their own AI dependency posture at build time.
+
+## Amendment (2026-06-25, review)
+**How the risk result selects a chain.** A **router** consumes the pre-screener
+verdict and picks the approval chain: low + no flags → the **light** chain;
+medium/high or any flag → the **strict** chain, per a configured routing table.
+The pre-screener runs as the mandatory first stage when compiled in. **If it is
+not compiled in, the router defaults to the strict chain** (fail-safe) — absence
+of a risk signal is treated as "could be risky," never as "low."

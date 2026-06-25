@@ -20,3 +20,10 @@ agent approvers never edit.
 - New approval surfaces are added without touching the core.
 - The audit log keeps both the agent's original draft and any human-edited
   version (see ADR 0011).
+
+## Amendment (2026-06-25, review)
+**Approver timeout = fail-closed.** If no approver acts within a configured
+window, the message is **not** sent; it stays queued. A timeout never
+auto-sends, consistent with default-deny (ADR 0003). Operators may configure
+escalation or an explicit expiry-to-rejected (which then bounces per ADR 0006),
+but the default on timeout is "keep waiting," never "send."

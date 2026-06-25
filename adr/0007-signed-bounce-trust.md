@@ -17,3 +17,11 @@ mail posing as a bounce.
 ## Consequences
 - Agents can confirm authenticity but never forge a bounce.
 - The signing key is a critical secret (see ADR 0012).
+
+## Amendment (2026-06-25, review)
+**One mechanism + key distribution.** Darbaan signs bounces using **DKIM**
+(RFC 6376) over a dedicated signing domain/selector — email-native and
+verifiable with standard tooling (chosen over an ad-hoc detached header).
+**Key distribution:** Darbaan holds the private key; each agent is provisioned
+**out of band** with Darbaan's public key **pinned** at setup and verifies every
+bounce against it. Key rotation is an operator action that re-pins.

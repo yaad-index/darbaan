@@ -18,3 +18,10 @@ deferred post-v1.
 - The rule engine stays small and auditable.
 - Inbound filtering is privacy/noise/surface control; it does **not** stop an
   injection from an allowed sender — the outbound trap (ADR 0003) does.
+
+## Amendment (2026-06-25, review)
+**Default action on no match: `allow`** (the agent sees the message). Rationale:
+inbound reading is recoverable and the outbound trap (ADR 0003) is the real
+containment, so hiding is opt-in. The no-match default is **configurable** — an
+operator wanting a stricter posture can set it to `hold-for-human`. The default
+is always explicit in config, never implicit.
