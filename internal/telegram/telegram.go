@@ -180,17 +180,24 @@ func (c *Client) notify(ctx context.Context, m sluice.Meta) error {
 	// The decision message + keyboard is the anchor and the gating send: it is
 	// marked posted on success, so a later attachment-upload failure never
 	// causes a duplicate re-notify.
-	if _, err = c.bot.SendMessage(ctx, &bot.SendMessageParams{
+	sent, err := c.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      c.operatorID,
 		Text:        formatNotification(n),
 		ReplyMarkup: decisionKeyboard(m.ID),
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 	// Then upload each attachment so the operator can open the real file before
 	// approving — best-effort, after the anchor (the metadata line already
 	// describes them, so an upload failure degrades, never blocks the decision).
-	c.sendAttachments(ctx, n.attachments)
+	// Each doc is threaded under the decision message so several held messages'
+	// files don't mix.
+	var anchorID int
+	if sent != nil {
+		anchorID = sent.ID
+	}
+	c.sendAttachments(ctx, m.ID, anchorID, n.attachments)
 	return nil
 }
 
@@ -199,18 +206,32 @@ func (c *Client) notify(ctx context.Context, m sluice.Meta) error {
 // triggers).
 const maxUpload = 50 * 1024 * 1024
 
-func (c *Client) sendAttachments(ctx context.Context, atts []attachment) {
+func (c *Client) sendAttachments(ctx context.Context, queueID string, anchorID int, atts []attachment) {
 	for _, a := range atts {
 		if a.size > maxUpload || len(a.data) == 0 {
 			continue // too large / empty — the metadata line covers it
 		}
-		if _, err := c.bot.SendDocument(ctx, &bot.SendDocumentParams{
+		params := &bot.SendDocumentParams{
 			ChatID:   c.operatorID,
 			Document: &models.InputFileUpload{Filename: a.filename, Data: bytes.NewReader(a.data)},
-		}); err != nil {
+			Caption:  attachmentCaption(queueID, a.filename),
+		}
+		// Thread the file under its decision message so several held messages'
+		// attachments don't mix. Degrade to an unthreaded upload if the anchor
+		// id wasn't captured.
+		if anchorID != 0 {
+			params.ReplyParameters = &models.ReplyParameters{MessageID: anchorID}
+		}
+		if _, err := c.bot.SendDocument(ctx, params); err != nil {
 			log.Printf("darbaan telegram: upload attachment %s: %v", a.filename, err)
 		}
 	}
+}
+
+// attachmentCaption names a file with its held-message id so the operator sees
+// which approval it belongs to (e.g. "msg 18 - invoice.pdf").
+func attachmentCaption(queueID, filename string) string {
+	return fmt.Sprintf("msg %s - %s", queueID, filename)
 }
 
 // prunePosted drops de-dup entries for messages no longer pending, bounding the
