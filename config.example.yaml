@@ -5,8 +5,16 @@
 # Every key below has a matching --flag and a DARBAAN_<KEY> env var
 # (uppercased, '-' -> '_'), e.g. listener-addr -> --listener-addr / DARBAAN_LISTENER_ADDR.
 
-# Sluice (outbound hold/queue) database path.
+# Message store (the sluice / outbound hold-queue). Backend is config-selected;
+# v1 ships bbolt.
+store-type: bbolt
 sluice-db: darbaan.db
+
+# Audit log: a separate, optional store. "bbolt" is the hash-chained,
+# tamper-evident log (on by default); "null" turns auditing off for a simple
+# deployment. Audit is best-effort, written after the message-store commit.
+audit-type: bbolt
+audit-db: darbaan-audit.db
 
 # SMTP submission face.
 listener-addr: ":1465"

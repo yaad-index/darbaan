@@ -19,17 +19,20 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/listener"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
 var testCred = listener.Credential{Username: "agent", Password: "s3cret"}
 
-func newSluice(t *testing.T) *sluice.Sluice {
+func newSluice(t *testing.T) sluice.MessageStore {
 	t.Helper()
-	q, err := sluice.Open(filepath.Join(t.TempDir(), "sluice.db"))
+	al, err := audit.New("null", "")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = q.Close() })
+	q, err := sluice.New("bbolt", filepath.Join(t.TempDir(), "sluice.db"), al)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = q.Close(); _ = al.Close() })
 	return q
 }
 

@@ -22,6 +22,7 @@ import (
 	"github.com/alecthomas/kong"
 
 	"github.com/yaad-index/darbaan/internal/approver"
+	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
 	"github.com/yaad-index/darbaan/internal/listener"
 	"github.com/yaad-index/darbaan/internal/policy"
@@ -36,7 +37,11 @@ var version = "dev"
 type CLI struct {
 	Config string `help:"Path to a YAML config file (also searched at /etc/darbaan/config.yaml)." placeholder:"PATH" type:"path"`
 
-	SluiceDB string `name:"sluice-db" default:"darbaan.db" help:"Path to the sluice database." type:"path"`
+	StoreType string `name:"store-type" default:"bbolt" help:"Message store backend." enum:"bbolt"`
+	SluiceDB  string `name:"sluice-db" default:"darbaan.db" help:"Path to the sluice (message store) database." type:"path"`
+
+	AuditType string `name:"audit-type" default:"bbolt" help:"Audit log backend: bbolt (hash-chained, on) or null (off)." enum:"bbolt,null"`
+	AuditDB   string `name:"audit-db" default:"darbaan-audit.db" help:"Path to the audit database (audit-type=bbolt)." type:"path"`
 
 	ListenerAddr          string `name:"listener-addr" default:":1465" help:"SMTP submission listen address."`
 	ListenerDomain        string `name:"listener-domain" default:"localhost" help:"SMTP greeting domain."`
@@ -69,8 +74,19 @@ func (c *CLI) router() *policy.Router {
 	return policy.NewRouter(c.ApprovalStrict, c.ApprovalLight)
 }
 
-func (c *CLI) openSluice() (*sluice.Sluice, error) {
-	return sluice.Open(c.SluiceDB)
+// openStore opens the audit log and the message store per config and returns
+// the store plus a close func that closes both (store first, then audit).
+func (c *CLI) openStore() (sluice.MessageStore, func(), error) {
+	al, err := audit.New(c.AuditType, c.AuditDB)
+	if err != nil {
+		return nil, nil, err
+	}
+	ms, err := sluice.New(c.StoreType, c.SluiceDB, al)
+	if err != nil {
+		_ = al.Close()
+		return nil, nil, err
+	}
+	return ms, func() { _ = ms.Close(); _ = al.Close() }, nil
 }
 
 // VersionCmd prints the build version.
@@ -105,11 +121,11 @@ func (*ServeCmd) Run(cli *CLI) error {
 		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 	}
 
-	q, err := cli.openSluice()
+	q, closeStore, err := cli.openStore()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = q.Close() }()
+	defer closeStore()
 
 	srv, err := listener.NewServer(listener.ServerConfig{
 		Addr:          cli.ListenerAddr,
@@ -147,11 +163,11 @@ type QueueCmd struct {
 type QueueLsCmd struct{}
 
 func (*QueueLsCmd) Run(cli *CLI) error {
-	q, err := cli.openSluice()
+	q, closeStore, err := cli.openStore()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = q.Close() }()
+	defer closeStore()
 
 	metas, err := q.List()
 	if err != nil {
@@ -176,11 +192,11 @@ type QueueShowCmd struct {
 }
 
 func (c *QueueShowCmd) Run(cli *CLI) error {
-	q, err := cli.openSluice()
+	q, closeStore, err := cli.openStore()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = q.Close() }()
+	defer closeStore()
 
 	msg, err := q.Get(c.ID)
 	if err != nil {
@@ -198,11 +214,11 @@ type QueueApproveCmd struct {
 }
 
 func (c *QueueApproveCmd) Run(cli *CLI) error {
-	q, err := cli.openSluice()
+	q, closeStore, err := cli.openStore()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = q.Close() }()
+	defer closeStore()
 
 	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, cli.router(),
 		c.ID, approver.Verdict{Disposition: approver.Approve})
@@ -229,11 +245,11 @@ type QueueRejectCmd struct {
 }
 
 func (c *QueueRejectCmd) Run(cli *CLI) error {
-	q, err := cli.openSluice()
+	q, closeStore, err := cli.openStore()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = q.Close() }()
+	defer closeStore()
 
 	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, cli.router(),
 		c.ID, approver.Verdict{Disposition: approver.Reject, Reason: c.Reason, Retryable: c.Retryable})
@@ -259,7 +275,7 @@ func (c *QueueRejectCmd) Run(cli *CLI) error {
 // message is marked approved and handed to the (stubbed) Sender; the send result
 // is recorded and audited, never silently dropped (ADR 0003). On rejection the
 // reason is recorded. A Hold leaves the message pending.
-func decideAndApply(ctx context.Context, q *sluice.Sluice, sender backend.Sender, router *policy.Router, id string, human approver.Verdict) (sluice.Message, error) {
+func decideAndApply(ctx context.Context, q sluice.MessageStore, sender backend.Sender, router *policy.Router, id string, human approver.Verdict) (sluice.Message, error) {
 	msg, err := q.Get(id)
 	if err != nil {
 		return sluice.Message{}, err
