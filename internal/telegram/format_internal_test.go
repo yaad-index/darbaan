@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/yaad-index/darbaan/internal/admin"
+	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
 func TestEmptyKeyboardClearsOnEdit(t *testing.T) {
@@ -65,6 +66,27 @@ func TestIsOperatorGate(t *testing.T) {
 	assert.True(t, c.isOperator(&models.CallbackQuery{From: models.User{ID: 999}}))
 	assert.False(t, c.isOperator(&models.CallbackQuery{From: models.User{ID: 111}})) // not the operator
 	assert.False(t, c.isOperator(nil))
+}
+
+func TestPendingGuardResult(t *testing.T) {
+	// Still pending → proceed, no message.
+	proceed, msg := pendingGuardResult("7", sluice.StatusPending, true, nil)
+	assert.True(t, proceed)
+	assert.Empty(t, msg)
+
+	// Lookup error → proceed (server-side guard backstops).
+	proceed, _ = pendingGuardResult("7", "", false, errors.New("list failed"))
+	assert.True(t, proceed)
+
+	// Already decided → stop with the status.
+	proceed, msg = pendingGuardResult("7", sluice.StatusRejected, true, nil)
+	assert.False(t, proceed)
+	assert.Equal(t, "Message 7: already rejected", msg)
+
+	// Gone from the queue → stop.
+	proceed, msg = pendingGuardResult("7", "", false, nil)
+	assert.False(t, proceed)
+	assert.Equal(t, "Message 7: no longer in the queue", msg)
 }
 
 func TestIsReply(t *testing.T) {

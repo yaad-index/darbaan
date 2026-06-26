@@ -285,8 +285,61 @@ func (c *Client) handleApprove(ctx context.Context, b *bot.Bot, update *models.U
 		return
 	}
 	id := strings.TrimPrefix(cq.Data, cbApprove)
+	if !c.guardPending(ctx, b, cq, id) {
+		return
+	}
 	out, err := c.admin.Approve(ctx, id)
 	c.finishDecision(ctx, b, cq, "Approved", id, out, err)
+}
+
+// guardPending pre-checks a tapped message's status so a stale duplicate tap is
+// explained rather than silently re-running. It returns true to proceed (still
+// pending, or the status couldn't be looked up — the server-side not-pending
+// guard is the backstop) and false after telling the operator the message is
+// already decided / gone and stripping its notification.
+func (c *Client) guardPending(ctx context.Context, b *bot.Bot, cq *models.CallbackQuery, id string) bool {
+	status, found, err := c.statusOf(ctx, id)
+	proceed, msg := pendingGuardResult(id, status, found, err)
+	if proceed {
+		return true
+	}
+	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+		CallbackQueryID: cq.ID, Text: msg, ShowAlert: true,
+	})
+	if m := cq.Message.Message; m != nil {
+		c.editResult(ctx, b, m.Chat.ID, m.ID, msg)
+	}
+	return false
+}
+
+// statusOf looks up a message's current status from the queue listing.
+func (c *Client) statusOf(ctx context.Context, id string) (sluice.Status, bool, error) {
+	metas, err := c.admin.List(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	for _, m := range metas {
+		if m.ID == id {
+			return m.Status, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// pendingGuardResult decides whether to proceed with a decision and, if not,
+// the message to show the operator. A lookup error proceeds (the server-side
+// guard backstops); a still-pending message proceeds; anything else stops.
+func pendingGuardResult(id string, status sluice.Status, found bool, listErr error) (proceed bool, msg string) {
+	switch {
+	case listErr != nil:
+		return true, ""
+	case found && status == sluice.StatusPending:
+		return true, ""
+	case !found:
+		return false, fmt.Sprintf("Message %s: no longer in the queue", id)
+	default:
+		return false, fmt.Sprintf("Message %s: already %s", id, status)
+	}
 }
 
 // isOperator reports whether a callback came from the configured operator — the
@@ -356,6 +409,9 @@ func (c *Client) promptReason(ctx context.Context, b *bot.Bot, cq *models.Callba
 		return
 	}
 	id := strings.TrimPrefix(cq.Data, prefix)
+	if !c.guardPending(ctx, b, cq, id) {
+		return // already decided / gone — don't prompt for a reason
+	}
 	kind := "permanent"
 	if retryable {
 		kind = "retryable"
