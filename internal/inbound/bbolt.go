@@ -3,11 +3,14 @@ package inbound
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.etcd.io/bbolt"
 
+	"github.com/yaad-index/darbaan/internal/blobstore"
 	"github.com/yaad-index/darbaan/internal/seqkey"
 )
 
@@ -17,8 +20,27 @@ func init() {
 	Register("bbolt", newBbolt)
 }
 
-// bboltStore is the bbolt-backed InboundStore, in its own database.
-type bboltStore struct{ db *bbolt.DB }
+// stored is the bbolt record: message metadata plus the tiering flag. The raw
+// bytes live in a blob (Blobbed=true; Message.Raw is nil here), except for
+// legacy records written before ADR 0018, which have Blobbed=false and the raw
+// inline. Subject is already a stored field, so only the raw is reassembled.
+//
+// Unlike the sluice (whose List returns blob-free Meta), inbound's List returns
+// full Messages and reassembles Raw from blobs — the IMAP face snapshots the raw
+// at SELECT for FETCH/SEARCH. That eager read-time load is removed by the future
+// lazy-inbound-sync work (ADR 0018 names it as future); this change is the
+// storage tier only, keeping bbolt small regardless of mailbox size.
+type stored struct {
+	Message
+	Blobbed bool `json:"blobbed,omitempty"`
+}
+
+// bboltStore is the bbolt-backed InboundStore. Metadata lives in its database;
+// raw content lives in a per-store blob directory.
+type bboltStore struct {
+	db    *bbolt.DB
+	blobs *blobstore.Store
+}
 
 func newBbolt(path string) (InboundStore, error) {
 	if path == "" {
@@ -35,7 +57,15 @@ func newBbolt(path string) (InboundStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("inbound: init bucket: %w", err)
 	}
-	return &bboltStore{db: db}, nil
+	// Per-store blob directory (<data>/blobs/inbound/), namespaced by the db name
+	// so the sluice and inbound stores never collide on their per-store ids.
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	blobs, err := blobstore.New(filepath.Join(filepath.Dir(path), "blobs", base))
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("inbound: open blob store: %w", err)
+	}
+	return &bboltStore{db: db, blobs: blobs}, nil
 }
 
 func (s *bboltStore) Close() error { return s.db.Close() }
@@ -58,11 +88,12 @@ func (s *bboltStore) Add(d Delivery) (Message, error) {
 			Seen:       false,
 			ReceivedAt: time.Now().UTC(),
 		}
-		enc, err := json.Marshal(msg)
-		if err != nil {
-			return err
+		// Content tier first: the durable blob is on disk before the referencing
+		// metadata commits (ADR 0018), so a crash can only orphan a blob.
+		if err := s.blobs.Put(msg.ID, d.Raw); err != nil {
+			return fmt.Errorf("write content: %w", err)
 		}
-		return b.Put(seqkey.Encode(seq), enc)
+		return putStored(tx, seqkey.Encode(seq), storedFrom(msg))
 	})
 	if err != nil {
 		return Message{}, fmt.Errorf("inbound: add: %w", err)
@@ -71,15 +102,15 @@ func (s *bboltStore) Add(d Delivery) (Message, error) {
 }
 
 func (s *bboltStore) List(owner string) ([]Message, error) {
-	var out []Message
+	var recs []stored
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		return tx.Bucket(bucketInbound).ForEach(func(_, v []byte) error {
-			var m Message
-			if err := json.Unmarshal(v, &m); err != nil {
+			var rec stored
+			if err := json.Unmarshal(v, &rec); err != nil {
 				return err
 			}
-			if m.Owner == owner {
-				out = append(out, m)
+			if rec.Owner == owner {
+				recs = append(recs, rec)
 			}
 			return nil
 		})
@@ -87,61 +118,97 @@ func (s *bboltStore) List(owner string) ([]Message, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inbound: list: %w", err)
 	}
+	// Reassemble each message's raw from its blob outside the txn, so file IO
+	// never holds the read transaction.
+	out := make([]Message, 0, len(recs))
+	for _, rec := range recs {
+		msg, err := s.withRaw(rec)
+		if err != nil {
+			return nil, fmt.Errorf("inbound: list: %w", err)
+		}
+		out = append(out, msg)
+	}
 	return out, nil
 }
 
 func (s *bboltStore) SetSeen(owner, id string, seen bool) error {
-	seq, err := strconv.ParseUint(id, 10, 64)
-	if err != nil {
-		return fmt.Errorf("%w: invalid id %q", ErrNotFound, id)
-	}
-	key := seqkey.Encode(seq)
 	return s.db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketInbound)
-		v := b.Get(key)
-		if v == nil {
-			return ErrNotFound
-		}
-		var m Message
-		if err := json.Unmarshal(v, &m); err != nil {
-			return err
-		}
-		if m.Owner != owner {
-			return ErrNotFound // do not touch another owner's message
-		}
-		if m.Seen == seen {
-			return nil
-		}
-		m.Seen = seen
-		enc, err := json.Marshal(m)
+		rec, key, err := loadStored(tx, id)
 		if err != nil {
 			return err
 		}
-		return b.Put(key, enc)
+		if rec.Owner != owner {
+			return ErrNotFound // do not touch another owner's message
+		}
+		if rec.Seen == seen {
+			return nil
+		}
+		rec.Seen = seen
+		return putStored(tx, key, rec) // metadata only; the blob is untouched
 	})
 }
 
 func (s *bboltStore) Get(owner, id string) (Message, error) {
-	seq, err := strconv.ParseUint(id, 10, 64)
-	if err != nil {
-		return Message{}, fmt.Errorf("%w: invalid id %q", ErrNotFound, id)
-	}
-	var msg Message
-	err = s.db.View(func(tx *bbolt.Tx) error {
-		v := tx.Bucket(bucketInbound).Get(seqkey.Encode(seq))
-		if v == nil {
-			return ErrNotFound
+	var rec stored
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		r, _, e := loadStored(tx, id)
+		if e != nil {
+			return e
 		}
-		if err := json.Unmarshal(v, &msg); err != nil {
-			return err
-		}
-		if msg.Owner != owner {
+		if r.Owner != owner {
 			return ErrNotFound // do not leak another owner's message
 		}
+		rec = r
 		return nil
 	})
 	if err != nil {
 		return Message{}, err
 	}
+	return s.withRaw(rec)
+}
+
+// withRaw reassembles the full message: metadata plus the raw content from the
+// blob (or, for a legacy record, the inline raw it already carries).
+func (s *bboltStore) withRaw(rec stored) (Message, error) {
+	msg := rec.Message
+	if rec.Blobbed {
+		raw, err := s.blobs.Get(msg.ID)
+		if err != nil {
+			return Message{}, fmt.Errorf("inbound: load content %s: %w", msg.ID, err)
+		}
+		msg.Raw = raw
+	}
 	return msg, nil
+}
+
+// storedFrom builds a blobbed metadata record from a full message: the raw bytes
+// are dropped (they live in the blob).
+func storedFrom(m Message) stored {
+	m.Raw = nil
+	return stored{Message: m, Blobbed: true}
+}
+
+func loadStored(tx *bbolt.Tx, id string) (stored, []byte, error) {
+	seq, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return stored{}, nil, fmt.Errorf("%w: invalid id %q", ErrNotFound, id)
+	}
+	key := seqkey.Encode(seq)
+	v := tx.Bucket(bucketInbound).Get(key)
+	if v == nil {
+		return stored{}, nil, ErrNotFound
+	}
+	var rec stored
+	if err := json.Unmarshal(v, &rec); err != nil {
+		return stored{}, nil, err
+	}
+	return rec, key, nil
+}
+
+func putStored(tx *bbolt.Tx, key []byte, rec stored) error {
+	enc, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	return tx.Bucket(bucketInbound).Put(key, enc)
 }
