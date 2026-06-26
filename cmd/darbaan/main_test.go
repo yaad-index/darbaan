@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -45,7 +46,7 @@ func TestApproveReachesStubSenderAndNothingLeaves(t *testing.T) {
 	q, id := newSeededSluice(t)
 
 	out, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		nil, nil, "", id, approver.Verdict{Disposition: approver.Approve})
+		id, approver.Verdict{Disposition: approver.Approve})
 	require.NoError(t, err)
 
 	assert.Equal(t, sluice.StatusApproved, out.Status)
@@ -54,17 +55,18 @@ func TestApproveReachesStubSenderAndNothingLeaves(t *testing.T) {
 	assert.Equal(t, backend.ErrSendPending.Error(), out.SendErr)
 }
 
-func TestRejectGeneratesBounceIntoInbound(t *testing.T) {
+func TestRejectCommitsAndBounceDelivers(t *testing.T) {
 	q, id := newSeededSluice(t)
 	inbox, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
 	require.NoError(t, err)
 	defer func() { _ = inbox.Close() }()
 
-	out, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		inbox, testSigner(t), "darbaan.test", id, approver.Verdict{Disposition: approver.Reject, Reason: "smells like exfiltration", Retryable: false})
+	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
+		id, approver.Verdict{Disposition: approver.Reject, Reason: "smells like exfiltration", Retryable: false})
 	require.NoError(t, err)
-	assert.Equal(t, sluice.StatusRejected, out.Status)
-	assert.Equal(t, "smells like exfiltration", out.Reason)
+	require.Equal(t, sluice.StatusRejected, m.Status)
+
+	require.NoError(t, deliverBounce(inbox, testSigner(t), m, "darbaan.test"))
 
 	// A DSN bounce was delivered to the agent's inbound mailbox (ADR 0006),
 	// already DKIM-signed (ADR 0007).
@@ -79,6 +81,39 @@ func TestRejectGeneratesBounceIntoInbound(t *testing.T) {
 	assert.Contains(t, string(b.Raw), "5.7.1")           // permanent policy reject
 	assert.Contains(t, string(b.Raw), "DKIM-Signature:") // signed before store
 }
+
+// TestBounceFailureDistinctFromReject covers #35: a bounce-delivery failure
+// must not look like a reject failure — the reject commits regardless.
+func TestBounceFailureDistinctFromReject(t *testing.T) {
+	q, id := newSeededSluice(t)
+
+	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
+		id, approver.Verdict{Disposition: approver.Reject, Reason: "no", Retryable: false})
+	require.NoError(t, err)
+	require.Equal(t, sluice.StatusRejected, m.Status)
+
+	// Bounce delivery to a failing store errors distinctly...
+	require.Error(t, deliverBounce(failingInbound{}, testSigner(t), m, "darbaan.test"))
+
+	// ...but the reject already stuck (the store still shows it rejected).
+	got, err := q.Get(id)
+	require.NoError(t, err)
+	assert.Equal(t, sluice.StatusRejected, got.Status)
+}
+
+// failingInbound errors on Add, to prove a bounce-delivery failure is reported
+// distinctly from the (already-committed) reject.
+type failingInbound struct{}
+
+func (failingInbound) Add(inbound.Delivery) (inbound.Message, error) {
+	return inbound.Message{}, errors.New("inbound store down")
+}
+func (failingInbound) List(string) ([]inbound.Message, error) { return nil, nil }
+func (failingInbound) Get(string, string) (inbound.Message, error) {
+	return inbound.Message{}, inbound.ErrNotFound
+}
+func (failingInbound) SetSeen(string, string, bool) error { return nil }
+func (failingInbound) Close() error                       { return nil }
 
 func testSigner(t *testing.T) *signer.Signer {
 	t.Helper()
@@ -100,7 +135,7 @@ func TestNoDecisionLeavesPending(t *testing.T) {
 	// A Hold verdict (the human took no action) must leave the message pending —
 	// fail-closed.
 	out, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		nil, nil, "", id, approver.Verdict{Disposition: approver.Hold})
+		id, approver.Verdict{Disposition: approver.Hold})
 	require.NoError(t, err)
 	assert.Equal(t, sluice.StatusPending, out.Status)
 
@@ -113,10 +148,10 @@ func TestApproveTwiceIsRefused(t *testing.T) {
 	q, id := newSeededSluice(t)
 
 	_, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		nil, nil, "", id, approver.Verdict{Disposition: approver.Approve})
+		id, approver.Verdict{Disposition: approver.Approve})
 	require.NoError(t, err)
 
 	_, err = decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		nil, nil, "", id, approver.Verdict{Disposition: approver.Approve})
+		id, approver.Verdict{Disposition: approver.Approve})
 	require.Error(t, err) // already approved, not pending
 }
