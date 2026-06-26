@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"mime"
+	"strconv"
 	"strings"
 
 	gomessage "github.com/emersion/go-message"
@@ -107,6 +109,91 @@ func formatAddr(a *gomail.Address) string {
 		return fmt.Sprintf("%s <%s>", a.Name, a.Address)
 	}
 	return a.Address
+}
+
+// attachment is one attachment part: its metadata plus the transfer-decoded
+// bytes, so the bot can both list it and upload the real file for inspection.
+type attachment struct {
+	filename    string
+	contentType string
+	size        int64
+	data        []byte
+}
+
+// attachments lists the attachment parts of a raw message so the operator sees
+// what they're approving — an attachment is the obvious exfiltration vector. A
+// part is an attachment if it is dispositioned attachment, carries a filename,
+// or is a non-text leaf (anything but the text/plain + text/html body parts).
+func attachments(raw []byte) []attachment {
+	ent, _ := gomessage.Read(bytes.NewReader(raw))
+	if ent == nil {
+		return nil
+	}
+	var out []attachment
+	collectAttachments(ent, &out)
+	return out
+}
+
+func collectAttachments(ent *gomessage.Entity, out *[]attachment) {
+	if mr := ent.MultipartReader(); mr != nil {
+		for {
+			p, err := mr.NextPart()
+			if err != nil {
+				break
+			}
+			collectAttachments(p, out)
+		}
+		return
+	}
+	att, ok := asAttachment(ent.Header)
+	if !ok {
+		return
+	}
+	att.data, _ = io.ReadAll(ent.Body) // transfer-decoded by go-message
+	att.size = int64(len(att.data))
+	*out = append(*out, att)
+}
+
+func asAttachment(h gomessage.Header) (attachment, bool) {
+	ct, ctParams, _ := h.ContentType()
+	disp, dispParams, _ := h.ContentDisposition()
+	filename := dispParams["filename"]
+	if filename == "" {
+		filename = ctParams["name"]
+	}
+	// The text/plain + text/html leaves are the body, not attachments — unless
+	// explicitly attached or named (e.g. an attached .txt).
+	bodyPart := ct == "text/plain" || ct == "text/html" || ct == ""
+	if bodyPart && disp != "attachment" && filename == "" {
+		return attachment{}, false
+	}
+	if dec, err := new(mime.WordDecoder).DecodeHeader(filename); err == nil && dec != "" {
+		filename = dec
+	}
+	if filename == "" {
+		filename = "(unnamed)"
+	}
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	return attachment{filename: filename, contentType: ct}, true
+}
+
+// humanSize renders a byte count as a short human string (1024-base, e.g.
+// "204 KB", "1.2 MB").
+func humanSize(n int64) string {
+	if n < 1024 {
+		return fmt.Sprintf("%d B", n)
+	}
+	val := float64(n)
+	units := []string{"KB", "MB", "GB", "TB", "PB"}
+	i := -1
+	for val >= 1024 && i < len(units)-1 {
+		val /= 1024
+		i++
+	}
+	s := strings.TrimSuffix(strconv.FormatFloat(val, 'f', 1, 64), ".0")
+	return s + " " + units[i]
 }
 
 // hiddenRcpts returns the envelope recipients not present in the header To/Cc —
