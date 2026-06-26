@@ -4,9 +4,11 @@
 // a bot token and an admin-API token, never the mail credentials (ADR 0002).
 //
 // It polls the admin queue and posts each new held message to the operator
-// chat with an [Approve] / [Reject permanent] / [Reject retryable] keyboard.
-// The button callbacks (the actual approve/reject) land in later increments
-// (#60); this increment is notify + de-dupe only.
+// chat with an [Approve] / [Reject permanent] / [Reject retryable] keyboard,
+// then applies the operator's decision via the admin API: Approve sends through
+// immediately; either Reject first prompts (force-reply) for a reason that
+// becomes the DSN bounce reason. Only the configured operator may decide
+// (ADR 0002) — both the button taps and the reason reply are gated to them.
 package telegram
 
 import (
@@ -39,8 +41,18 @@ type Client struct {
 	operatorID   int64
 	pollInterval time.Duration
 
-	mu     sync.Mutex
-	posted map[string]bool // message ids already sent to the operator
+	mu      sync.Mutex
+	posted  map[string]bool     // message ids already sent to the operator
+	pending map[int]rejectState // reject reason prompts awaiting the operator's reply, keyed by prompt message id
+}
+
+// rejectState remembers, for a reason force-reply prompt, which held message it
+// is for and where to write the result.
+type rejectState struct {
+	id         string
+	retryable  bool
+	origChatID int64
+	origMsgID  int
 }
 
 // New builds the Telegram client. The bot token is never logged; operatorID is
@@ -70,9 +82,13 @@ func New(token string, operatorID int64, pollInterval time.Duration, adminClient
 		operatorID:   operatorID,
 		pollInterval: pollInterval,
 		posted:       make(map[string]bool),
+		pending:      make(map[int]rejectState),
 	}
-	// [Approve] button. The reject buttons are wired in the next increment.
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbApprove, bot.MatchTypePrefix, c.handleApprove)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbRejectPerm, bot.MatchTypePrefix, c.handleRejectPermanent)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbRejectRetry, bot.MatchTypePrefix, c.handleRejectRetryable)
+	// The reason force-reply arrives as a normal reply message, not a callback.
+	b.RegisterHandlerMatchFunc(isReply, c.handleReasonReply)
 	return c, nil
 }
 
@@ -202,17 +218,100 @@ func (c *Client) denyCallback(ctx context.Context, b *bot.Bot, cq *models.Callba
 // finishDecision dismisses the button spinner and rewrites the notification to
 // the outcome, clearing the keyboard so it cannot be tapped again.
 func (c *Client) finishDecision(ctx context.Context, b *bot.Bot, cq *models.CallbackQuery, verb, id string, out admin.Outcome, err error) {
-	result := decisionResult(verb, id, out, err)
 	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cq.ID, Text: verb})
 	if msg := cq.Message.Message; msg != nil {
-		_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
-			ChatID:      msg.Chat.ID,
-			MessageID:   msg.ID,
-			Text:        result,
-			ReplyMarkup: models.InlineKeyboardMarkup{}, // clear the buttons
-		})
+		c.editResult(ctx, b, msg.Chat.ID, msg.ID, decisionResult(verb, id, out, err))
 	}
+}
+
+// editResult rewrites a notification to a final outcome line, clearing any
+// keyboard so it cannot be acted on again.
+func (c *Client) editResult(ctx context.Context, b *bot.Bot, chatID int64, msgID int, result string) {
+	_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:      chatID,
+		MessageID:   msgID,
+		Text:        result,
+		ReplyMarkup: models.InlineKeyboardMarkup{},
+	})
 	log.Printf("darbaan telegram: %s", result)
+}
+
+// handleRejectPermanent / handleRejectRetryable are the two reject buttons; both
+// prompt for a reason (the only difference is the retryable flag carried into
+// the DSN bounce).
+func (c *Client) handleRejectPermanent(ctx context.Context, b *bot.Bot, update *models.Update) {
+	c.promptReason(ctx, b, update.CallbackQuery, cbRejectPerm, false)
+}
+
+func (c *Client) handleRejectRetryable(ctx context.Context, b *bot.Bot, update *models.Update) {
+	c.promptReason(ctx, b, update.CallbackQuery, cbRejectRetry, true)
+}
+
+// promptReason verifies the operator, then sends a force-reply asking for the
+// rejection reason and remembers which message the eventual reply decides.
+func (c *Client) promptReason(ctx context.Context, b *bot.Bot, cq *models.CallbackQuery, prefix string, retryable bool) {
+	if !c.isOperator(cq) {
+		c.denyCallback(ctx, b, cq)
+		return
+	}
+	msg := cq.Message.Message
+	if msg == nil {
+		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cq.ID})
+		return
+	}
+	id := strings.TrimPrefix(cq.Data, prefix)
+	kind := "permanent"
+	if retryable {
+		kind = "retryable"
+	}
+	prompt, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: msg.Chat.ID,
+		Text:   fmt.Sprintf("Reason for the %s rejection of %s? Reply to this message.", kind, id),
+		ReplyMarkup: models.ForceReply{
+			ForceReply: true, InputFieldPlaceholder: "rejection reason", Selective: true,
+		},
+	})
+	if err != nil {
+		log.Printf("darbaan telegram: reject prompt %s: %v", id, err)
+		return
+	}
+	c.mu.Lock()
+	c.pending[prompt.ID] = rejectState{id: id, retryable: retryable, origChatID: msg.Chat.ID, origMsgID: msg.ID}
+	c.mu.Unlock()
+	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cq.ID, Text: "Reason?"})
+}
+
+// handleReasonReply consumes the operator's reply to a reason prompt and applies
+// the rejection. Gated to the operator and to a reply that matches a prompt we
+// sent — anyone else's message, or a reply to anything else, is ignored.
+func (c *Client) handleReasonReply(ctx context.Context, b *bot.Bot, update *models.Update) {
+	m := update.Message
+	if m.From == nil || m.From.ID != c.operatorID {
+		return
+	}
+	c.mu.Lock()
+	st, ok := c.pending[m.ReplyToMessage.ID]
+	if ok {
+		delete(c.pending, m.ReplyToMessage.ID)
+	}
+	c.mu.Unlock()
+	if !ok {
+		return
+	}
+	reason := strings.TrimSpace(m.Text)
+	if reason == "" {
+		reason = "(no reason given)"
+	}
+	out, err := c.admin.Reject(ctx, st.id, reason, st.retryable)
+	c.editResult(ctx, b, st.origChatID, st.origMsgID, decisionResult("Rejected", st.id, out, err))
+	// Tidy the prompt away (best-effort).
+	_, _ = b.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: m.Chat.ID, MessageID: m.ReplyToMessage.ID})
+}
+
+// isReply matches a message that is a reply (the reason force-reply arrives this
+// way).
+func isReply(u *models.Update) bool {
+	return u.Message != nil && u.Message.ReplyToMessage != nil
 }
 
 // decisionResult renders the operator-facing outcome line. A committed verdict
