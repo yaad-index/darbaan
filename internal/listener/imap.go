@@ -332,21 +332,26 @@ func matchSearch(seqNum uint32, m *inbound.Message, c *imap.SearchCriteria) bool
 	if c.Smaller != 0 && int64(len(m.Raw)) >= c.Smaller {
 		return false
 	}
-	low := bytes.ToLower(m.Raw)
-	for _, h := range c.Header {
-		if !bytes.Contains(low, bytes.ToLower([]byte(h.Key))) ||
-			(h.Value != "" && !bytes.Contains(low, bytes.ToLower([]byte(h.Value)))) {
-			return false
+	// Only lower-case the (potentially large) raw message when a content
+	// criterion actually needs it — the common SEARCH (ALL / flags / seq) skips
+	// this allocation entirely (#56).
+	if len(c.Header) > 0 || len(c.Text) > 0 || len(c.Body) > 0 {
+		low := bytes.ToLower(m.Raw)
+		for _, h := range c.Header {
+			if !bytes.Contains(low, bytes.ToLower([]byte(h.Key))) ||
+				(h.Value != "" && !bytes.Contains(low, bytes.ToLower([]byte(h.Value)))) {
+				return false
+			}
 		}
-	}
-	for _, t := range c.Text {
-		if !bytes.Contains(low, bytes.ToLower([]byte(t))) {
-			return false
+		for _, t := range c.Text {
+			if !bytes.Contains(low, bytes.ToLower([]byte(t))) {
+				return false
+			}
 		}
-	}
-	for _, b := range c.Body {
-		if !bytes.Contains(low, bytes.ToLower([]byte(b))) {
-			return false
+		for _, b := range c.Body {
+			if !bytes.Contains(low, bytes.ToLower([]byte(b))) {
+				return false
+			}
 		}
 	}
 	for i := range c.Not {
