@@ -4,7 +4,7 @@ Darbaan records its significant decisions as ADRs. Each file is one decision:
 its context, the decision, and the consequences. ADRs are immutable once
 Accepted — to change one, add a new ADR that supersedes it.
 
-These records (0001–0015) capture the v1 design, locked 2026-06-25 and amended
+These records (0001–0016) capture the v1 design, locked 2026-06-25 and amended
 through 2026-06-26 (maintainer review).
 
 | ADR | Title |
@@ -25,3 +25,4 @@ through 2026-06-26 (maintainer review).
 | [0013](0013-go-and-mit.md) | Go (latest stable), MIT license |
 | [0014](0014-prefer-established-libraries.md) | Prefer established libraries over reinventing |
 | [0015](0015-storage-abstraction.md) | Abstract storage behind interfaces; config-selected backend |
+| [0016](0016-store-canonical-translation-faces.md) | Store-canonical architecture; protocol faces are translation adapters |
