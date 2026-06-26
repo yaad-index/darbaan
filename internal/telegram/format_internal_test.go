@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -58,4 +59,29 @@ func TestIsOperatorGate(t *testing.T) {
 	assert.True(t, c.isOperator(&models.CallbackQuery{From: models.User{ID: 999}}))
 	assert.False(t, c.isOperator(&models.CallbackQuery{From: models.User{ID: 111}})) // not the operator
 	assert.False(t, c.isOperator(nil))
+}
+
+func TestIsReply(t *testing.T) {
+	assert.True(t, isReply(&models.Update{Message: &models.Message{ReplyToMessage: &models.Message{ID: 1}}}))
+	assert.False(t, isReply(&models.Update{Message: &models.Message{}})) // not a reply
+	assert.False(t, isReply(&models.Update{}))                           // no message
+}
+
+// A reason reply is acted on only when it's from the operator AND replies to a
+// prompt we sent. The other paths must return before any admin/Telegram call,
+// leaving the pending entry intact.
+func TestHandleReasonReplyGate(t *testing.T) {
+	c, err := New("123:fake", 999, 0, admin.NewClient("127.0.0.1:1", "t"))
+	require.NoError(t, err)
+	c.pending[55] = rejectState{id: "7"}
+
+	c.handleReasonReply(context.Background(), c.bot, &models.Update{Message: &models.Message{
+		From: &models.User{ID: 111}, ReplyToMessage: &models.Message{ID: 55}, Text: "x", // not the operator
+	}})
+	assert.Contains(t, c.pending, 55)
+
+	c.handleReasonReply(context.Background(), c.bot, &models.Update{Message: &models.Message{
+		From: &models.User{ID: 999}, ReplyToMessage: &models.Message{ID: 4242}, Text: "x", // unknown prompt
+	}})
+	assert.Contains(t, c.pending, 55)
 }
