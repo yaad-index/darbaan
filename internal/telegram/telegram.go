@@ -372,6 +372,11 @@ func (c *Client) promptReason(ctx context.Context, b *bot.Bot, cq *models.Callba
 	c.pending[prompt.ID] = rejectState{id: id, retryable: retryable, origChatID: msg.Chat.ID, origMsgID: msg.ID, at: time.Now()}
 	c.mu.Unlock()
 	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cq.ID, Text: "Reason?"})
+	// Strip the keyboard on the original notification and show an interim state,
+	// so a tapped-but-unfinished reject is visibly distinct from untouched
+	// messages when several are open. handleReasonReply overwrites this with the
+	// final outcome once the reason arrives.
+	c.editResult(ctx, b, msg.Chat.ID, msg.ID, fmt.Sprintf("⏳ Rejecting %s — awaiting your reason", id))
 }
 
 // prunePendingLocked drops reason prompts older than pendingTTL — those the
