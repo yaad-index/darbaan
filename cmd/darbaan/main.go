@@ -74,7 +74,8 @@ type CLI struct {
 
 	AgentUsername string `name:"agent-username" help:"The agent's Darbaan SMTP username. The password is supplied out-of-band via DARBAAN_AGENT_PASS, never inlined in config (ADR 0012)."`
 
-	TelegramOperatorID int64 `name:"telegram-operator-id" help:"Telegram chat/user id permitted to approve/reject (only this id may act). Bot token via DARBAAN_TELEGRAM_TOKEN."`
+	TelegramOperatorID   int64         `name:"telegram-operator-id" help:"Telegram chat/user id permitted to approve/reject (only this id may act). Bot token via DARBAAN_TELEGRAM_TOKEN."`
+	TelegramPollInterval time.Duration `name:"telegram-poll-interval" default:"10s" help:"How often the Telegram client polls the admin queue for new held messages."`
 
 	ApprovalStrict []string `name:"approval-strict" default:"manual" help:"Approver chain for the strict path."`
 	ApprovalLight  []string `name:"approval-light" default:"manual" help:"Approver chain for the light path."`
@@ -158,7 +159,7 @@ func (*TelegramCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	tc, err := telegram.New(os.Getenv("DARBAAN_TELEGRAM_TOKEN"), cli.TelegramOperatorID, adminClient)
+	tc, err := telegram.New(os.Getenv("DARBAAN_TELEGRAM_TOKEN"), cli.TelegramOperatorID, cli.TelegramPollInterval, adminClient)
 	if err != nil {
 		return err
 	}
