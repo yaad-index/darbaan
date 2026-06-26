@@ -37,13 +37,13 @@ func parseParts(t *testing.T, raw []byte) map[string]string {
 }
 
 func TestGeneratePermanent(t *testing.T) {
-	orig := sluice.Message{Agent: "agent", From: "sender@local", Raw: []byte("Subject: hi\r\n\r\nbody-marker\r\n")}
+	orig := sluice.Message{Agent: "agent", From: "sender@local", Rcpt: []string{"dest@example.test"}, Raw: []byte("Subject: hi\r\n\r\nbody-marker\r\n")}
 	b, err := bounce.Generate(orig, "refused by policy", false, "darbaan.test")
 	require.NoError(t, err)
 
 	assert.Equal(t, "agent", b.Owner)
 	assert.Equal(t, "MAILER-DAEMON@darbaan.test", b.From)
-	assert.Equal(t, "sender@local", b.To)
+	assert.Equal(t, "sender@local", b.To) // bounce returns to the original sender
 
 	parts := parseParts(t, b.Raw)
 	require.Contains(t, parts, "text/plain")
@@ -53,7 +53,21 @@ func TestGeneratePermanent(t *testing.T) {
 	assert.Contains(t, parts["text/plain"], "refused by policy")
 	assert.Contains(t, parts["message/delivery-status"], "Status: 5.7.1")
 	assert.Contains(t, parts["message/delivery-status"], "Action: failed")
+	// Final-Recipient is the INTENDED recipient, not the sender (#54, RFC 3464).
+	assert.Contains(t, parts["message/delivery-status"], "Final-Recipient: rfc822; dest@example.test")
+	assert.NotContains(t, parts["message/delivery-status"], "Final-Recipient: rfc822; sender@local")
 	assert.Contains(t, parts["message/rfc822"], "body-marker") // original attached intact
+}
+
+func TestGenerateMultiRecipient(t *testing.T) {
+	orig := sluice.Message{Agent: "agent", From: "sender@local", Rcpt: []string{"a@x.test", "b@x.test"}, Raw: []byte("x")}
+	b, err := bounce.Generate(orig, "no", false, "darbaan.test")
+	require.NoError(t, err)
+
+	ds := parseParts(t, b.Raw)["message/delivery-status"]
+	// One Final-Recipient group per intended recipient (RFC 3464).
+	assert.Contains(t, ds, "Final-Recipient: rfc822; a@x.test")
+	assert.Contains(t, ds, "Final-Recipient: rfc822; b@x.test")
 }
 
 func TestGenerateTransient(t *testing.T) {

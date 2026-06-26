@@ -42,7 +42,15 @@ func Generate(orig sluice.Message, reason string, retryable bool, domain string)
 		status, disposition = "4.7.1", "transient"
 	}
 	from := "MAILER-DAEMON@" + domain
-	to := orig.From
+	to := orig.From // the bounce goes back to the original sender
+
+	// Final-Recipient names the INTENDED recipient(s) — the addresses delivery
+	// failed for (RFC 3464), not the sender. Fall back to the sender only if the
+	// envelope had no recipients, so the DSN is never recipient-less.
+	rcpts := orig.Rcpt
+	if len(rcpts) == 0 {
+		rcpts = []string{to}
+	}
 
 	var buf bytes.Buffer
 
@@ -62,7 +70,7 @@ func Generate(orig sluice.Message, reason string, retryable bool, domain string)
 	if err := writeText(mw, domain, reason, disposition, status, retryable); err != nil {
 		return Bounce{}, err
 	}
-	if err := writeDeliveryStatus(mw, domain, to, status, reason); err != nil {
+	if err := writeDeliveryStatus(mw, domain, rcpts, status, reason); err != nil {
 		return Bounce{}, err
 	}
 	if err := writeOriginal(mw, orig.Raw); err != nil {
@@ -98,22 +106,27 @@ func writeText(mw *message.Writer, domain, reason, disposition, status string, r
 	return pw.Close()
 }
 
-func writeDeliveryStatus(mw *message.Writer, domain, to, status, reason string) error {
+func writeDeliveryStatus(mw *message.Writer, domain string, rcpts []string, status, reason string) error {
 	var h message.Header
 	h.SetContentType("message/delivery-status", nil)
 	pw, err := mw.CreatePart(h)
 	if err != nil {
 		return fmt.Errorf("bounce: delivery-status part: %w", err)
 	}
-	// Per-message fields, blank line, then per-recipient fields (RFC 3464).
-	body := fmt.Sprintf(
-		"Reporting-MTA: dns; %s\r\n\r\n"+
-			"Final-Recipient: rfc822; %s\r\n"+
-			"Action: failed\r\n"+
-			"Status: %s\r\n"+
-			"Diagnostic-Code: X-Darbaan; %s\r\n",
-		domain, to, status, reason)
-	if _, err := pw.Write([]byte(body)); err != nil {
+	// Per-message fields, then one per-recipient group for each INTENDED
+	// recipient — the address delivery failed for, not the bounce recipient
+	// (RFC 3464). Recipients are CR/LF-sanitized against header injection.
+	var b strings.Builder
+	fmt.Fprintf(&b, "Reporting-MTA: dns; %s\r\n", domain)
+	for _, rcpt := range rcpts {
+		fmt.Fprintf(&b,
+			"\r\nFinal-Recipient: rfc822; %s\r\n"+
+				"Action: failed\r\n"+
+				"Status: %s\r\n"+
+				"Diagnostic-Code: X-Darbaan; %s\r\n",
+			sanitize(rcpt), status, reason)
+	}
+	if _, err := pw.Write([]byte(b.String())); err != nil {
 		return fmt.Errorf("bounce: write delivery-status: %w", err)
 	}
 	return pw.Close()
