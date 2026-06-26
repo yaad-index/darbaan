@@ -148,16 +148,36 @@ func (c *Client) poll(ctx context.Context) {
 }
 
 func (c *Client) notify(ctx context.Context, m sluice.Meta) error {
-	// Fetch the raw message for the body so the operator can review what they're
-	// approving. De-dupe means this is one fetch per message. A fetch failure
-	// still notifies, with headers only.
+	// Fetch the raw message for the body + display addresses so the operator can
+	// review what they're approving. De-dupe means one fetch per message; a
+	// fetch failure still notifies, falling back to the envelope values.
 	raw, err := c.admin.Show(ctx, m.ID)
 	if err != nil {
 		log.Printf("darbaan telegram: fetch body %s: %v", m.ID, err)
 	}
+	from, to, headerSet, parsed := headerAddrs(raw)
+	if from == "" {
+		from = m.From
+	}
+	if to == "" {
+		to = strings.Join(m.Rcpt, ", ")
+	}
+	n := notification{
+		id:      m.ID,
+		from:    from,
+		to:      to,
+		subject: displaySubject(m.Subject),
+		size:    m.Size,
+		body:    bodyText(raw),
+	}
+	// Surface recipients that deliver but aren't visible in the headers (Bcc),
+	// but only when we could actually read the headers.
+	if parsed {
+		n.hidden = hiddenRcpts(m.Rcpt, headerSet)
+	}
 	_, err = c.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      c.operatorID,
-		Text:        formatNotification(m, bodyText(raw)),
+		Text:        formatNotification(n),
 		ReplyMarkup: decisionKeyboard(m.ID),
 	})
 	return err
@@ -193,28 +213,42 @@ func (c *Client) markPosted(id string) {
 	c.posted[id] = true
 }
 
-// formatPending renders the operator-facing notification (plain text — no parse
-// mode, so addresses and subjects never need markdown escaping). Subject comes
-// from the queue listing (sluice.Meta), already parsed by the store.
-func formatPending(m sluice.Meta) string {
-	subject := m.Subject
-	if strings.TrimSpace(subject) == "" {
-		subject = "(no subject)"
+// notification is the display-ready content of an operator notification.
+type notification struct {
+	id      string
+	from    string // header display form, falling back to the envelope sender
+	to      string // header To/Cc display form, falling back to the envelope rcpts
+	subject string
+	size    int
+	hidden  []string // envelope recipients not in the headers (Bcc)
+	body    string
+}
+
+func displaySubject(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "(no subject)"
 	}
-	return fmt.Sprintf("Held outbound message\nid: %s\nfrom: %s\nto: %s\nsubject: %s\nsize: %d bytes",
-		m.ID, m.From, strings.Join(m.Rcpt, ", "), subject, m.Size)
+	return s
 }
 
 // maxNotificationRunes keeps the notification within Telegram's 4096-char cap
 // with headroom for the keyboard and the truncation marker.
 const maxNotificationRunes = 3900
 
-// formatNotification renders the headers followed by the message body so the
-// operator reviews the content before deciding. The body is truncated
-// (rune-safe) with a marker when the whole notification would exceed the cap.
-func formatNotification(m sluice.Meta, body string) string {
-	header := formatPending(m)
-	if body == "" {
+// formatNotification renders the headers (human address forms, plus a flag for
+// any hidden recipient) followed by the message body so the operator reviews
+// the content before deciding. The body is truncated (rune-safe) with a marker
+// when the whole notification would exceed the cap. Plain text — no parse mode,
+// so addresses and subjects never need markdown escaping.
+func formatNotification(n notification) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Held outbound message\nid: %s\nfrom: %s\nto: %s\nsubject: %s\nsize: %d bytes",
+		n.id, n.from, n.to, n.subject, n.size)
+	if len(n.hidden) > 0 {
+		fmt.Fprintf(&b, "\n(!) also delivering to (not in headers): %s", strings.Join(n.hidden, ", "))
+	}
+	header := b.String()
+	if n.body == "" {
 		return header + "\n\n(no text body)"
 	}
 	prefix := header + "\n\n--- body ---\n"
@@ -222,10 +256,10 @@ func formatNotification(m sluice.Meta, body string) string {
 	if avail < 0 {
 		avail = 0
 	}
-	if br := []rune(body); len(br) > avail {
-		return prefix + string(br[:avail]) + fmt.Sprintf("\n...(truncated, %d bytes)", len(body))
+	if br := []rune(n.body); len(br) > avail {
+		return prefix + string(br[:avail]) + fmt.Sprintf("\n...(truncated, %d bytes)", len(n.body))
 	}
-	return prefix + body
+	return prefix + n.body
 }
 
 // decisionKeyboard lays in all three decision buttons. The callbacks are wired

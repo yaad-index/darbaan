@@ -11,20 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/yaad-index/darbaan/internal/admin"
-	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
-func TestFormatPending(t *testing.T) {
-	m := sluice.Meta{ID: "7", From: "a@x.test", Rcpt: []string{"b@y.test", "c@y.test"}, Subject: "deploy keys", Size: 2048}
-	out := formatPending(m)
-	assert.Contains(t, out, "id: 7")
-	assert.Contains(t, out, "from: a@x.test")
-	assert.Contains(t, out, "to: b@y.test, c@y.test")
-	assert.Contains(t, out, "subject: deploy keys")
-	assert.Contains(t, out, "size: 2048 bytes")
-
-	// An empty subject reads as "(no subject)", never blank.
-	assert.Contains(t, formatPending(sluice.Meta{ID: "8", Subject: "  "}), "subject: (no subject)")
+func TestDisplaySubject(t *testing.T) {
+	assert.Equal(t, "deploy keys", displaySubject("deploy keys"))
+	assert.Equal(t, "(no subject)", displaySubject("  "))
+	assert.Equal(t, "(no subject)", displaySubject(""))
 }
 
 func TestDecisionKeyboard(t *testing.T) {

@@ -37,22 +37,44 @@ func TestBodyTextNoTextPart(t *testing.T) {
 }
 
 func TestFormatNotificationBody(t *testing.T) {
-	m := sluice.Meta{ID: "7", From: "a@x", Rcpt: []string{"b@y"}, Subject: "s", Size: 10}
-
-	out := formatNotification(m, "the message body")
+	out := formatNotification(notification{id: "7", from: "Alice <a@x>", to: "Bob <b@y>", subject: "s", size: 10, body: "the message body"})
+	assert.Contains(t, out, "from: Alice <a@x>")
+	assert.Contains(t, out, "to: Bob <b@y>")
 	assert.Contains(t, out, "subject: s")
 	assert.Contains(t, out, "--- body ---")
 	assert.Contains(t, out, "the message body")
 
-	assert.Contains(t, formatNotification(m, ""), "(no text body)")
+	assert.Contains(t, formatNotification(notification{id: "7", body: ""}), "(no text body)")
 }
 
 func TestFormatNotificationTruncates(t *testing.T) {
-	m := sluice.Meta{ID: "7", Subject: "s"}
-	big := strings.Repeat("x", 8000)
-	out := formatNotification(m, big)
+	out := formatNotification(notification{id: "7", subject: "s", body: strings.Repeat("x", 8000)})
 	assert.LessOrEqual(t, len([]rune(out)), maxNotificationRunes)
 	assert.Contains(t, out, "...(truncated, 8000 bytes)")
+}
+
+func TestFormatNotificationHidden(t *testing.T) {
+	out := formatNotification(notification{id: "7", to: "Bob <b@y>", hidden: []string{"secret@z"}, body: "x"})
+	assert.Contains(t, out, "(!) also delivering to (not in headers): secret@z")
+}
+
+func TestHeaderAddrs(t *testing.T) {
+	raw := []byte("From: Alice <a@x.test>\r\nTo: Bob <b@y.test>\r\nCc: c@z.test\r\nSubject: s\r\n\r\nbody")
+	from, to, set, parsed := headerAddrs(raw)
+	assert.True(t, parsed)
+	assert.Equal(t, "Alice <a@x.test>", from)
+	assert.Equal(t, "Bob <b@y.test>, c@z.test", to)
+	assert.True(t, set["b@y.test"] && set["c@z.test"])
+
+	_, _, _, parsed = headerAddrs(nil)
+	assert.False(t, parsed) // no false-flagging when unparseable
+}
+
+func TestHiddenRcpts(t *testing.T) {
+	set := map[string]bool{"b@y.test": true}
+	// secret@z is in the envelope but not the headers — a Bcc the operator must see.
+	assert.Equal(t, []string{"secret@z.test"}, hiddenRcpts([]string{"b@y.test", "secret@z.test"}, set))
+	assert.Empty(t, hiddenRcpts([]string{"b@y.test"}, set))
 }
 
 func TestPrunePosted(t *testing.T) {
