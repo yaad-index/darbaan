@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/yaad-index/darbaan/internal/approver"
+	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
 	"github.com/yaad-index/darbaan/internal/policy"
 	"github.com/yaad-index/darbaan/internal/sluice"
@@ -17,11 +18,13 @@ import (
 // The manual approver is compiled in via approvers.go (default build), so the
 // strict chain resolves and these tests exercise the real wiring.
 
-func newSeededSluice(t *testing.T) (*sluice.Sluice, string) {
+func newSeededSluice(t *testing.T) (sluice.MessageStore, string) {
 	t.Helper()
-	q, err := sluice.Open(filepath.Join(t.TempDir(), "sluice.db"))
+	al, err := audit.New("null", "")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = q.Close() })
+	q, err := sluice.New("bbolt", filepath.Join(t.TempDir(), "sluice.db"), al)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = q.Close(); _ = al.Close() })
 	m, err := q.Enqueue(sluice.Submission{Agent: "agent", From: "a@local", Rcpt: []string{"b@x.test"}, Raw: []byte("orig")})
 	require.NoError(t, err)
 	return q, m.ID
@@ -42,7 +45,6 @@ func TestApproveReachesStubSenderAndNothingLeaves(t *testing.T) {
 	assert.Equal(t, "manual", out.DecidedBy)
 	// The stub Sender ran but nothing left: the send error is recorded, not dropped.
 	assert.Equal(t, backend.ErrSendPending.Error(), out.SendErr)
-	require.NoError(t, q.VerifyAudit())
 }
 
 func TestRejectRecordsReason(t *testing.T) {
@@ -54,7 +56,6 @@ func TestRejectRecordsReason(t *testing.T) {
 
 	assert.Equal(t, sluice.StatusRejected, out.Status)
 	assert.Equal(t, "smells like exfiltration", out.Reason)
-	require.NoError(t, q.VerifyAudit())
 }
 
 func TestNoDecisionLeavesPending(t *testing.T) {

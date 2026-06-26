@@ -9,42 +9,41 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-func openDB(t *testing.T) *bbolt.DB {
+func newBboltLog(t *testing.T) AuditLog {
 	t.Helper()
-	db, err := bbolt.Open(filepath.Join(t.TempDir(), "audit.db"), 0o600, nil)
+	l, err := New("bbolt", filepath.Join(t.TempDir(), "audit.db"))
 	require.NoError(t, err)
-	require.NoError(t, db.Update(EnsureBucket))
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	t.Cleanup(func() { _ = l.Close() })
+	return l
 }
 
-func TestChainVerifies(t *testing.T) {
-	db := openDB(t)
-	require.NoError(t, db.Update(func(tx *bbolt.Tx) error {
-		for i := 0; i < 3; i++ {
-			if _, err := Append(tx, Record{Event: "enqueue", Agent: "agent"}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}))
-	require.NoError(t, db.View(Verify))
+func TestNullAuditRecordsNothing(t *testing.T) {
+	l, err := New("null", "")
+	require.NoError(t, err)
+	require.NoError(t, l.Append(Record{Event: "enqueue"}))
+	require.NoError(t, l.Verify())
+	require.NoError(t, l.Close())
 }
 
-func TestEmptyLogVerifies(t *testing.T) {
-	db := openDB(t)
-	require.NoError(t, db.View(Verify))
+func TestBboltChainVerifies(t *testing.T) {
+	l := newBboltLog(t)
+	for i := 0; i < 3; i++ {
+		require.NoError(t, l.Append(Record{Event: "enqueue", Agent: "agent"}))
+	}
+	require.NoError(t, l.Verify())
 }
 
-func TestTamperDetected(t *testing.T) {
-	db := openDB(t)
-	require.NoError(t, db.Update(func(tx *bbolt.Tx) error {
-		_, err := Append(tx, Record{Event: "enqueue", Agent: "agent"})
-		return err
-	}))
+func TestBboltEmptyVerifies(t *testing.T) {
+	require.NoError(t, newBboltLog(t).Verify())
+}
+
+func TestBboltTamperDetected(t *testing.T) {
+	l := newBboltLog(t)
+	require.NoError(t, l.Append(Record{Event: "enqueue", Agent: "agent"}))
 
 	// Mutate the stored entry's record but leave its recorded hash untouched.
-	require.NoError(t, db.Update(func(tx *bbolt.Tx) error {
+	bl := l.(*bboltLog)
+	require.NoError(t, bl.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketName)
 		k, v := b.Cursor().First()
 		var e Entry
@@ -55,5 +54,21 @@ func TestTamperDetected(t *testing.T) {
 		return b.Put(k, enc)
 	}))
 
-	require.Error(t, db.View(Verify))
+	require.Error(t, l.Verify())
+}
+
+func TestUnknownTypeErrors(t *testing.T) {
+	_, err := New("does-not-exist", "")
+	require.Error(t, err)
+}
+
+func TestRegisteredListsBuiltins(t *testing.T) {
+	r := Registered()
+	require.Contains(t, r, "null")
+	require.Contains(t, r, "bbolt")
+}
+
+func TestBboltRequiresPath(t *testing.T) {
+	_, err := New("bbolt", "")
+	require.Error(t, err)
 }
