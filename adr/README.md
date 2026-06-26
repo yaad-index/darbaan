@@ -26,3 +26,4 @@ through 2026-06-26 (maintainer review).
 | [0014](0014-prefer-established-libraries.md) | Prefer established libraries over reinventing |
 | [0015](0015-storage-abstraction.md) | Abstract storage behind interfaces; config-selected backend |
 | [0016](0016-store-canonical-translation-faces.md) | Store-canonical architecture; protocol faces are translation adapters |
+| [0017](0017-interfaces-as-clients-over-local-api.md) | Admin and approval interfaces are separate host processes over the local API |
