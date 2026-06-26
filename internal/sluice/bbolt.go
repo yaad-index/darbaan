@@ -1,31 +1,48 @@
 package sluice
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.etcd.io/bbolt"
 
 	"github.com/yaad-index/darbaan/internal/audit"
+	"github.com/yaad-index/darbaan/internal/blobstore"
 	"github.com/yaad-index/darbaan/internal/seqkey"
 )
 
-// bucketMessages holds the held messages, keyed by big-endian sequence so a
-// cursor iterates them in receive order.
+// bucketMessages holds the held messages' metadata, keyed by big-endian sequence
+// so a cursor iterates them in receive order. The raw content lives in the blob
+// store, not here (ADR 0018).
 var bucketMessages = []byte("messages")
 
 func init() {
 	Register("bbolt", newBbolt)
 }
 
-// bboltStore is the bbolt-backed MessageStore. It commits messages to its own
-// database, then writes a best-effort audit entry to the (separate) audit log.
+// stored is the bbolt record: message metadata plus the tiering fields. The raw
+// bytes live in a blob (Blobbed=true; Message.Raw is nil here) — except for
+// legacy records written before ADR 0018, which have Blobbed=false and the raw
+// inline in Message.Raw. Subject and Size are persisted so List never reads a
+// blob; legacy records lack them and derive from the inline raw instead.
+type stored struct {
+	Message
+	Subject string `json:"subject,omitempty"`
+	Size    int    `json:"size,omitempty"`
+	Blobbed bool   `json:"blobbed,omitempty"`
+}
+
+// bboltStore is the bbolt-backed MessageStore. Metadata lives in its database;
+// raw content lives in a per-store blob directory. It writes a best-effort audit
+// entry to the (separate) audit log after each commit.
 type bboltStore struct {
 	db    *bbolt.DB
+	blobs *blobstore.Store
 	audit audit.AuditLog
 }
 
@@ -44,7 +61,15 @@ func newBbolt(path string, al audit.AuditLog) (MessageStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("sluice: init bucket: %w", err)
 	}
-	return &bboltStore{db: db, audit: al}, nil
+	// Per-store blob directory (e.g. <data>/blobs/sluice/), namespaced by the db
+	// name so stores never collide on a shared id space.
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	blobs, err := blobstore.New(filepath.Join(filepath.Dir(path), "blobs", base))
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("sluice: open blob store: %w", err)
+	}
+	return &bboltStore{db: db, blobs: blobs, audit: al}, nil
 }
 
 func (s *bboltStore) Close() error { return s.db.Close() }
@@ -77,11 +102,13 @@ func (s *bboltStore) Enqueue(sub Submission) (Message, error) {
 			ReceivedAt: time.Now().UTC(),
 			Status:     StatusPending,
 		}
-		enc, err := json.Marshal(msg)
-		if err != nil {
-			return err
+		// Content tier first: the blob is durable before the referencing metadata
+		// commits (ADR 0018), so a crash can only orphan a blob, never dangle a
+		// metadata pointer.
+		if err := s.blobs.Put(msg.ID, sub.Raw); err != nil {
+			return fmt.Errorf("write content: %w", err)
 		}
-		return b.Put(seqkey.Encode(seq), enc)
+		return putStored(tx, seqkey.Encode(seq), storedFrom(msg))
 	})
 	if err != nil {
 		return Message{}, fmt.Errorf("sluice: enqueue: %w", err)
@@ -94,19 +121,24 @@ func (s *bboltStore) List() ([]Meta, error) {
 	var metas []Meta
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		return tx.Bucket(bucketMessages).ForEach(func(_, v []byte) error {
-			var m Message
-			if err := json.Unmarshal(v, &m); err != nil {
+			var rec stored
+			if err := json.Unmarshal(v, &rec); err != nil {
 				return err
 			}
+			subject, size := rec.Subject, rec.Size
+			if !rec.Blobbed { // legacy inline record: derive (no persisted subject/size)
+				subject = subjectFromRaw(rec.Raw)
+				size = len(rec.Raw)
+			}
 			metas = append(metas, Meta{
-				ID:         m.ID,
-				Agent:      m.Agent,
-				From:       m.From,
-				Rcpt:       m.Rcpt,
-				Subject:    subjectFromRaw(m.Raw),
-				Size:       len(m.Raw),
-				ReceivedAt: m.ReceivedAt,
-				Status:     m.Status,
+				ID:         rec.ID,
+				Agent:      rec.Agent,
+				From:       rec.From,
+				Rcpt:       rec.Rcpt,
+				Subject:    subject,
+				Size:       size,
+				ReceivedAt: rec.ReceivedAt,
+				Status:     rec.Status,
 			})
 			return nil
 		})
@@ -118,23 +150,25 @@ func (s *bboltStore) List() ([]Meta, error) {
 }
 
 func (s *bboltStore) Get(id string) (Message, error) {
-	var msg Message
+	var rec stored
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		var e error
-		msg, _, e = loadMessage(tx, id)
+		rec, _, e = loadStored(tx, id)
 		return e
 	})
 	if err != nil {
 		return Message{}, err
 	}
-	return msg, nil
+	return s.withRaw(rec)
 }
 
 func (s *bboltStore) Approve(id, decidedBy string, released []byte) (Message, error) {
 	return s.transitionFromPending(id, "approve", decidedBy, func(m *Message) {
 		m.Status = StatusApproved
 		m.DecidedBy = decidedBy
-		if released != nil && !bytes.Equal(released, m.Raw) {
+		// An amended body (ADR 0004) is recorded inline; it is nil in v1 (no
+		// amendment flow) — tiering Released pairs with that feature (follow-up).
+		if len(released) > 0 {
 			m.Released = released
 		}
 	})
@@ -153,18 +187,20 @@ func (s *bboltStore) RecordSendAttempt(id string, sendErr error) (Message, error
 	detail := "sent"
 	var out Message
 	err := s.db.Update(func(tx *bbolt.Tx) error {
-		m, key, err := loadMessage(tx, id)
+		rec, key, err := loadStored(tx, id)
 		if err != nil {
 			return err
 		}
 		if sendErr != nil {
-			m.SendErr = sendErr.Error() // stays approved for a manual re-send
+			rec.SendErr = sendErr.Error() // stays approved for a manual re-send
 		} else {
-			m.Status = StatusSent // delivered upstream
-			m.SendErr = ""
+			rec.Status = StatusSent // delivered upstream
+			rec.SendErr = ""
 		}
-		out = m
-		return putMessage(tx, key, m)
+		// The caller uses only the updated status; the raw body is not
+		// reassembled here, so a send never re-reads a (possibly large) blob.
+		out = rec.Message
+		return putStored(tx, key, rec)
 	})
 	if err != nil {
 		return Message{}, fmt.Errorf("sluice: record send attempt: %w", err)
@@ -178,47 +214,77 @@ func (s *bboltStore) RecordSendAttempt(id string, sendErr error) (Message, error
 
 // transitionFromPending commits a status change to a pending message, then
 // writes a best-effort audit entry. It errors if the message is not pending, so
-// a verdict can never be applied twice.
+// a verdict can never be applied twice. The returned message includes the raw
+// body (the approve/reject callers send it / attach it to a bounce).
 func (s *bboltStore) transitionFromPending(id, event, detail string, mutate func(*Message)) (Message, error) {
-	var out Message
+	var rec stored
 	err := s.db.Update(func(tx *bbolt.Tx) error {
-		m, key, err := loadMessage(tx, id)
+		r, key, err := loadStored(tx, id)
 		if err != nil {
 			return err
 		}
-		if m.Status != StatusPending {
-			return fmt.Errorf("%w: %s is %s", ErrNotPending, id, m.Status)
+		if r.Status != StatusPending {
+			return fmt.Errorf("%w: %s is %s", ErrNotPending, id, r.Status)
 		}
-		mutate(&m)
-		out = m
-		return putMessage(tx, key, m)
+		mutate(&r.Message)
+		rec = r
+		return putStored(tx, key, r)
 	})
 	if err != nil {
 		return Message{}, fmt.Errorf("sluice: %s: %w", event, err)
+	}
+	out, err := s.withRaw(rec)
+	if err != nil {
+		return Message{}, err
 	}
 	s.writeAudit(audit.Record{Event: event, Agent: out.Agent, MessageID: id, Detail: detail})
 	return out, nil
 }
 
-func loadMessage(tx *bbolt.Tx, id string) (Message, []byte, error) {
+// withRaw reassembles the full message: metadata from the record plus the raw
+// content from the blob (or, for a legacy record, the inline raw it already
+// carries).
+func (s *bboltStore) withRaw(rec stored) (Message, error) {
+	msg := rec.Message
+	if rec.Blobbed {
+		raw, err := s.blobs.Get(msg.ID)
+		if err != nil {
+			return Message{}, fmt.Errorf("sluice: load content %s: %w", msg.ID, err)
+		}
+		msg.Raw = raw
+	}
+	return msg, nil
+}
+
+// storedFrom builds a blobbed metadata record from a full message: the raw bytes
+// are dropped (they live in the blob) and subject/size are persisted so List
+// never needs the blob.
+func storedFrom(m Message) stored {
+	subject := subjectFromRaw(m.Raw)
+	size := len(m.Raw)
+	m.Raw = nil
+	return stored{Message: m, Subject: subject, Size: size, Blobbed: true}
+}
+
+func loadStored(tx *bbolt.Tx, id string) (stored, []byte, error) {
 	seq, err := strconv.ParseUint(id, 10, 64)
 	if err != nil {
-		return Message{}, nil, fmt.Errorf("%w: invalid id %q", ErrNotFound, id)
+		return stored{}, nil, fmt.Errorf("%w: invalid id %q", ErrNotFound, id)
 	}
 	key := seqkey.Encode(seq)
 	v := tx.Bucket(bucketMessages).Get(key)
 	if v == nil {
-		return Message{}, nil, ErrNotFound
+		return stored{}, nil, ErrNotFound
 	}
-	var m Message
-	if err := json.Unmarshal(v, &m); err != nil {
-		return Message{}, nil, err
+	var rec stored
+	if err := json.Unmarshal(v, &rec); err != nil {
+		return stored{}, nil, err
 	}
-	return m, key, nil
+	return rec, key, nil
 }
 
-func putMessage(tx *bbolt.Tx, key []byte, m Message) error {
-	enc, err := json.Marshal(m)
+func putStored(tx *bbolt.Tx, key []byte, rec stored) error {
+	enc, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
