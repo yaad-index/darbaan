@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.0](https://github.com/yaad-index/darbaan/compare/v0.1.0...v0.2.0) (2026-06-26)
+
+
+### Features
+
+* **inbound:** tier raw content to filesystem blobs (ADR 0018) ([#82](https://github.com/yaad-index/darbaan/issues/82)) ([e2a8105](https://github.com/yaad-index/darbaan/commit/e2a81052dc3dd8ee674129fbce578537b4278e34)), closes [#78](https://github.com/yaad-index/darbaan/issues/78)
+* **sluice:** tier raw content to filesystem blobs (ADR 0018) ([#80](https://github.com/yaad-index/darbaan/issues/80)) ([ed2a92d](https://github.com/yaad-index/darbaan/commit/ed2a92d639cafc951c4318b72f5dc19d553021a3))
+* **telegram:** show + upload trapped attachments for operator review ([#76](https://github.com/yaad-index/darbaan/issues/76)) ([20e2060](https://github.com/yaad-index/darbaan/commit/20e206005a4c9fc52cc9cae11abac48c65eaa8d4))
+
+
+### Bug Fixes
+
+* **telegram:** thread attachment uploads under their decision message ([#81](https://github.com/yaad-index/darbaan/issues/81)) ([fae208c](https://github.com/yaad-index/darbaan/commit/fae208c09bc1c48057fd9a2f465cf440e820d635))
+
 ## 0.1.0 (2026-06-26)
 
 
