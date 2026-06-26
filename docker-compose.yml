@@ -1,0 +1,51 @@
+# Ready-to-run Darbaan.
+#
+#   1. cp .env.example .env   and fill DARBAAN_AGENT_PASS
+#   2. put TLS cert+key in ./secrets/tls/ and an ed25519 DKIM key in ./secrets/dkim/
+#   3. docker compose up -d
+#
+# Safe by default: sender-type=stub, so the container sends NOTHING until you set
+# DARBAAN_SENDER_TYPE=smtp + DARBAAN_SMTP_PASSWORD (a Gmail app password). Ports
+# bind to 127.0.0.1 only — Darbaan is a local-trusted-host service, not
+# internet-facing (ADR 0012). Secrets come from .env / mounts, never the image.
+
+services:
+  darbaan:
+    build: .
+    # image: ghcr.io/yaad-index/darbaan:latest   # once a published image exists
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1465:1465"   # SMTP submission (agent -> Darbaan)
+      - "127.0.0.1:1143:1143"   # IMAP read (agent reads its bounces)
+    environment:
+      # Agent credential. Username here, password from .env.
+      DARBAAN_AGENT_USERNAME: "agent"
+      DARBAAN_AGENT_PASS: "${DARBAAN_AGENT_PASS:?set DARBAAN_AGENT_PASS in .env}"
+
+      # TLS — secure by default. Mount your cert + key (see volumes) and the
+      # agent connects over TLS (ADR 0002).
+      DARBAAN_LISTENER_TLS_CERT: /run/secrets/tls/cert.pem
+      DARBAAN_LISTENER_TLS_KEY: /run/secrets/tls/key.pem
+      # For a localhost-only first run WITHOUT certs, comment the two lines above
+      # and uncomment this (plaintext AUTH — localhost only, never in production):
+      # DARBAAN_LISTENER_ALLOW_INSECURE: "true"
+
+      # Bounce signing (ADR 0007): mount the ed25519 key, set selector + domain.
+      DARBAAN_DKIM_KEY_FILE: /run/secrets/dkim/dkim.pem
+      DARBAAN_DKIM_SELECTOR: "darbaan"
+      DARBAAN_DKIM_DOMAIN: "darbaan.example"
+
+      # Upstream Sender — DEFAULT stub (sends nothing). The deliberate flip:
+      # set sender-type=smtp + the username, and DARBAAN_SMTP_PASSWORD in .env.
+      DARBAAN_SENDER_TYPE: "stub" # change to "smtp" to actually deliver
+      DARBAAN_SMTP_HOST: "smtp.gmail.com:587"
+      DARBAAN_SMTP_USERNAME: "" # e.g. you@gmail.com (when sender-type=smtp)
+      DARBAAN_SMTP_PASSWORD: "${DARBAAN_SMTP_PASSWORD:-}"
+    volumes:
+      - darbaan-data:/data # the three bbolt DBs (sluice / audit / inbound)
+      - ./secrets/tls:/run/secrets/tls:ro # you provide cert.pem + key.pem
+      - ./secrets/dkim:/run/secrets/dkim:ro # you provide dkim.pem (ed25519)
+      # - ./config.yaml:/etc/darbaan/config.yaml:ro   # optional mounted config
+
+volumes:
+  darbaan-data:

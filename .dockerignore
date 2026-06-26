@@ -1,0 +1,20 @@
+# VCS + CI
+.git
+.github
+
+# Secrets and local state — must never enter the build context or image layers
+*.pem
+*.key
+*.env
+.env
+*.db
+*.db-lock
+secrets/
+
+# Local build output
+/darbaan
+/dist
+
+# Compose + docs not needed to build the binary
+docker-compose.yml
+*_test.go
