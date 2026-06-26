@@ -54,7 +54,7 @@ the existing IMAP read face.** No live proxying.
 - **No write-back** to the upstream (read-only pull; the agent's flag/delete
   changes in Darbaan do not propagate upstream yet).
 - **Single mailbox** — multi-agent/multi-mailbox stays deferred (ADR 0010).
-- **No pre-screener** on inbound (ADR 0029, later).
+- **No pre-screener** on inbound (#29, later).
 
 ## Consequences
 
@@ -75,4 +75,4 @@ the existing IMAP read face.** No live proxying.
 - IMAP IDLE (push) instead of polling.
 - Inbound pre-screener (ADR 0029).
 
-Relates to ADR 0001, 0002, 0008, 0016, 0018.
+Relates to ADR 0001, 0002, 0008, 0010, 0016, 0018.
