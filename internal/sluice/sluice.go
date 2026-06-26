@@ -32,6 +32,7 @@ const (
 	StatusPending  Status = "pending"
 	StatusApproved Status = "approved"
 	StatusRejected Status = "rejected"
+	StatusSent     Status = "sent" // approved AND delivered upstream
 )
 
 // Submission is a new outbound message to trap, as captured from the SMTP face.

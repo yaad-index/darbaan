@@ -33,6 +33,17 @@ dkim-key-file: ""            # path to the ed25519 private key (PEM)
 dkim-selector: darbaan
 dkim-domain: ""              # signing domain (d=); typically the listener domain
 
+# Upstream Sender — the only component that delivers approved mail off the box.
+# DEFAULT is "stub": nothing sends, default-deny stays structural (ADR 0003).
+# Setting sender-type=smtp is the DELIBERATE flip — it makes a fully-approved
+# message actually deliver. Only ever reached after the approval pipeline; no
+# path sends without approval. The app password is supplied via
+# DARBAAN_SMTP_PASSWORD (a Gmail app password, account 2FA), never inlined here
+# and never logged (ADR 0012). Real credentials live only in Darbaan (ADR 0002).
+sender-type: stub                  # stub | smtp
+smtp-host: "smtp.gmail.com:587"    # host:port (STARTTLS, cert verified)
+smtp-username: ""                  # e.g. you@gmail.com
+
 # SMTP submission face.
 listener-addr: ":1465"
 listener-domain: localhost

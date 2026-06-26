@@ -53,6 +53,10 @@ type CLI struct {
 	DKIMSelector string `name:"dkim-selector" default:"darbaan" help:"DKIM selector for bounce signatures."`
 	DKIMDomain   string `name:"dkim-domain" help:"DKIM signing domain (d=) for bounce signatures."`
 
+	SenderType   string `name:"sender-type" default:"stub" help:"Upstream sender: stub (default — nothing sends, default-deny holds) or smtp (real delivery; the deliberate flip)." enum:"stub,smtp"`
+	SMTPHost     string `name:"smtp-host" default:"smtp.gmail.com:587" help:"Upstream SMTP submission host:port (sender-type=smtp)."`
+	SMTPUsername string `name:"smtp-username" help:"Upstream SMTP username (sender-type=smtp). The app password is supplied via DARBAAN_SMTP_PASSWORD, never inlined."`
+
 	ListenerAddr          string `name:"listener-addr" default:":1465" help:"SMTP submission listen address."`
 	ListenerDomain        string `name:"listener-domain" default:"localhost" help:"SMTP greeting domain."`
 	ListenerTLSCert       string `name:"listener-tls-cert" help:"Path to the TLS certificate (PEM)." type:"path"`
@@ -112,6 +116,17 @@ func (c *CLI) openInbound() (inbound.InboundStore, error) {
 // silently-unsigned bounce.
 func (c *CLI) openSigner() (*signer.Signer, error) {
 	return signer.New(c.DKIMKeyFile, c.DKIMSelector, c.DKIMDomain)
+}
+
+// openSender constructs the configured upstream Sender. The default (stub)
+// sends nothing, so default-deny holds until an operator sets sender-type=smtp
+// with credentials — the flip is a deliberate operator act, not a merge effect.
+func (c *CLI) openSender() (backend.Sender, error) {
+	return backend.New(c.SenderType, backend.Config{
+		Host:     c.SMTPHost,
+		Username: c.SMTPUsername,
+		Password: os.Getenv("DARBAAN_SMTP_PASSWORD"),
+	})
 }
 
 // bounceSigner signs a bounce before it is stored. *signer.Signer implements it.
@@ -293,21 +308,73 @@ func (c *QueueApproveCmd) Run(cli *CLI) error {
 	}
 	defer closeStore()
 
-	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, cli.router(),
+	sender, err := cli.openSender()
+	if err != nil {
+		return err
+	}
+
+	m, err := decideAndApply(context.Background(), q, cli.router(),
 		c.ID, approver.Verdict{Disposition: approver.Approve})
 	if err != nil {
 		return err
 	}
-	switch m.Status {
-	case sluice.StatusApproved:
-		fmt.Printf("message %s approved by %s\n", m.ID, m.DecidedBy)
-		if m.SendErr != "" {
-			fmt.Printf("  send: %s — nothing left Darbaan\n", m.SendErr)
-		}
-	default:
+	if m.Status != sluice.StatusApproved {
 		fmt.Printf("message %s: still %s, no verdict applied\n", m.ID, m.Status)
+		return nil
 	}
-	return nil
+	fmt.Printf("message %s approved by %s\n", m.ID, m.DecidedBy)
+
+	// Bounce deps are only needed if a real Sender can permanently fail; the
+	// stub never does, so don't require DKIM config in stub mode.
+	var inbox inbound.InboundStore
+	var sgn bounceSigner
+	if cli.SenderType != "stub" {
+		inbox, err = cli.openInbound()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = inbox.Close() }()
+		if sgn, err = cli.openSigner(); err != nil {
+			return err
+		}
+	}
+	return sendApproved(context.Background(), q, sender, inbox, sgn, m, cli.ListenerDomain)
+}
+
+// sendApproved delivers an already-approved message to the upstream Sender and
+// applies the result — downstream of the approval commit, never inside the
+// decision (ADR 0003). On success the message is marked sent. On a permanent
+// (5xx) failure the agent is bounced (ADR 0006); on a transient failure the
+// message stays approved for a manual re-send and is NOT bounced. The stub
+// Sender's ErrSendPending is neither: default-deny simply holds.
+func sendApproved(ctx context.Context, q sluice.MessageStore, sender backend.Sender, inbox inbound.InboundStore, sgn bounceSigner, m sluice.Message, domain string) error {
+	sendErr := sender.Send(ctx, m)
+	if _, err := q.RecordSendAttempt(m.ID, sendErr); err != nil {
+		return err
+	}
+
+	switch {
+	case sendErr == nil:
+		fmt.Printf("  sent upstream\n")
+		return nil
+	case errors.Is(sendErr, backend.ErrSendPending):
+		fmt.Printf("  send pending: no real Sender configured — nothing left Darbaan\n")
+		return nil
+	case backend.IsPermanent(sendErr):
+		// Permanent failure: bounce the agent with a generic reason that never
+		// echoes the upstream response body.
+		if inbox == nil || sgn == nil {
+			return fmt.Errorf("message %s approved but upstream send FAILED permanently (no bounce path configured): %w", m.ID, sendErr)
+		}
+		if bErr := deliverBounce(inbox, sgn, m, "upstream delivery failed permanently", false, domain); bErr != nil {
+			return fmt.Errorf("message %s send FAILED permanently AND bounce delivery failed: %v (send: %w)", m.ID, bErr, sendErr)
+		}
+		fmt.Printf("  send FAILED permanently — bounced to %s\n", m.Agent)
+		return fmt.Errorf("message %s approved but upstream send FAILED permanently (bounced): %w", m.ID, sendErr)
+	default:
+		// Transient: stays approved for a manual re-send; no bounce, no retry loop.
+		return fmt.Errorf("message %s approved but upstream send failed (transient; stays approved for re-send): %w", m.ID, sendErr)
+	}
 }
 
 // QueueRejectCmd rejects a held message.
@@ -338,7 +405,7 @@ func (c *QueueRejectCmd) Run(cli *CLI) error {
 		return err
 	}
 
-	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, cli.router(),
+	m, err := decideAndApply(context.Background(), q, cli.router(),
 		c.ID, approver.Verdict{Disposition: approver.Reject, Reason: c.Reason, Retryable: c.Retryable})
 	if err != nil {
 		return err
@@ -356,7 +423,7 @@ func (c *QueueRejectCmd) Run(cli *CLI) error {
 	}
 	fmt.Printf("message %s rejected by %s (%s): %s\n", m.ID, m.DecidedBy, kind, m.Reason)
 
-	if err := deliverBounce(inbox, sgn, m, cli.ListenerDomain); err != nil {
+	if err := deliverBounce(inbox, sgn, m, m.Reason, m.Retryable, cli.ListenerDomain); err != nil {
 		// The reject stuck; only the bounce failed. Surface it as its own signal
 		// — the agent was NOT notified and the bounce needs redelivery — never as
 		// a reject failure (ADR 0006).
@@ -370,8 +437,8 @@ func (c *QueueRejectCmd) Run(cli *CLI) error {
 // already-rejected message. It is a distinct step from the rejection: a failure
 // here means "rejected, but the agent was not notified," not a reject failure
 // (ADR 0006). Signing is required (ADR 0007).
-func deliverBounce(inbox inbound.InboundStore, sgn bounceSigner, m sluice.Message, domain string) error {
-	b, err := bounce.Generate(m, m.Reason, m.Retryable, domain)
+func deliverBounce(inbox inbound.InboundStore, sgn bounceSigner, m sluice.Message, reason string, retryable bool, domain string) error {
+	b, err := bounce.Generate(m, reason, retryable, domain)
 	if err != nil {
 		return fmt.Errorf("generate: %w", err)
 	}
@@ -387,13 +454,14 @@ func deliverBounce(inbox inbound.InboundStore, sgn bounceSigner, m sluice.Messag
 	return nil
 }
 
-// decideAndApply runs the approval chain for one message and applies the
-// outcome. The human verdict is injected into the human stage of the chain — it
-// is one stage, never an override of the others (ADR 0004). On approval the
-// message is marked approved and handed to the (stubbed) Sender; the send result
-// is recorded and audited, never silently dropped (ADR 0003). On rejection the
-// reason is recorded. A Hold leaves the message pending.
-func decideAndApply(ctx context.Context, q sluice.MessageStore, sender backend.Sender, router *policy.Router, id string, human approver.Verdict) (sluice.Message, error) {
+// decideAndApply runs the approval chain for one message and commits the
+// outcome — nothing more. The human verdict is injected into the human stage of
+// the chain — it is one stage, never an override of the others (ADR 0004).
+// Approve commits status=approved, Reject commits status=rejected, Hold leaves
+// it pending. Everything downstream of the commit (sending an approved message,
+// recording the send, bouncing on failure) lives in the caller, so this stays
+// pure and the send/bounce paths never re-entangle the decision.
+func decideAndApply(ctx context.Context, q sluice.MessageStore, router *policy.Router, id string, human approver.Verdict) (sluice.Message, error) {
 	msg, err := q.Get(id)
 	if err != nil {
 		return sluice.Message{}, err
@@ -424,15 +492,9 @@ func decideAndApply(ctx context.Context, q sluice.MessageStore, sender backend.S
 
 	switch outcome.Disposition {
 	case approver.Approve:
-		if _, err := q.Approve(id, outcome.DecidedBy, outcome.Released); err != nil {
-			return sluice.Message{}, err
-		}
-		approved, err := q.Get(id)
-		if err != nil {
-			return sluice.Message{}, err
-		}
-		sendErr := sender.Send(ctx, approved)
-		return q.RecordSendAttempt(id, sendErr)
+		// Commit only. The send is a distinct, downstream step (sendApproved)
+		// so a send failure is never mistaken for an approval failure.
+		return q.Approve(id, outcome.DecidedBy, outcome.Released)
 	case approver.Reject:
 		// Commit the rejection. The DSN bounce is a distinct, downstream step
 		// (deliverBounce) so a delivery failure is never mistaken for a reject

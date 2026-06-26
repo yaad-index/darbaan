@@ -157,7 +157,10 @@ func (s *bboltStore) RecordSendAttempt(id string, sendErr error) (Message, error
 			return err
 		}
 		if sendErr != nil {
-			m.SendErr = sendErr.Error()
+			m.SendErr = sendErr.Error() // stays approved for a manual re-send
+		} else {
+			m.Status = StatusSent // delivered upstream
+			m.SendErr = ""
 		}
 		out = m
 		return putMessage(tx, key, m)

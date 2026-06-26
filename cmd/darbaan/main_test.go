@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/emersion/go-smtp"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -42,17 +44,91 @@ func router() *policy.Router {
 	return policy.NewRouter([]string{"manual"}, []string{"manual"})
 }
 
-func TestApproveReachesStubSenderAndNothingLeaves(t *testing.T) {
+func TestApproveCommitsOnly(t *testing.T) {
 	q, id := newSeededSluice(t)
 
-	out, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
+	out, err := decideAndApply(context.Background(), q, router(),
 		id, approver.Verdict{Disposition: approver.Approve})
 	require.NoError(t, err)
-
-	assert.Equal(t, sluice.StatusApproved, out.Status)
+	assert.Equal(t, sluice.StatusApproved, out.Status) // commit only; no send here
 	assert.Equal(t, "manual", out.DecidedBy)
-	// The stub Sender ran but nothing left: the send error is recorded, not dropped.
-	assert.Equal(t, backend.ErrSendPending.Error(), out.SendErr)
+}
+
+type fakeSender struct{ err error }
+
+func (f fakeSender) Send(context.Context, sluice.Message) error { return f.err }
+
+func approvedMessage(t *testing.T, q sluice.MessageStore, id string) sluice.Message {
+	t.Helper()
+	m, err := decideAndApply(context.Background(), q, router(),
+		id, approver.Verdict{Disposition: approver.Approve})
+	require.NoError(t, err)
+	require.Equal(t, sluice.StatusApproved, m.Status)
+	return m
+}
+
+func TestSendApprovedStubHoldsDefaultDeny(t *testing.T) {
+	q, id := newSeededSluice(t)
+	m := approvedMessage(t, q, id)
+
+	// Stub: ErrSendPending is not a failure — default-deny holds, nothing left.
+	require.NoError(t, sendApproved(context.Background(), q, backend.StubSender{}, nil, nil, m, "darbaan.test"))
+	got, err := q.Get(id)
+	require.NoError(t, err)
+	assert.Equal(t, sluice.StatusApproved, got.Status) // not sent
+}
+
+func TestSendApprovedSuccessMarksSent(t *testing.T) {
+	q, id := newSeededSluice(t)
+	m := approvedMessage(t, q, id)
+
+	require.NoError(t, sendApproved(context.Background(), q, fakeSender{nil}, nil, nil, m, "darbaan.test"))
+	got, err := q.Get(id)
+	require.NoError(t, err)
+	assert.Equal(t, sluice.StatusSent, got.Status) // delivered upstream
+}
+
+func TestSendApprovedPermanentFailureBounces(t *testing.T) {
+	q, id := newSeededSluice(t)
+	inbox, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	defer func() { _ = inbox.Close() }()
+	m := approvedMessage(t, q, id)
+
+	perm := fakeSender{&smtp.SMTPError{Code: 550, Message: "mailbox unavailable"}}
+	err = sendApproved(context.Background(), q, perm, inbox, testSigner(t), m, "darbaan.test")
+	require.Error(t, err) // permanent send failure is surfaced...
+
+	msgs, err := inbox.List("agent")
+	require.NoError(t, err)
+	require.Len(t, msgs, 1) // ...and the agent was bounced
+	assert.Contains(t, string(msgs[0].Raw), "upstream delivery failed permanently")
+	assert.NotContains(t, string(msgs[0].Raw), "mailbox unavailable") // never echo the upstream body
+	assert.Contains(t, string(msgs[0].Raw), "DKIM-Signature:")
+
+	got, err := q.Get(id)
+	require.NoError(t, err)
+	assert.Equal(t, sluice.StatusApproved, got.Status) // not sent (still approved + SendErr)
+	assert.NotEmpty(t, got.SendErr)
+}
+
+func TestSendApprovedTransientFailureStaysApproved(t *testing.T) {
+	q, id := newSeededSluice(t)
+	inbox, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	defer func() { _ = inbox.Close() }()
+	m := approvedMessage(t, q, id)
+
+	tr := fakeSender{&smtp.SMTPError{Code: 451, Message: "try again later"}}
+	require.Error(t, sendApproved(context.Background(), q, tr, inbox, testSigner(t), m, "darbaan.test"))
+
+	msgs, err := inbox.List("agent")
+	require.NoError(t, err)
+	assert.Empty(t, msgs) // transient → NO bounce
+
+	got, err := q.Get(id)
+	require.NoError(t, err)
+	assert.Equal(t, sluice.StatusApproved, got.Status) // stays approved for re-send
 }
 
 func TestRejectCommitsAndBounceDelivers(t *testing.T) {
@@ -61,12 +137,12 @@ func TestRejectCommitsAndBounceDelivers(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = inbox.Close() }()
 
-	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
+	m, err := decideAndApply(context.Background(), q, router(),
 		id, approver.Verdict{Disposition: approver.Reject, Reason: "smells like exfiltration", Retryable: false})
 	require.NoError(t, err)
 	require.Equal(t, sluice.StatusRejected, m.Status)
 
-	require.NoError(t, deliverBounce(inbox, testSigner(t), m, "darbaan.test"))
+	require.NoError(t, deliverBounce(inbox, testSigner(t), m, m.Reason, m.Retryable, "darbaan.test"))
 
 	// A DSN bounce was delivered to the agent's inbound mailbox (ADR 0006),
 	// already DKIM-signed (ADR 0007).
@@ -87,13 +163,13 @@ func TestRejectCommitsAndBounceDelivers(t *testing.T) {
 func TestBounceFailureDistinctFromReject(t *testing.T) {
 	q, id := newSeededSluice(t)
 
-	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
+	m, err := decideAndApply(context.Background(), q, router(),
 		id, approver.Verdict{Disposition: approver.Reject, Reason: "no", Retryable: false})
 	require.NoError(t, err)
 	require.Equal(t, sluice.StatusRejected, m.Status)
 
 	// Bounce delivery to a failing store errors distinctly...
-	require.Error(t, deliverBounce(failingInbound{}, testSigner(t), m, "darbaan.test"))
+	require.Error(t, deliverBounce(failingInbound{}, testSigner(t), m, m.Reason, m.Retryable, "darbaan.test"))
 
 	// ...but the reject already stuck (the store still shows it rejected).
 	got, err := q.Get(id)
@@ -134,7 +210,7 @@ func TestNoDecisionLeavesPending(t *testing.T) {
 
 	// A Hold verdict (the human took no action) must leave the message pending —
 	// fail-closed.
-	out, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
+	out, err := decideAndApply(context.Background(), q, router(),
 		id, approver.Verdict{Disposition: approver.Hold})
 	require.NoError(t, err)
 	assert.Equal(t, sluice.StatusPending, out.Status)
@@ -147,11 +223,11 @@ func TestNoDecisionLeavesPending(t *testing.T) {
 func TestApproveTwiceIsRefused(t *testing.T) {
 	q, id := newSeededSluice(t)
 
-	_, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
+	_, err := decideAndApply(context.Background(), q, router(),
 		id, approver.Verdict{Disposition: approver.Approve})
 	require.NoError(t, err)
 
-	_, err = decideAndApply(context.Background(), q, backend.StubSender{}, router(),
+	_, err = decideAndApply(context.Background(), q, router(),
 		id, approver.Verdict{Disposition: approver.Approve})
 	require.Error(t, err) // already approved, not pending
 }
