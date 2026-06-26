@@ -16,6 +16,12 @@ sluice-db: darbaan.db
 audit-type: bbolt
 audit-db: darbaan-audit.db
 
+# Inbound store: the agent's served mailbox, holding Darbaan-generated messages
+# (v1: MAILER-DAEMON bounces on reject) that the IMAP face serves. Separate from
+# the sluice — a bounce is read by the agent, not an outbound send.
+inbound-type: bbolt
+inbound-db: darbaan-inbound.db
+
 # SMTP submission face.
 listener-addr: ":1465"
 listener-domain: localhost
