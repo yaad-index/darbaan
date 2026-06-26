@@ -109,6 +109,10 @@ func TestAttachmentsNonTextLeafAndNone(t *testing.T) {
 	assert.Empty(t, attachments(none))
 }
 
+func TestAttachmentCaption(t *testing.T) {
+	assert.Equal(t, "msg 18 - invoice.pdf", attachmentCaption("18", "invoice.pdf"))
+}
+
 func TestHumanSize(t *testing.T) {
 	assert.Equal(t, "512 B", humanSize(512))
 	assert.Equal(t, "1 KB", humanSize(1024))
