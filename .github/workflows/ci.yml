@@ -15,7 +15,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           # Track the version pinned in go.mod (currently Go 1.26) so CI and the
           # module stay in lockstep — single source of truth.
