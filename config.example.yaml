@@ -56,6 +56,13 @@ listener-allow-insecure: false # permit AUTH over plaintext — local testing on
 # the IMAP face reuses the agent credential and the listener TLS above.
 imap-addr: ":1143"
 
+# Operator admin API. The running serve owns the bbolt stores (single-writer),
+# so `darbaan queue ls|show|approve|reject` connect HERE as thin clients rather
+# than opening the DB. Bind loopback-only (or keep container-internal in Docker);
+# never expose it to the agent. The bearer token comes from DARBAAN_ADMIN_TOKEN
+# (required — serve fails closed without it), never inlined here.
+admin-addr: "127.0.0.1:1144"
+
 # The agent's Darbaan SMTP username. The password is NOT configured here: it is
 # supplied out-of-band via DARBAAN_AGENT_PASS, a reference to the encrypted
 # store (ADR 0012). Secrets are never inlined in config.
