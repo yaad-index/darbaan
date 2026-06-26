@@ -73,6 +73,6 @@ the existing IMAP read face.** No live proxying.
   surface, mirroring the outbound sluice.
 - Upstream deletion/flag reconciliation (bidirectional sync).
 - IMAP IDLE (push) instead of polling.
-- Inbound pre-screener (ADR 0029).
+- Inbound pre-screener (#29).
 
 Relates to ADR 0001, 0002, 0008, 0010, 0016, 0018.
