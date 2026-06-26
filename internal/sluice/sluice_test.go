@@ -158,6 +158,44 @@ func TestEnqueueSucceedsWhenAuditFails(t *testing.T) {
 	assert.Equal(t, sluice.StatusPending, got.Status)
 }
 
+// TestTransitionsSucceedWhenAuditFails covers #23: Approve, Reject and
+// RecordSendAttempt use the same best-effort writeAudit path as Enqueue, so a
+// failing audit must not fail any of them — the commit is the source of truth.
+func TestTransitionsSucceedWhenAuditFails(t *testing.T) {
+	seedFailing := func(t *testing.T) (sluice.MessageStore, string) {
+		t.Helper()
+		q, err := sluice.New("bbolt", filepath.Join(t.TempDir(), "s.db"), failingAudit{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = q.Close() })
+		m, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("x")})
+		require.NoError(t, err)
+		return q, m.ID
+	}
+
+	t.Run("approve", func(t *testing.T) {
+		q, id := seedFailing(t)
+		out, err := q.Approve(id, "manual", nil)
+		require.NoError(t, err)
+		assert.Equal(t, sluice.StatusApproved, out.Status)
+	})
+
+	t.Run("reject", func(t *testing.T) {
+		q, id := seedFailing(t)
+		out, err := q.Reject(id, "manual", "no", false)
+		require.NoError(t, err)
+		assert.Equal(t, sluice.StatusRejected, out.Status)
+	})
+
+	t.Run("record send attempt", func(t *testing.T) {
+		q, id := seedFailing(t)
+		_, err := q.Approve(id, "manual", nil)
+		require.NoError(t, err)
+		out, err := q.RecordSendAttempt(id, errors.New("upstream send pending"))
+		require.NoError(t, err)
+		assert.Equal(t, "upstream send pending", out.SendErr)
+	})
+}
+
 func TestUnknownStoreTypeErrors(t *testing.T) {
 	al, err := audit.New("null", "")
 	require.NoError(t, err)
