@@ -10,6 +10,7 @@ require (
 	github.com/emersion/go-msgauth v0.7.0
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
 	github.com/emersion/go-smtp v0.24.0
+	github.com/go-telegram/bot v1.21.0
 	github.com/stretchr/testify v1.11.1
 	go.etcd.io/bbolt v1.5.0
 )
