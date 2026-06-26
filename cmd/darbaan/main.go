@@ -28,6 +28,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/listener"
 	"github.com/yaad-index/darbaan/internal/policy"
+	"github.com/yaad-index/darbaan/internal/signer"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
@@ -48,6 +49,10 @@ type CLI struct {
 	InboundType string `name:"inbound-type" default:"bbolt" help:"Inbound (served mailbox) store backend." enum:"bbolt"`
 	InboundDB   string `name:"inbound-db" default:"darbaan-inbound.db" help:"Path to the inbound store database." type:"path"`
 
+	DKIMKeyFile  string `name:"dkim-key-file" help:"Path to the PEM-encoded ed25519 DKIM private key used to sign bounces (ADR 0007)." type:"path"`
+	DKIMSelector string `name:"dkim-selector" default:"darbaan" help:"DKIM selector for bounce signatures."`
+	DKIMDomain   string `name:"dkim-domain" help:"DKIM signing domain (d=) for bounce signatures."`
+
 	ListenerAddr          string `name:"listener-addr" default:":1465" help:"SMTP submission listen address."`
 	ListenerDomain        string `name:"listener-domain" default:"localhost" help:"SMTP greeting domain."`
 	ListenerTLSCert       string `name:"listener-tls-cert" help:"Path to the TLS certificate (PEM)." type:"path"`
@@ -59,9 +64,10 @@ type CLI struct {
 	ApprovalStrict []string `name:"approval-strict" default:"manual" help:"Approver chain for the strict path."`
 	ApprovalLight  []string `name:"approval-light" default:"manual" help:"Approver chain for the light path."`
 
-	Serve   ServeCmd   `cmd:"" help:"Run the SMTP submission face and sluice."`
-	Queue   QueueCmd   `cmd:"" help:"Inspect and decide held messages."`
-	Version VersionCmd `cmd:"" help:"Print version and exit."`
+	Serve      ServeCmd      `cmd:"" help:"Run the SMTP submission face and sluice."`
+	Queue      QueueCmd      `cmd:"" help:"Inspect and decide held messages."`
+	DkimPubkey DkimPubkeyCmd `cmd:"" name:"dkim-pubkey" help:"Print the DKIM public-key record to pin to the agent."`
+	Version    VersionCmd    `cmd:"" help:"Print version and exit."`
 }
 
 func main() {
@@ -97,6 +103,30 @@ func (c *CLI) openStore() (sluice.MessageStore, func(), error) {
 // openInbound opens the inbound (served mailbox) store per config.
 func (c *CLI) openInbound() (inbound.InboundStore, error) {
 	return inbound.New(c.InboundType, c.InboundDB)
+}
+
+// openSigner loads the DKIM signer from config. It fails closed: bounce signing
+// is required (ADR 0007), so a missing or invalid key is an error rather than a
+// silently-unsigned bounce.
+func (c *CLI) openSigner() (*signer.Signer, error) {
+	return signer.New(c.DKIMKeyFile, c.DKIMSelector, c.DKIMDomain)
+}
+
+// bounceSigner signs a bounce before it is stored. *signer.Signer implements it.
+type bounceSigner interface {
+	Sign(raw []byte) ([]byte, error)
+}
+
+// DkimPubkeyCmd prints the DKIM public-key record for out-of-band pinning.
+type DkimPubkeyCmd struct{}
+
+func (*DkimPubkeyCmd) Run(cli *CLI) error {
+	s, err := cli.openSigner()
+	if err != nil {
+		return err
+	}
+	fmt.Println(s.PublicKeyTXT())
+	return nil
 }
 
 // VersionCmd prints the build version.
@@ -231,7 +261,7 @@ func (c *QueueApproveCmd) Run(cli *CLI) error {
 	defer closeStore()
 
 	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, cli.router(),
-		nil, "", c.ID, approver.Verdict{Disposition: approver.Approve})
+		nil, nil, "", c.ID, approver.Verdict{Disposition: approver.Approve})
 	if err != nil {
 		return err
 	}
@@ -268,8 +298,15 @@ func (c *QueueRejectCmd) Run(cli *CLI) error {
 	}
 	defer func() { _ = inbox.Close() }()
 
+	// Bounce signing is required (ADR 0007): fail closed if the key is not set
+	// or invalid, rather than emit a bounce the agent will not trust.
+	sgn, err := cli.openSigner()
+	if err != nil {
+		return err
+	}
+
 	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, cli.router(),
-		inbox, cli.ListenerDomain, c.ID, approver.Verdict{Disposition: approver.Reject, Reason: c.Reason, Retryable: c.Retryable})
+		inbox, sgn, cli.ListenerDomain, c.ID, approver.Verdict{Disposition: approver.Reject, Reason: c.Reason, Retryable: c.Retryable})
 	if err != nil {
 		return err
 	}
@@ -292,7 +329,7 @@ func (c *QueueRejectCmd) Run(cli *CLI) error {
 // message is marked approved and handed to the (stubbed) Sender; the send result
 // is recorded and audited, never silently dropped (ADR 0003). On rejection the
 // reason is recorded. A Hold leaves the message pending.
-func decideAndApply(ctx context.Context, q sluice.MessageStore, sender backend.Sender, router *policy.Router, inbox inbound.InboundStore, domain string, id string, human approver.Verdict) (sluice.Message, error) {
+func decideAndApply(ctx context.Context, q sluice.MessageStore, sender backend.Sender, router *policy.Router, inbox inbound.InboundStore, sgn bounceSigner, domain string, id string, human approver.Verdict) (sluice.Message, error) {
 	msg, err := q.Get(id)
 	if err != nil {
 		return sluice.Message{}, err
@@ -345,8 +382,17 @@ func decideAndApply(ctx context.Context, q sluice.MessageStore, sender backend.S
 			if err != nil {
 				return sluice.Message{}, fmt.Errorf("generate bounce: %w", err)
 			}
+			// Sign before store (ADR 0007): the stored bounce is already signed,
+			// so the IMAP face serves it verbatim. Fail closed if no signer.
+			if sgn == nil {
+				return sluice.Message{}, fmt.Errorf("deliver bounce: signing required but no signer configured")
+			}
+			signed, err := sgn.Sign(b.Raw)
+			if err != nil {
+				return sluice.Message{}, fmt.Errorf("sign bounce: %w", err)
+			}
 			if _, err := inbox.Add(inbound.Delivery{
-				Owner: b.Owner, From: b.From, To: b.To, Subject: b.Subject, Raw: b.Raw,
+				Owner: b.Owner, From: b.From, To: b.To, Subject: b.Subject, Raw: signed,
 			}); err != nil {
 				return sluice.Message{}, fmt.Errorf("deliver bounce: %w", err)
 			}

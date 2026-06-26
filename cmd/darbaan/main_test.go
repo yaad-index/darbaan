@@ -2,6 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -13,6 +18,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/backend"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/policy"
+	"github.com/yaad-index/darbaan/internal/signer"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
@@ -39,7 +45,7 @@ func TestApproveReachesStubSenderAndNothingLeaves(t *testing.T) {
 	q, id := newSeededSluice(t)
 
 	out, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		nil, "", id, approver.Verdict{Disposition: approver.Approve})
+		nil, nil, "", id, approver.Verdict{Disposition: approver.Approve})
 	require.NoError(t, err)
 
 	assert.Equal(t, sluice.StatusApproved, out.Status)
@@ -55,12 +61,13 @@ func TestRejectGeneratesBounceIntoInbound(t *testing.T) {
 	defer func() { _ = inbox.Close() }()
 
 	out, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		inbox, "darbaan.test", id, approver.Verdict{Disposition: approver.Reject, Reason: "smells like exfiltration", Retryable: false})
+		inbox, testSigner(t), "darbaan.test", id, approver.Verdict{Disposition: approver.Reject, Reason: "smells like exfiltration", Retryable: false})
 	require.NoError(t, err)
 	assert.Equal(t, sluice.StatusRejected, out.Status)
 	assert.Equal(t, "smells like exfiltration", out.Reason)
 
-	// A DSN bounce was delivered to the agent's inbound mailbox (ADR 0006).
+	// A DSN bounce was delivered to the agent's inbound mailbox (ADR 0006),
+	// already DKIM-signed (ADR 0007).
 	msgs, err := inbox.List("agent") // owner = original submitting agent
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
@@ -69,7 +76,22 @@ func TestRejectGeneratesBounceIntoInbound(t *testing.T) {
 	assert.Equal(t, "a@local", b.To) // returned to the original submitter
 	assert.False(t, b.Seen)          // lands unseen
 	assert.Contains(t, string(b.Raw), "smells like exfiltration")
-	assert.Contains(t, string(b.Raw), "5.7.1") // permanent policy reject
+	assert.Contains(t, string(b.Raw), "5.7.1")           // permanent policy reject
+	assert.Contains(t, string(b.Raw), "DKIM-Signature:") // signed before store
+}
+
+func testSigner(t *testing.T) *signer.Signer {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "dkim.pem")
+	require.NoError(t, os.WriteFile(path,
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600))
+	s, err := signer.New(path, "darbaan", "darbaan.test")
+	require.NoError(t, err)
+	return s
 }
 
 func TestNoDecisionLeavesPending(t *testing.T) {
@@ -78,7 +100,7 @@ func TestNoDecisionLeavesPending(t *testing.T) {
 	// A Hold verdict (the human took no action) must leave the message pending —
 	// fail-closed.
 	out, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		nil, "", id, approver.Verdict{Disposition: approver.Hold})
+		nil, nil, "", id, approver.Verdict{Disposition: approver.Hold})
 	require.NoError(t, err)
 	assert.Equal(t, sluice.StatusPending, out.Status)
 
@@ -91,10 +113,10 @@ func TestApproveTwiceIsRefused(t *testing.T) {
 	q, id := newSeededSluice(t)
 
 	_, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		nil, "", id, approver.Verdict{Disposition: approver.Approve})
+		nil, nil, "", id, approver.Verdict{Disposition: approver.Approve})
 	require.NoError(t, err)
 
 	_, err = decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		nil, "", id, approver.Verdict{Disposition: approver.Approve})
+		nil, nil, "", id, approver.Verdict{Disposition: approver.Approve})
 	require.Error(t, err) // already approved, not pending
 }
