@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
@@ -255,8 +256,133 @@ func (s *imapSession) Append(string, imap.LiteralReader, *imap.AppendOptions) (*
 	return nil, errReadOnly
 }
 
-func (s *imapSession) Search(imapserver.NumKind, *imap.SearchCriteria, *imap.SearchOptions) (*imap.SearchData, error) {
-	return nil, errors.New("imap: SEARCH not supported in v1 (FETCH 1:* instead)")
+// Search evaluates the criteria over the selected snapshot and returns the
+// matching sequence numbers (SEARCH) or UIDs (UID SEARCH). It handles the
+// criteria standard clients send right after SELECT (ALL, \Seen/\Unseen, seq/uid
+// sets, internal-date SINCE/BEFORE, size, NOT, OR) plus best-effort substring
+// matching for HEADER/BODY/TEXT. (Returning an error here surfaces as a
+// NO [SERVERBUG] and breaks real clients — #53.)
+func (s *imapSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCriteria, _ *imap.SearchOptions) (*imap.SearchData, error) {
+	var (
+		data   imap.SearchData
+		seqSet imap.SeqSet
+		uidSet imap.UIDSet
+	)
+	for i := range s.selected {
+		m := &s.selected[i]
+		seqNum := uint32(i) + 1
+		if !matchSearch(seqNum, m, criteria) {
+			continue
+		}
+		uid := uidOf(*m)
+		uidSet.AddNum(uid)
+
+		var num uint32
+		switch numKind {
+		case imapserver.NumKindSeq:
+			seqSet.AddNum(seqNum)
+			num = seqNum
+		case imapserver.NumKindUID:
+			num = uint32(uid)
+		}
+		if data.Min == 0 || num < data.Min {
+			data.Min = num
+		}
+		if num > data.Max {
+			data.Max = num
+		}
+		data.Count++
+	}
+	switch numKind {
+	case imapserver.NumKindSeq:
+		data.All = seqSet
+	case imapserver.NumKindUID:
+		data.All = uidSet
+	}
+	return &data, nil
+}
+
+func matchSearch(seqNum uint32, m *inbound.Message, c *imap.SearchCriteria) bool {
+	for _, set := range c.SeqNum {
+		if !set.Contains(seqNum) {
+			return false
+		}
+	}
+	for _, set := range c.UID {
+		if !set.Contains(uidOf(*m)) {
+			return false
+		}
+	}
+	if !matchDate(m.ReceivedAt, c.Since, c.Before) {
+		return false
+	}
+	for _, f := range c.Flag {
+		if !hasFlag(m, f) {
+			return false
+		}
+	}
+	for _, f := range c.NotFlag {
+		if hasFlag(m, f) {
+			return false
+		}
+	}
+	if c.Larger != 0 && int64(len(m.Raw)) <= c.Larger {
+		return false
+	}
+	if c.Smaller != 0 && int64(len(m.Raw)) >= c.Smaller {
+		return false
+	}
+	low := bytes.ToLower(m.Raw)
+	for _, h := range c.Header {
+		if !bytes.Contains(low, bytes.ToLower([]byte(h.Key))) ||
+			(h.Value != "" && !bytes.Contains(low, bytes.ToLower([]byte(h.Value)))) {
+			return false
+		}
+	}
+	for _, t := range c.Text {
+		if !bytes.Contains(low, bytes.ToLower([]byte(t))) {
+			return false
+		}
+	}
+	for _, b := range c.Body {
+		if !bytes.Contains(low, bytes.ToLower([]byte(b))) {
+			return false
+		}
+	}
+	for i := range c.Not {
+		if matchSearch(seqNum, m, &c.Not[i]) {
+			return false
+		}
+	}
+	for _, or := range c.Or {
+		if !matchSearch(seqNum, m, &or[0]) && !matchSearch(seqNum, m, &or[1]) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasFlag reports whether the message has an IMAP flag. v1 persists only \Seen.
+func hasFlag(m *inbound.Message, f imap.Flag) bool {
+	return f == imap.FlagSeen && m.Seen
+}
+
+// matchDate applies SINCE (date >= since) and BEFORE (date < before) on the
+// message's internal date, comparing whole days (RFC 3501).
+func matchDate(t, since, before time.Time) bool {
+	day := dateOnly(t)
+	if !since.IsZero() && day.Before(dateOnly(since)) {
+		return false
+	}
+	if !before.IsZero() && !day.Before(dateOnly(before)) {
+		return false
+	}
+	return true
+}
+
+func dateOnly(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 // No mailbox changes happen out-of-band, so polling and idling are no-ops.

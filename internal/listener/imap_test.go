@@ -127,6 +127,35 @@ func TestIMAPEmptyMailboxUIDNext(t *testing.T) {
 	assert.Equal(t, imap.UID(1), sel.UIDNext) // UID 0 invalid; empty mailbox → 1
 }
 
+func TestIMAPSearch(t *testing.T) {
+	store := seedInbound(t) // one unseen message, owner "agent"
+	c, err := imapclient.DialInsecure(startIMAP(t, store), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	_, err = c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+
+	// SEARCH ALL — previously returned NO [SERVERBUG] (#53).
+	all, err := c.Search(&imap.SearchCriteria{}, nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, []uint32{1}, all.AllSeqNums())
+
+	// SEARCH UNSEEN matches; SEARCH SEEN does not (message is unseen).
+	unseen, err := c.Search(&imap.SearchCriteria{NotFlag: []imap.Flag{imap.FlagSeen}}, nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, []uint32{1}, unseen.AllSeqNums())
+
+	seen, err := c.Search(&imap.SearchCriteria{Flag: []imap.Flag{imap.FlagSeen}}, nil).Wait()
+	require.NoError(t, err)
+	assert.Empty(t, seen.AllSeqNums())
+
+	// UID SEARCH ALL returns the message's UID.
+	uids, err := c.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, []imap.UID{1}, uids.AllUIDs())
+}
+
 func TestIMAPBadAuthRejected(t *testing.T) {
 	c, err := imapclient.DialInsecure(startIMAP(t, seedInbound(t)), nil)
 	require.NoError(t, err)
