@@ -34,6 +34,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/policy"
 	"github.com/yaad-index/darbaan/internal/signer"
 	"github.com/yaad-index/darbaan/internal/sluice"
+	"github.com/yaad-index/darbaan/internal/telegram"
 )
 
 // version is the build version, overridden at link time via -ldflags.
@@ -73,11 +74,14 @@ type CLI struct {
 
 	AgentUsername string `name:"agent-username" help:"The agent's Darbaan SMTP username. The password is supplied out-of-band via DARBAAN_AGENT_PASS, never inlined in config (ADR 0012)."`
 
+	TelegramOperatorID int64 `name:"telegram-operator-id" help:"Telegram chat/user id permitted to approve/reject (only this id may act). Bot token via DARBAAN_TELEGRAM_TOKEN."`
+
 	ApprovalStrict []string `name:"approval-strict" default:"manual" help:"Approver chain for the strict path."`
 	ApprovalLight  []string `name:"approval-light" default:"manual" help:"Approver chain for the light path."`
 
 	Serve      ServeCmd      `cmd:"" help:"Run the SMTP + IMAP faces and the admin API."`
 	Queue      QueueCmd      `cmd:"" help:"Inspect and decide held messages (via the running serve's admin API)."`
+	Telegram   TelegramCmd   `cmd:"" help:"Run the Telegram approval client (a separate admin-API client process)."`
 	DkimPubkey DkimPubkeyCmd `cmd:"" name:"dkim-pubkey" help:"Print the DKIM public-key record to pin to the agent."`
 	Version    VersionCmd    `cmd:"" help:"Print version and exit."`
 }
@@ -143,6 +147,24 @@ func (c *CLI) adminClient() (*admin.Client, error) {
 		return nil, errors.New("set DARBAAN_ADMIN_TOKEN (the running serve's admin token)")
 	}
 	return admin.NewClient(c.AdminAddr, token), nil
+}
+
+// TelegramCmd runs the Telegram approval client — a separate long-running
+// process that is a client of the admin API (ADR 0017), not part of serve.
+type TelegramCmd struct{}
+
+func (*TelegramCmd) Run(cli *CLI) error {
+	adminClient, err := cli.adminClient() // reuses admin-addr + DARBAAN_ADMIN_TOKEN
+	if err != nil {
+		return err
+	}
+	tc, err := telegram.New(os.Getenv("DARBAAN_TELEGRAM_TOKEN"), cli.TelegramOperatorID, adminClient)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return tc.Run(ctx)
 }
 
 // DkimPubkeyCmd prints the DKIM public-key record for out-of-band pinning.
