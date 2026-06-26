@@ -47,13 +47,18 @@ type Client struct {
 }
 
 // rejectState remembers, for a reason force-reply prompt, which held message it
-// is for and where to write the result.
+// is for and where to write the result. at bounds the map: prompts the operator
+// never answers are pruned by TTL (#66).
 type rejectState struct {
 	id         string
 	retryable  bool
 	origChatID int64
 	origMsgID  int
+	at         time.Time
 }
+
+// pendingTTL is how long an unanswered reason prompt is retained before pruning.
+const pendingTTL = time.Hour
 
 // New builds the Telegram client. The bot token is never logged; operatorID is
 // the only chat/user permitted to act (everyone else is ignored); adminClient
@@ -129,6 +134,7 @@ func (c *Client) poll(ctx context.Context) {
 		log.Printf("darbaan telegram: poll: %v", err)
 		return
 	}
+	c.prunePosted(metas)
 	for _, m := range metas {
 		if m.Status != sluice.StatusPending || c.seen(m.ID) {
 			continue
@@ -142,12 +148,37 @@ func (c *Client) poll(ctx context.Context) {
 }
 
 func (c *Client) notify(ctx context.Context, m sluice.Meta) error {
-	_, err := c.bot.SendMessage(ctx, &bot.SendMessageParams{
+	// Fetch the raw message for the body so the operator can review what they're
+	// approving. De-dupe means this is one fetch per message. A fetch failure
+	// still notifies, with headers only.
+	raw, err := c.admin.Show(ctx, m.ID)
+	if err != nil {
+		log.Printf("darbaan telegram: fetch body %s: %v", m.ID, err)
+	}
+	_, err = c.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      c.operatorID,
-		Text:        formatPending(m),
+		Text:        formatNotification(m, bodyText(raw)),
 		ReplyMarkup: decisionKeyboard(m.ID),
 	})
 	return err
+}
+
+// prunePosted drops de-dup entries for messages no longer pending, bounding the
+// set to the live queue (#66).
+func (c *Client) prunePosted(metas []sluice.Meta) {
+	live := make(map[string]bool, len(metas))
+	for _, m := range metas {
+		if m.Status == sluice.StatusPending {
+			live[m.ID] = true
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id := range c.posted {
+		if !live[id] {
+			delete(c.posted, id)
+		}
+	}
 }
 
 func (c *Client) seen(id string) bool {
@@ -172,6 +203,29 @@ func formatPending(m sluice.Meta) string {
 	}
 	return fmt.Sprintf("Held outbound message\nid: %s\nfrom: %s\nto: %s\nsubject: %s\nsize: %d bytes",
 		m.ID, m.From, strings.Join(m.Rcpt, ", "), subject, m.Size)
+}
+
+// maxNotificationRunes keeps the notification within Telegram's 4096-char cap
+// with headroom for the keyboard and the truncation marker.
+const maxNotificationRunes = 3900
+
+// formatNotification renders the headers followed by the message body so the
+// operator reviews the content before deciding. The body is truncated
+// (rune-safe) with a marker when the whole notification would exceed the cap.
+func formatNotification(m sluice.Meta, body string) string {
+	header := formatPending(m)
+	if body == "" {
+		return header + "\n\n(no text body)"
+	}
+	prefix := header + "\n\n--- body ---\n"
+	avail := maxNotificationRunes - len([]rune(prefix)) - 40 // room for the marker
+	if avail < 0 {
+		avail = 0
+	}
+	if br := []rune(body); len(br) > avail {
+		return prefix + string(br[:avail]) + fmt.Sprintf("\n...(truncated, %d bytes)", len(body))
+	}
+	return prefix + body
 }
 
 // decisionKeyboard lays in all three decision buttons. The callbacks are wired
@@ -273,12 +327,27 @@ func (c *Client) promptReason(ctx context.Context, b *bot.Bot, cq *models.Callba
 	})
 	if err != nil {
 		log.Printf("darbaan telegram: reject prompt %s: %v", id, err)
+		// Dismiss the spinner so the button doesn't hang on a network error.
+		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+			CallbackQueryID: cq.ID, Text: "Could not start the reason prompt.",
+		})
 		return
 	}
 	c.mu.Lock()
-	c.pending[prompt.ID] = rejectState{id: id, retryable: retryable, origChatID: msg.Chat.ID, origMsgID: msg.ID}
+	c.prunePendingLocked(time.Now())
+	c.pending[prompt.ID] = rejectState{id: id, retryable: retryable, origChatID: msg.Chat.ID, origMsgID: msg.ID, at: time.Now()}
 	c.mu.Unlock()
 	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cq.ID, Text: "Reason?"})
+}
+
+// prunePendingLocked drops reason prompts older than pendingTTL — those the
+// operator started but never answered — bounding the map (#66). Caller holds mu.
+func (c *Client) prunePendingLocked(now time.Time) {
+	for k, st := range c.pending {
+		if now.Sub(st.at) > pendingTTL {
+			delete(c.pending, k)
+		}
+	}
 }
 
 // handleReasonReply consumes the operator's reply to a reason prompt and applies
