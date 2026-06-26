@@ -54,5 +54,25 @@ services:
       - ./secrets/dkim:/run/secrets/dkim:ro # you provide dkim.pem (ed25519)
       # - ./config.yaml:/etc/darbaan/config.yaml:ro   # optional mounted config
 
+  # Telegram approval client — a separate process (ADR 0017), a client of the
+  # admin API, NOT part of serve. It shares darbaan's network namespace
+  # (network_mode: service:darbaan) so it reaches the admin API on loopback
+  # (127.0.0.1:1144) and has outbound egress to Telegram; it never touches the
+  # stores directly and holds no mail credentials (ADR 0002). It is stateless —
+  # the posted/pending sets are in-memory by design — so it has no volume.
+  darbaan-telegram:
+    build: .
+    # image: ghcr.io/yaad-index/darbaan:latest   # once a published image exists
+    command: telegram
+    restart: unless-stopped
+    depends_on:
+      - darbaan
+    network_mode: "service:darbaan"
+    environment:
+      DARBAAN_TELEGRAM_TOKEN: "${DARBAAN_TELEGRAM_TOKEN:?set DARBAAN_TELEGRAM_TOKEN in .env}"
+      DARBAAN_TELEGRAM_OPERATOR_ID: "${DARBAAN_TELEGRAM_OPERATOR_ID:?set DARBAAN_TELEGRAM_OPERATOR_ID in .env}"
+      # Same admin token as darbaan — this is the client side of the admin API.
+      DARBAAN_ADMIN_TOKEN: "${DARBAAN_ADMIN_TOKEN:?set DARBAAN_ADMIN_TOKEN in .env}"
+
 volumes:
   darbaan-data:
