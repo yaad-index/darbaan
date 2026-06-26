@@ -294,7 +294,7 @@ func (c *QueueApproveCmd) Run(cli *CLI) error {
 	defer closeStore()
 
 	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, cli.router(),
-		nil, nil, "", c.ID, approver.Verdict{Disposition: approver.Approve})
+		c.ID, approver.Verdict{Disposition: approver.Approve})
 	if err != nil {
 		return err
 	}
@@ -339,19 +339,50 @@ func (c *QueueRejectCmd) Run(cli *CLI) error {
 	}
 
 	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, cli.router(),
-		inbox, sgn, cli.ListenerDomain, c.ID, approver.Verdict{Disposition: approver.Reject, Reason: c.Reason, Retryable: c.Retryable})
+		c.ID, approver.Verdict{Disposition: approver.Reject, Reason: c.Reason, Retryable: c.Retryable})
 	if err != nil {
 		return err
 	}
-	switch m.Status {
-	case sluice.StatusRejected:
-		kind := "permanent"
-		if m.Retryable {
-			kind = "transient"
-		}
-		fmt.Printf("message %s rejected by %s (%s): %s\n", m.ID, m.DecidedBy, kind, m.Reason)
-	default:
+	if m.Status != sluice.StatusRejected {
 		fmt.Printf("message %s: still %s, no verdict applied\n", m.ID, m.Status)
+		return nil
+	}
+
+	// The rejection has committed; report it first. Bounce delivery is a
+	// distinct, downstream step.
+	kind := "permanent"
+	if m.Retryable {
+		kind = "transient"
+	}
+	fmt.Printf("message %s rejected by %s (%s): %s\n", m.ID, m.DecidedBy, kind, m.Reason)
+
+	if err := deliverBounce(inbox, sgn, m, cli.ListenerDomain); err != nil {
+		// The reject stuck; only the bounce failed. Surface it as its own signal
+		// — the agent was NOT notified and the bounce needs redelivery — never as
+		// a reject failure (ADR 0006).
+		return fmt.Errorf("message %s rejected, but bounce delivery FAILED (agent not notified, needs redelivery): %w", m.ID, err)
+	}
+	fmt.Printf("  bounce delivered to %s\n", m.Agent)
+	return nil
+}
+
+// deliverBounce generates, signs, and delivers the DSN bounce for an
+// already-rejected message. It is a distinct step from the rejection: a failure
+// here means "rejected, but the agent was not notified," not a reject failure
+// (ADR 0006). Signing is required (ADR 0007).
+func deliverBounce(inbox inbound.InboundStore, sgn bounceSigner, m sluice.Message, domain string) error {
+	b, err := bounce.Generate(m, m.Reason, m.Retryable, domain)
+	if err != nil {
+		return fmt.Errorf("generate: %w", err)
+	}
+	signed, err := sgn.Sign(b.Raw)
+	if err != nil {
+		return fmt.Errorf("sign: %w", err)
+	}
+	if _, err := inbox.Add(inbound.Delivery{
+		Owner: b.Owner, From: b.From, To: b.To, Subject: b.Subject, Raw: signed,
+	}); err != nil {
+		return fmt.Errorf("store: %w", err)
 	}
 	return nil
 }
@@ -362,7 +393,7 @@ func (c *QueueRejectCmd) Run(cli *CLI) error {
 // message is marked approved and handed to the (stubbed) Sender; the send result
 // is recorded and audited, never silently dropped (ADR 0003). On rejection the
 // reason is recorded. A Hold leaves the message pending.
-func decideAndApply(ctx context.Context, q sluice.MessageStore, sender backend.Sender, router *policy.Router, inbox inbound.InboundStore, sgn bounceSigner, domain string, id string, human approver.Verdict) (sluice.Message, error) {
+func decideAndApply(ctx context.Context, q sluice.MessageStore, sender backend.Sender, router *policy.Router, id string, human approver.Verdict) (sluice.Message, error) {
 	msg, err := q.Get(id)
 	if err != nil {
 		return sluice.Message{}, err
@@ -403,34 +434,10 @@ func decideAndApply(ctx context.Context, q sluice.MessageStore, sender backend.S
 		sendErr := sender.Send(ctx, approved)
 		return q.RecordSendAttempt(id, sendErr)
 	case approver.Reject:
-		rejected, err := q.Reject(id, outcome.DecidedBy, outcome.Reason, outcome.Retryable)
-		if err != nil {
-			return sluice.Message{}, err
-		}
-		// Generate the DSN bounce and deliver it to the agent's mailbox
-		// (ADR 0006). The rejected submission stays in the sluice; the bounce is
-		// a separate inbound object the IMAP face serves (#27).
-		if inbox != nil {
-			b, err := bounce.Generate(rejected, outcome.Reason, outcome.Retryable, domain)
-			if err != nil {
-				return sluice.Message{}, fmt.Errorf("generate bounce: %w", err)
-			}
-			// Sign before store (ADR 0007): the stored bounce is already signed,
-			// so the IMAP face serves it verbatim. Fail closed if no signer.
-			if sgn == nil {
-				return sluice.Message{}, fmt.Errorf("deliver bounce: signing required but no signer configured")
-			}
-			signed, err := sgn.Sign(b.Raw)
-			if err != nil {
-				return sluice.Message{}, fmt.Errorf("sign bounce: %w", err)
-			}
-			if _, err := inbox.Add(inbound.Delivery{
-				Owner: b.Owner, From: b.From, To: b.To, Subject: b.Subject, Raw: signed,
-			}); err != nil {
-				return sluice.Message{}, fmt.Errorf("deliver bounce: %w", err)
-			}
-		}
-		return rejected, nil
+		// Commit the rejection. The DSN bounce is a distinct, downstream step
+		// (deliverBounce) so a delivery failure is never mistaken for a reject
+		// failure (ADR 0006).
+		return q.Reject(id, outcome.DecidedBy, outcome.Reason, outcome.Retryable)
 	default: // Hold — stays pending, fail-closed
 		return msg, nil
 	}
