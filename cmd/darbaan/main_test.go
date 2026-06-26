@@ -28,7 +28,7 @@ func newSeededSluice(t *testing.T) (*sluice.Sluice, string) {
 }
 
 func router() *policy.Router {
-	return policy.NewRouter(defaultStrictChain, defaultLightChain)
+	return policy.NewRouter([]string{"manual"}, []string{"manual"})
 }
 
 func TestApproveReachesStubSenderAndNothingLeaves(t *testing.T) {

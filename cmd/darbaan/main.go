@@ -1,22 +1,16 @@
 // Command darbaan is the Darbaan mail-gate proxy CLI.
 //
-// Subcommands:
-//
-//	darbaan serve                       run the SMTP submission face + sluice
-//	darbaan queue ls                    list held outbound messages
-//	darbaan queue show <id>             dump a held message's raw RFC 822
-//	darbaan queue approve <id>          approve a held message (runs the chain)
-//	darbaan queue reject -reason "" <id>  reject a held message
-//	darbaan version                     print version
-//
-// See the adr/ directory for the design.
+// Configuration layers as file < env < flag: a YAML config file (default
+// /etc/darbaan/config.yaml or --config PATH), overridden by DARBAAN_* env
+// variables, overridden by command-line flags. See config.go for the mechanism
+// and the adr/ directory for the design. cmd/darbaan stays thin (ADR 0013):
+// parsing and wiring only; the logic lives in internal/.
 package main
 
 import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -24,6 +18,8 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
+
+	"github.com/alecthomas/kong"
 
 	"github.com/yaad-index/darbaan/internal/approver"
 	"github.com/yaad-index/darbaan/internal/backend"
@@ -35,82 +31,91 @@ import (
 // version is the build version, overridden at link time via -ldflags.
 var version = "dev"
 
+// CLI is the Darbaan command surface and its configuration. Every config value
+// resolves through file < env < flag (see config.go).
+type CLI struct {
+	Config string `help:"Path to a YAML config file (also searched at /etc/darbaan/config.yaml)." placeholder:"PATH" type:"path"`
+
+	SluiceDB string `name:"sluice-db" default:"darbaan.db" help:"Path to the sluice database." type:"path"`
+
+	ListenerAddr          string `name:"listener-addr" default:":1465" help:"SMTP submission listen address."`
+	ListenerDomain        string `name:"listener-domain" default:"localhost" help:"SMTP greeting domain."`
+	ListenerTLSCert       string `name:"listener-tls-cert" help:"Path to the TLS certificate (PEM)." type:"path"`
+	ListenerTLSKey        string `name:"listener-tls-key" help:"Path to the TLS private key (PEM)." type:"path"`
+	ListenerAllowInsecure bool   `name:"listener-allow-insecure" help:"Allow AUTH over plaintext (local testing only)."`
+
+	AgentUsername string `name:"agent-username" help:"The agent's Darbaan SMTP username. The password is supplied out-of-band via DARBAAN_AGENT_PASS, never inlined in config (ADR 0012)."`
+
+	ApprovalStrict []string `name:"approval-strict" default:"manual" help:"Approver chain for the strict path."`
+	ApprovalLight  []string `name:"approval-light" default:"manual" help:"Approver chain for the light path."`
+
+	Serve   ServeCmd   `cmd:"" help:"Run the SMTP submission face and sluice."`
+	Queue   QueueCmd   `cmd:"" help:"Inspect and decide held messages."`
+	Version VersionCmd `cmd:"" help:"Print version and exit."`
+}
+
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-	var err error
-	switch os.Args[1] {
-	case "serve":
-		err = runServe(os.Args[2:])
-	case "queue":
-		err = runQueue(os.Args[2:])
-	case "version", "-version", "--version":
-		fmt.Println("darbaan", version)
-	default:
-		usage()
-		os.Exit(2)
-	}
+	var cli CLI
+	parser, err := kong.New(&cli, kongOptions(configPathFromArgs(os.Args[1:]))...)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "darbaan:", err)
-		os.Exit(1)
+		panic(err)
 	}
+	ctx, err := parser.Parse(os.Args[1:])
+	parser.FatalIfErrorf(err)
+	ctx.FatalIfErrorf(ctx.Run(&cli))
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, "usage: darbaan <serve|queue|version> [flags]")
-	fmt.Fprintln(os.Stderr, "  serve            run the SMTP submission face + sluice")
-	fmt.Fprintln(os.Stderr, "  queue ls         list held outbound messages")
-	fmt.Fprintln(os.Stderr, "  queue show <id>  dump a held message's raw RFC 822")
-	fmt.Fprintln(os.Stderr, "  queue approve <id>            approve a held message")
-	fmt.Fprintln(os.Stderr, "  queue reject -reason \"\" <id>   reject a held message")
-	fmt.Fprintln(os.Stderr, "  version          print version")
+func (c *CLI) router() *policy.Router {
+	return policy.NewRouter(c.ApprovalStrict, c.ApprovalLight)
 }
 
-func runServe(args []string) error {
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	addr := fs.String("addr", ":1465", "SMTP submission listen address")
-	domain := fs.String("domain", "localhost", "SMTP greeting domain")
-	dbPath := fs.String("db", "darbaan.db", "path to the sluice database file")
-	tlsCert := fs.String("tls-cert", "", "path to the TLS certificate (PEM)")
-	tlsKey := fs.String("tls-key", "", "path to the TLS private key (PEM)")
-	allowInsecure := fs.Bool("allow-insecure", false, "allow AUTH over plaintext (local testing only)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
+func (c *CLI) openSluice() (*sluice.Sluice, error) {
+	return sluice.Open(c.SluiceDB)
+}
 
-	// v1: the single agent credential is supplied at startup via the
-	// environment and kept in memory only. Full at-rest encryption (age) lands
-	// with the deployment/secrets component (ADR 0012).
+// VersionCmd prints the build version.
+type VersionCmd struct{}
+
+func (*VersionCmd) Run() error {
+	fmt.Println("darbaan", version)
+	return nil
+}
+
+// ServeCmd runs the SMTP submission face and sluice.
+type ServeCmd struct{}
+
+func (*ServeCmd) Run(cli *CLI) error {
+	// The password is a secret supplied at startup, kept in memory only; full
+	// at-rest encryption (age) lands with the deployment/secrets component
+	// (ADR 0012). Config carries only the username reference, never the secret.
 	cred := listener.Credential{
-		Username: os.Getenv("DARBAAN_AGENT_USER"),
+		Username: cli.AgentUsername,
 		Password: os.Getenv("DARBAAN_AGENT_PASS"),
 	}
 	if cred.Username == "" || cred.Password == "" {
-		return errors.New("set DARBAAN_AGENT_USER and DARBAAN_AGENT_PASS")
+		return errors.New("set agent-username (config/flag/DARBAAN_AGENT_USERNAME) and DARBAAN_AGENT_PASS")
 	}
 
 	var tlsConfig *tls.Config
-	if *tlsCert != "" || *tlsKey != "" {
-		cert, err := tls.LoadX509KeyPair(*tlsCert, *tlsKey)
+	if cli.ListenerTLSCert != "" || cli.ListenerTLSKey != "" {
+		cert, err := tls.LoadX509KeyPair(cli.ListenerTLSCert, cli.ListenerTLSKey)
 		if err != nil {
 			return fmt.Errorf("load TLS keypair: %w", err)
 		}
 		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 	}
 
-	q, err := sluice.Open(*dbPath)
+	q, err := cli.openSluice()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = q.Close() }()
 
 	srv, err := listener.NewServer(listener.ServerConfig{
-		Addr:          *addr,
-		Domain:        *domain,
+		Addr:          cli.ListenerAddr,
+		Domain:        cli.ListenerDomain,
 		TLSConfig:     tlsConfig,
-		AllowInsecure: *allowInsecure,
+		AllowInsecure: cli.ListenerAllowInsecure,
 	}, cred, q)
 	if err != nil {
 		return err
@@ -123,75 +128,84 @@ func runServe(args []string) error {
 		_ = srv.Close()
 	}()
 
-	fmt.Fprintf(os.Stderr, "darbaan: SMTP submission face on %s (db %s)\n", *addr, *dbPath)
+	fmt.Fprintf(os.Stderr, "darbaan: SMTP submission face on %s (db %s)\n", cli.ListenerAddr, cli.SluiceDB)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, net.ErrClosed) {
 		return err
 	}
 	return nil
 }
 
-func runQueue(args []string) error {
-	if len(args) == 0 {
-		return errors.New("usage: darbaan queue <ls|show|approve|reject> [flags] [id]")
-	}
-	sub := args[0]
+// QueueCmd groups the queue inspection and decision subcommands.
+type QueueCmd struct {
+	Ls      QueueLsCmd      `cmd:"" help:"List held outbound messages."`
+	Show    QueueShowCmd    `cmd:"" help:"Dump a held message's raw RFC 822."`
+	Approve QueueApproveCmd `cmd:"" help:"Approve a held message (runs the approval chain)."`
+	Reject  QueueRejectCmd  `cmd:"" help:"Reject a held message."`
+}
 
-	// Flags precede the positional id, e.g. `queue reject -reason "no" <id>`.
-	fs := flag.NewFlagSet("queue "+sub, flag.ExitOnError)
-	dbPath := fs.String("db", "darbaan.db", "path to the sluice database file")
-	var reason string
-	var retryable bool
-	if sub == "reject" {
-		fs.StringVar(&reason, "reason", "", "rejection reason (required)")
-		fs.BoolVar(&retryable, "retryable", false, "mark the rejection transient (revise & resubmit) rather than permanent")
-	}
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
-	}
-	id := fs.Arg(0)
+// QueueLsCmd lists held messages.
+type QueueLsCmd struct{}
 
-	q, err := sluice.Open(*dbPath)
+func (*QueueLsCmd) Run(cli *CLI) error {
+	q, err := cli.openSluice()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = q.Close() }()
 
-	switch sub {
-	case "ls":
-		return queueList(q)
-	case "show":
-		if id == "" {
-			return errors.New("usage: darbaan queue show <id>")
-		}
-		return queueShow(q, id)
-	case "approve":
-		if id == "" {
-			return errors.New("usage: darbaan queue approve <id>")
-		}
-		return runApprove(q, id)
-	case "reject":
-		if id == "" || reason == "" {
-			return errors.New(`usage: darbaan queue reject -reason "..." <id>`)
-		}
-		return runReject(q, id, reason, retryable)
-	default:
-		return fmt.Errorf("unknown queue subcommand %q", sub)
+	metas, err := q.List()
+	if err != nil {
+		return err
 	}
+	if len(metas) == 0 {
+		fmt.Fprintln(os.Stderr, "queue is empty")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "ID\tSTATUS\tAGENT\tFROM\tRCPT\tSIZE\tRECEIVED")
+	for _, m := range metas {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
+			m.ID, m.Status, m.Agent, m.From, len(m.Rcpt), m.Size, m.ReceivedAt.Format(time.RFC3339))
+	}
+	return w.Flush()
 }
 
-// defaultStrictChain and defaultLightChain are the v1 approval chains. Both
-// resolve to the manual approver until a pre-screener and more approvers land;
-// these become operator-configurable later. If a named approver is not compiled
-// in, the chain fails closed (nothing can be approved).
-var (
-	defaultStrictChain = []string{"manual"}
-	defaultLightChain  = []string{"manual"}
-)
+// QueueShowCmd dumps a held message's raw RFC 822.
+type QueueShowCmd struct {
+	ID string `arg:"" help:"Message id."`
+}
 
-func runApprove(q *sluice.Sluice, id string) error {
-	m, err := decideAndApply(context.Background(), q, backend.StubSender{},
-		policy.NewRouter(defaultStrictChain, defaultLightChain),
-		id, approver.Verdict{Disposition: approver.Approve})
+func (c *QueueShowCmd) Run(cli *CLI) error {
+	q, err := cli.openSluice()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = q.Close() }()
+
+	msg, err := q.Get(c.ID)
+	if err != nil {
+		return err
+	}
+	// Raw message/rfc822 to stdout so a human (or the future hold-for-human
+	// approval flow) can read exactly what is held.
+	_, err = os.Stdout.Write(msg.Raw)
+	return err
+}
+
+// QueueApproveCmd approves a held message.
+type QueueApproveCmd struct {
+	ID string `arg:"" help:"Message id."`
+}
+
+func (c *QueueApproveCmd) Run(cli *CLI) error {
+	q, err := cli.openSluice()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = q.Close() }()
+
+	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, cli.router(),
+		c.ID, approver.Verdict{Disposition: approver.Approve})
 	if err != nil {
 		return err
 	}
@@ -207,10 +221,22 @@ func runApprove(q *sluice.Sluice, id string) error {
 	return nil
 }
 
-func runReject(q *sluice.Sluice, id, reason string, retryable bool) error {
-	m, err := decideAndApply(context.Background(), q, backend.StubSender{},
-		policy.NewRouter(defaultStrictChain, defaultLightChain),
-		id, approver.Verdict{Disposition: approver.Reject, Reason: reason, Retryable: retryable})
+// QueueRejectCmd rejects a held message.
+type QueueRejectCmd struct {
+	ID        string `arg:"" help:"Message id."`
+	Reason    string `required:"" help:"Rejection reason."`
+	Retryable bool   `help:"Mark the rejection transient (revise & resubmit) rather than permanent."`
+}
+
+func (c *QueueRejectCmd) Run(cli *CLI) error {
+	q, err := cli.openSluice()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = q.Close() }()
+
+	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, cli.router(),
+		c.ID, approver.Verdict{Disposition: approver.Reject, Reason: c.Reason, Retryable: c.Retryable})
 	if err != nil {
 		return err
 	}
@@ -267,8 +293,10 @@ func decideAndApply(ctx context.Context, q *sluice.Sluice, sender backend.Sender
 		if _, err := q.Approve(id, outcome.DecidedBy, outcome.Released); err != nil {
 			return sluice.Message{}, err
 		}
-		// Attempt the (stubbed) upstream send; record the result either way.
-		approved, _ := q.Get(id)
+		approved, err := q.Get(id)
+		if err != nil {
+			return sluice.Message{}, err
+		}
 		sendErr := sender.Send(ctx, approved)
 		return q.RecordSendAttempt(id, sendErr)
 	case approver.Reject:
@@ -276,34 +304,4 @@ func decideAndApply(ctx context.Context, q *sluice.Sluice, sender backend.Sender
 	default: // Hold — stays pending, fail-closed
 		return msg, nil
 	}
-}
-
-func queueList(q *sluice.Sluice) error {
-	metas, err := q.List()
-	if err != nil {
-		return err
-	}
-	if len(metas) == 0 {
-		fmt.Fprintln(os.Stderr, "queue is empty")
-		return nil
-	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ID\tSTATUS\tAGENT\tFROM\tRCPT\tSIZE\tRECEIVED")
-	for _, m := range metas {
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
-			m.ID, m.Status, m.Agent, m.From, len(m.Rcpt), m.Size,
-			m.ReceivedAt.Format(time.RFC3339))
-	}
-	return w.Flush()
-}
-
-func queueShow(q *sluice.Sluice, id string) error {
-	msg, err := q.Get(id)
-	if err != nil {
-		return err
-	}
-	// Raw message/rfc822 to stdout so a human (or the future hold-for-human
-	// approval flow) can read exactly what is held.
-	_, err = os.Stdout.Write(msg.Raw)
-	return err
 }
