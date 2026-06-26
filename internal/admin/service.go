@@ -9,6 +9,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/yaad-index/darbaan/internal/approver"
@@ -181,5 +182,5 @@ func (s *Service) deliverBounce(m sluice.Message, reason string, retryable bool)
 }
 
 func isSendPending(err error) bool {
-	return err != nil && err.Error() == backend.ErrSendPending.Error()
+	return errors.Is(err, backend.ErrSendPending)
 }
