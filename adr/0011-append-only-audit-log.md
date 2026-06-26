@@ -35,3 +35,9 @@ the source of truth. This is a deliberate trade for the off-switch and
 modularity. The hash chain stays tamper-evident (blockchain-like, not a
 blockchain — no consensus); pluggability leaves room for a stronger external
 append-only sink later without touching call sites.
+
+`Verify()` proves chain **integrity** (the prev-hash links of existing entries),
+**not completeness**: because audit is best-effort and out-of-transaction, a
+crash between the message-store commit and the audit write leaves a gap that
+`Verify()` cannot detect. Gap detection, if ever needed, is a separate
+message-store-to-audit cross-reference, not part of `Verify()`.
