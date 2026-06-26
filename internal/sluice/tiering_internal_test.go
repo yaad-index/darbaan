@@ -48,6 +48,51 @@ func TestEnqueueTiersContent(t *testing.T) {
 	assert.Equal(t, m.Raw, got.Raw)
 }
 
+// The sweep fires at store-open: an orphan blob present when a store is reopened
+// is reclaimed by newBbolt before serving.
+func TestSweepRunsAtOpen(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sluice.db")
+
+	al, err := audit.New("null", "")
+	require.NoError(t, err)
+	ms, err := newBbolt(dbPath, al)
+	require.NoError(t, err)
+	q := ms.(*bboltStore)
+	_, err = q.Enqueue(Submission{Raw: []byte("x")})
+	require.NoError(t, err)
+	require.NoError(t, q.blobs.Put("9999", []byte("orphan"))) // no metadata record
+	require.NoError(t, q.Close())
+	require.NoError(t, al.Close())
+
+	// Reopen — newBbolt sweeps before returning.
+	al2, err := audit.New("null", "")
+	require.NoError(t, err)
+	ms2, err := newBbolt(dbPath, al2)
+	require.NoError(t, err)
+	q2 := ms2.(*bboltStore)
+	t.Cleanup(func() { _ = q2.Close(); _ = al2.Close() })
+	_, err = q2.blobs.Get("9999")
+	assert.Error(t, err) // reclaimed at open
+}
+
+// sweepOrphans reclaims a blob with no metadata record but keeps a referenced one.
+func TestSweepOrphans(t *testing.T) {
+	q := newTieredStore(t)
+	m, err := q.Enqueue(Submission{Raw: []byte("Subject: x\r\n\r\nbody")})
+	require.NoError(t, err)
+	// A blob whose id has no metadata record (a crash-orphan).
+	require.NoError(t, q.blobs.Put("9999", []byte("orphan")))
+
+	require.NoError(t, q.sweepOrphans())
+
+	got, err := q.Get(m.ID) // referenced blob survived
+	require.NoError(t, err)
+	assert.NotEmpty(t, got.Raw)
+	_, err = q.blobs.Get("9999") // orphan reclaimed
+	assert.Error(t, err)
+}
+
 // A legacy record (pre-ADR-0018: a bare Message with inline raw, no Blobbed /
 // subject / size) is read back from the inline bytes — Get returns the raw and
 // List derives subject + size. No migrate-on-open.

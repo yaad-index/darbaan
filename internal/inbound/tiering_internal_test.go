@@ -49,6 +49,22 @@ func TestAddTiersContent(t *testing.T) {
 	assert.Equal(t, m.Raw, list[0].Raw) // List reassembles (IMAP snapshot needs it)
 }
 
+// sweepOrphans reclaims a blob with no metadata record but keeps a referenced one.
+func TestSweepOrphans(t *testing.T) {
+	s := newTieredStore(t)
+	m, err := s.Add(Delivery{Owner: "agent", Raw: []byte("Subject: x\r\n\r\nbody")})
+	require.NoError(t, err)
+	require.NoError(t, s.blobs.Put("9999", []byte("orphan"))) // no metadata record
+
+	require.NoError(t, s.sweepOrphans())
+
+	got, err := s.Get("agent", m.ID) // referenced blob survived
+	require.NoError(t, err)
+	assert.NotEmpty(t, got.Raw)
+	_, err = s.blobs.Get("9999") // orphan reclaimed
+	assert.Error(t, err)
+}
+
 // A legacy record (pre-ADR-0018: a bare inline-raw Message) is read back from
 // the inline bytes by Get and List, mutates via SetSeen, and stays owner-scoped.
 func TestLegacyInlineFallback(t *testing.T) {

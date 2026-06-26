@@ -89,6 +89,33 @@ func (s *Store) Delete(key string) error {
 	return nil
 }
 
+// SweepOrphans deletes blobs whose id is not in live — content left behind when
+// a crash interrupted the blob-then-metadata write, so no metadata references
+// it. In-progress temp files (from Put) are skipped; only final, id-named blobs
+// are considered. It returns the number reclaimed. Safe to run only when there
+// are no concurrent writers (e.g. at store-open).
+func (s *Store) SweepOrphans(live map[string]bool) (int, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return 0, fmt.Errorf("blobstore: read dir: %w", err)
+	}
+	reclaimed := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || strings.Contains(name, ".tmp-") {
+			continue // skip subdirs and in-progress temp files
+		}
+		if live[name] {
+			continue // a metadata record references it — keep
+		}
+		if err := s.Delete(name); err != nil {
+			return reclaimed, err
+		}
+		reclaimed++
+	}
+	return reclaimed, nil
+}
+
 // validKey keeps a key to a single path element — it can never contain a
 // separator or traverse out of the directory (defense in depth; ids are
 // store-generated, never operator input).
