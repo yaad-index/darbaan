@@ -40,6 +40,11 @@ listener-tls-cert: ""          # path to the TLS certificate (PEM)
 listener-tls-key: ""           # path to the TLS private key (PEM)
 listener-allow-insecure: false # permit AUTH over plaintext — local testing only
 
+# IMAP read face: the agent reads its Darbaan-generated messages (bounces) from
+# the inbound store over standard IMAP. One service hosts both faces (ADR 0001);
+# the IMAP face reuses the agent credential and the listener TLS above.
+imap-addr: ":1143"
+
 # The agent's Darbaan SMTP username. The password is NOT configured here: it is
 # supplied out-of-band via DARBAAN_AGENT_PASS, a reference to the encrypted
 # store (ADR 0012). Secrets are never inlined in config.
