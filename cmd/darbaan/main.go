@@ -61,7 +61,7 @@ type CLI struct {
 
 func main() {
 	var cli CLI
-	parser, err := kong.New(&cli, kongOptions(configPathFromArgs(os.Args[1:]))...)
+	parser, err := kong.New(&cli, kongOptions(resolveConfigPath(os.Args[1:]))...)
 	if err != nil {
 		panic(err)
 	}

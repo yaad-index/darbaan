@@ -27,11 +27,46 @@ func envResolver() kong.Resolver {
 	replacer := strings.NewReplacer("-", "_", ".", "_")
 	return kong.ResolverFunc(func(_ *kong.Context, _ *kong.Path, flag *kong.Flag) (any, error) {
 		name := envPrefix + strings.ToUpper(replacer.Replace(flag.Name))
-		if v, ok := os.LookupEnv(name); ok {
-			return v, nil
+		v, ok := os.LookupEnv(name)
+		if !ok {
+			return nil, nil
 		}
-		return nil, nil
+		// kong does not split a single resolver string into slice elements, so
+		// for slice flags (e.g. approval-strict) split the comma-separated env
+		// value ourselves — matching how the YAML and repeated-flag paths build
+		// multi-element chains. Without this, DARBAAN_APPROVAL_STRICT="a,b" would
+		// collapse to a single "a,b" element.
+		if flag.IsSlice() {
+			// kong's slice decoder splits the returned string on the flag's
+			// separator (comma) but does not trim, so normalize first: trim and
+			// drop empties, then rejoin for kong to re-split. A comma-separated
+			// env value such as DARBAAN_APPROVAL_STRICT="a, b" thus yields a
+			// clean multi-element chain ["a","b"]; an empty value does not
+			// override a non-empty default with an empty chain.
+			parts := splitComma(v)
+			if len(parts) == 0 {
+				return nil, nil
+			}
+			return strings.Join(parts, ","), nil
+		}
+		return v, nil
 	})
+}
+
+// splitComma splits a comma-separated env value into trimmed, non-empty
+// elements. An empty (or whitespace-only) value yields no elements.
+func splitComma(v string) []string {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // kongOptions builds the parser options that establish the file < env < flag
@@ -52,9 +87,12 @@ func kongOptions(extraConfigPath string) []kong.Option {
 	}
 }
 
-// configPathFromArgs scans for --config so its file can be added to the loader
-// paths before kong parses (the loader paths are fixed at construction time).
-func configPathFromArgs(args []string) string {
+// resolveConfigPath determines which config file to add to the loader paths
+// before kong parses (the loader paths are fixed at construction time, so this
+// runs before the resolvers). The --config flag wins; otherwise DARBAAN_CONFIG
+// is honored, so an operator can select the config file by env as well — flag
+// over env, consistent with the rest of the layering.
+func resolveConfigPath(args []string) string {
 	for i, a := range args {
 		switch {
 		case a == "--config" && i+1 < len(args):
@@ -63,5 +101,5 @@ func configPathFromArgs(args []string) string {
 			return strings.TrimPrefix(a, "--config=")
 		}
 	}
-	return ""
+	return os.Getenv(envPrefix + "CONFIG")
 }
