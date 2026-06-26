@@ -1,0 +1,25 @@
+# Darbaan configuration (YAML).
+#
+# Precedence, low to high: this file < DARBAAN_* environment < command-line flags.
+# Default search path is /etc/darbaan/config.yaml; override with --config PATH.
+# Every key below has a matching --flag and a DARBAAN_<KEY> env var
+# (uppercased, '-' -> '_'), e.g. listener-addr -> --listener-addr / DARBAAN_LISTENER_ADDR.
+
+# Sluice (outbound hold/queue) database path.
+sluice-db: darbaan.db
+
+# SMTP submission face.
+listener-addr: ":1465"
+listener-domain: localhost
+listener-tls-cert: ""          # path to the TLS certificate (PEM)
+listener-tls-key: ""           # path to the TLS private key (PEM)
+listener-allow-insecure: false # permit AUTH over plaintext — local testing only
+
+# The agent's Darbaan SMTP username. The password is NOT configured here: it is
+# supplied out-of-band via DARBAAN_AGENT_PASS, a reference to the encrypted
+# store (ADR 0012). Secrets are never inlined in config.
+agent-username: ""
+
+# Approval chains: ordered approver names. v1 ships the manual (human) approver.
+approval-strict: [manual]
+approval-light: [manual]
