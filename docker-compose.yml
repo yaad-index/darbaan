@@ -15,12 +15,19 @@ services:
     # image: ghcr.io/yaad-index/darbaan:latest   # once a published image exists
     restart: unless-stopped
     ports:
+      # Only the agent faces are published. The admin API (127.0.0.1:1144) is
+      # deliberately NOT here — it stays container-internal, reached only via
+      # `docker exec darbaan darbaan queue ...`, never from the host or the agent.
       - "127.0.0.1:1465:1465"   # SMTP submission (agent -> Darbaan)
       - "127.0.0.1:1143:1143"   # IMAP read (agent reads its bounces)
     environment:
       # Agent credential. Username here, password from .env.
       DARBAAN_AGENT_USERNAME: "agent"
       DARBAAN_AGENT_PASS: "${DARBAAN_AGENT_PASS:?set DARBAAN_AGENT_PASS in .env}"
+
+      # Operator admin API token (required). Inherited by `docker exec` so the
+      # queue commands authenticate automatically.
+      DARBAAN_ADMIN_TOKEN: "${DARBAAN_ADMIN_TOKEN:?set DARBAAN_ADMIN_TOKEN in .env}"
 
       # TLS — secure by default. Mount your cert + key (see volumes) and the
       # agent connects over TLS (ADR 0002).
