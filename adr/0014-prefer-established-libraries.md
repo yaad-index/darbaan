@@ -24,3 +24,11 @@ avoid trivial micro-dependencies that add supply-chain surface for little gain.
 - All dependencies must be license-compatible with MIT.
 - We accept some supply-chain surface as the price of protocol/crypto correctness,
   and keep that surface deliberate rather than incidental.
+
+## Amendment (2026-06-26, review)
+The library-first rule covers **commodity concerns**, not only protocol and
+crypto. **CLI/argument parsing** (kong) and **configuration** (file/env/flags
+layering) are library work too, not in-house logic. In-house code is reserved
+for Darbaan's actual domain logic: the sluice, the approver pipeline, routing,
+policy. Hand-rolling arg-parsing or config layering is out of scope — reach for
+the vetted library.
