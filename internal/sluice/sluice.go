@@ -7,10 +7,14 @@
 package sluice
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"mime"
 	"sort"
 	"time"
+
+	"github.com/emersion/go-message"
 
 	"github.com/yaad-index/darbaan/internal/audit"
 )
@@ -62,14 +66,33 @@ type Message struct {
 }
 
 // Meta is the listing view of a queued message: everything but the raw body.
+// Subject is derived from the raw message at list time (not separately stored),
+// so admin clients (queue ls, the Telegram bot, a future web UI) get it without
+// fetching and re-parsing the body themselves.
 type Meta struct {
 	ID         string
 	Agent      string
 	From       string
 	Rcpt       []string
+	Subject    string
 	Size       int
 	ReceivedAt time.Time
 	Status     Status
+}
+
+// subjectFromRaw extracts the Subject header from a stored message for display
+// in listings, decoding RFC 2047 encoded-words. Best-effort: a malformed or
+// charset-odd message yields "" rather than failing the whole listing.
+func subjectFromRaw(raw []byte) string {
+	ent, _ := message.Read(bytes.NewReader(raw))
+	if ent == nil {
+		return "" // unparseable (a charset warning still returns a usable entity)
+	}
+	s := ent.Header.Get("Subject")
+	if dec, err := new(mime.WordDecoder).DecodeHeader(s); err == nil {
+		s = dec
+	}
+	return s
 }
 
 // MessageStore is the durable outbound hold/queue. It is the source of truth;

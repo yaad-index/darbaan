@@ -24,6 +24,28 @@ func newStore(t *testing.T) (sluice.MessageStore, audit.AuditLog) {
 	return q, al
 }
 
+func TestListSubject(t *testing.T) {
+	q, _ := newStore(t)
+
+	// Plain subject, an RFC 2047 encoded-word subject, and no Subject header.
+	_, err := q.Enqueue(sluice.Submission{Agent: "a", Raw: []byte("Subject: Hello there\r\n\r\nbody")})
+	require.NoError(t, err)
+	_, err = q.Enqueue(sluice.Submission{Agent: "a", Raw: []byte("Subject: =?utf-8?q?caf=C3=A9?=\r\n\r\nbody")})
+	require.NoError(t, err)
+	_, err = q.Enqueue(sluice.Submission{Agent: "a", Raw: []byte("From: x\r\n\r\nno subject header")})
+	require.NoError(t, err)
+
+	metas, err := q.List()
+	require.NoError(t, err)
+	got := map[string]bool{}
+	for _, m := range metas {
+		got[m.Subject] = true
+	}
+	assert.True(t, got["Hello there"], "plain subject parsed")
+	assert.True(t, got["café"], "RFC 2047 encoded-word decoded")
+	assert.True(t, got[""], "absent subject yields empty, not an error")
+}
+
 func TestEnqueueListGet(t *testing.T) {
 	q, _ := newStore(t)
 
