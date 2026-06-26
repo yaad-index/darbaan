@@ -103,6 +103,7 @@ func (s *bboltStore) List() ([]Meta, error) {
 				Agent:      m.Agent,
 				From:       m.From,
 				Rcpt:       m.Rcpt,
+				Subject:    subjectFromRaw(m.Raw),
 				Size:       len(m.Raw),
 				ReceivedAt: m.ReceivedAt,
 				Status:     m.Status,

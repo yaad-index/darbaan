@@ -321,12 +321,20 @@ func (*QueueLsCmd) Run(cli *CLI) error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ID\tSTATUS\tAGENT\tFROM\tRCPT\tSIZE\tRECEIVED")
+	_, _ = fmt.Fprintln(w, "ID\tSTATUS\tAGENT\tFROM\tSUBJECT\tRCPT\tSIZE\tRECEIVED")
 	for _, m := range metas {
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
-			m.ID, m.Status, m.Agent, m.From, len(m.Rcpt), m.Size, m.ReceivedAt.Format(time.RFC3339))
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
+			m.ID, m.Status, m.Agent, m.From, truncate(m.Subject, 40), len(m.Rcpt), m.Size, m.ReceivedAt.Format(time.RFC3339))
 	}
 	return w.Flush()
+}
+
+// truncate shortens s to at most n runes for table display.
+func truncate(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
 }
 
 // QueueShowCmd dumps a held message's raw RFC 822.
