@@ -89,6 +89,44 @@ func TestIMAPStoreUnsetSeenPersists(t *testing.T) {
 	assert.False(t, got.Seen) // \Seen cleared and persisted
 }
 
+func TestIMAPSameSessionSeenSync(t *testing.T) {
+	store := seedInbound(t)
+	c, err := imapclient.DialInsecure(startIMAP(t, store), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	_, err = c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+
+	// A non-peek body fetch marks \Seen.
+	_, err = c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{
+		BodySection: []*imap.FetchItemBodySection{{}},
+	}).Collect()
+	require.NoError(t, err)
+
+	// A later FLAGS-only fetch in the SAME session reflects \Seen (not stale).
+	msgs, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{Flags: true}).Collect()
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	assert.Contains(t, msgs[0].Flags, imap.FlagSeen)
+}
+
+func TestIMAPEmptyMailboxUIDNext(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "empty.db"))
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	c, err := imapclient.DialInsecure(startIMAP(t, store), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+
+	sel, err := c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0), sel.NumMessages)
+	assert.Equal(t, imap.UID(1), sel.UIDNext) // UID 0 invalid; empty mailbox → 1
+}
+
 func TestIMAPBadAuthRejected(t *testing.T) {
 	c, err := imapclient.DialInsecure(startIMAP(t, seedInbound(t)), nil)
 	require.NoError(t, err)

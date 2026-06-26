@@ -94,7 +94,7 @@ func (s *imapSession) Select(mailbox string, _ *imap.SelectOptions) (*imap.Selec
 	}
 	s.selected = msgs
 
-	var firstUnseen, uidNext uint32
+	firstUnseen, uidNext := uint32(0), uint32(1) // UID 0 is invalid (RFC 3501)
 	for i, m := range msgs {
 		uid := uint32(uidOf(m))
 		if uid >= uidNext {
@@ -141,7 +141,7 @@ func (s *imapSession) Status(mailbox string, options *imap.StatusOptions) (*imap
 		}
 		data.NumUnseen = &unseen
 	}
-	var uidNext uint32
+	uidNext := uint32(1) // UID 0 is invalid (RFC 3501)
 	for _, m := range msgs {
 		if u := uint32(uidOf(m)); u >= uidNext {
 			uidNext = u + 1
@@ -176,7 +176,7 @@ func (s *imapSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 	}
 
 	var ferr error
-	s.forEach(numSet, func(seqNum uint32, m inbound.Message) {
+	s.forEach(numSet, func(seqNum uint32, m *inbound.Message) {
 		if ferr != nil {
 			return
 		}
@@ -185,9 +185,9 @@ func (s *imapSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 				ferr = err
 				return
 			}
-			m.Seen = true
+			m.Seen = true // also updates s.selected via the pointer
 		}
-		ferr = fetchMessage(w.CreateMessage(seqNum), m, options)
+		ferr = fetchMessage(w.CreateMessage(seqNum), *m, options)
 	})
 	return ferr
 }
@@ -196,7 +196,7 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 	seen, touchesSeen := seenFromStoreFlags(flags)
 
 	var serr error
-	s.forEach(numSet, func(seqNum uint32, m inbound.Message) {
+	s.forEach(numSet, func(seqNum uint32, m *inbound.Message) {
 		if serr != nil {
 			return
 		}
@@ -205,14 +205,14 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 				serr = err
 				return
 			}
-			m.Seen = seen
+			m.Seen = seen // also updates s.selected via the pointer
 		}
 		if flags.Silent {
 			return
 		}
 		rw := w.CreateMessage(seqNum)
-		rw.WriteUID(uidOf(m))
-		rw.WriteFlags(flagList(m))
+		rw.WriteUID(uidOf(*m))
+		rw.WriteFlags(flagList(*m))
 		if err := rw.Close(); err != nil {
 			serr = err
 		}
@@ -221,16 +221,19 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 }
 
 // forEach calls fn for each selected message matching numSet, computing its
-// sequence number (position) and resolving UID vs sequence membership.
-func (s *imapSession) forEach(numSet imap.NumSet, fn func(seqNum uint32, m inbound.Message)) {
-	for i, m := range s.selected {
+// sequence number (position) and resolving UID vs sequence membership. fn
+// receives a pointer into s.selected, so flag updates it makes are reflected in
+// later in-session reads (e.g. a FLAGS query after a body fetch).
+func (s *imapSession) forEach(numSet imap.NumSet, fn func(seqNum uint32, m *inbound.Message)) {
+	for i := range s.selected {
+		m := &s.selected[i]
 		seqNum := uint32(i) + 1
 		var match bool
 		switch set := numSet.(type) {
 		case imap.SeqSet:
 			match = set.Contains(seqNum)
 		case imap.UIDSet:
-			match = set.Contains(uidOf(m))
+			match = set.Contains(uidOf(*m))
 		}
 		if match {
 			fn(seqNum, m)
