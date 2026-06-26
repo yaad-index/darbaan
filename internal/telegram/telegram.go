@@ -12,6 +12,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -163,24 +164,53 @@ func (c *Client) notify(ctx context.Context, m sluice.Meta) error {
 		to = strings.Join(m.Rcpt, ", ")
 	}
 	n := notification{
-		id:      m.ID,
-		from:    from,
-		to:      to,
-		subject: displaySubject(m.Subject),
-		size:    m.Size,
-		body:    bodyText(raw),
+		id:          m.ID,
+		from:        from,
+		to:          to,
+		subject:     displaySubject(m.Subject),
+		size:        m.Size,
+		body:        bodyText(raw),
+		attachments: attachments(raw),
 	}
 	// Surface recipients that deliver but aren't visible in the headers (Bcc),
 	// but only when we could actually read the headers.
 	if parsed {
 		n.hidden = hiddenRcpts(m.Rcpt, headerSet)
 	}
-	_, err = c.bot.SendMessage(ctx, &bot.SendMessageParams{
+	// The decision message + keyboard is the anchor and the gating send: it is
+	// marked posted on success, so a later attachment-upload failure never
+	// causes a duplicate re-notify.
+	if _, err = c.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      c.operatorID,
 		Text:        formatNotification(n),
 		ReplyMarkup: decisionKeyboard(m.ID),
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+	// Then upload each attachment so the operator can open the real file before
+	// approving — best-effort, after the anchor (the metadata line already
+	// describes them, so an upload failure degrades, never blocks the decision).
+	c.sendAttachments(ctx, n.attachments)
+	return nil
+}
+
+// maxUpload is Telegram's bot sendDocument size cap. Anything over it is shown
+// in the metadata line only (Gmail's ~25 MB outbound cap means this rarely
+// triggers).
+const maxUpload = 50 * 1024 * 1024
+
+func (c *Client) sendAttachments(ctx context.Context, atts []attachment) {
+	for _, a := range atts {
+		if a.size > maxUpload || len(a.data) == 0 {
+			continue // too large / empty — the metadata line covers it
+		}
+		if _, err := c.bot.SendDocument(ctx, &bot.SendDocumentParams{
+			ChatID:   c.operatorID,
+			Document: &models.InputFileUpload{Filename: a.filename, Data: bytes.NewReader(a.data)},
+		}); err != nil {
+			log.Printf("darbaan telegram: upload attachment %s: %v", a.filename, err)
+		}
+	}
 }
 
 // prunePosted drops de-dup entries for messages no longer pending, bounding the
@@ -215,13 +245,14 @@ func (c *Client) markPosted(id string) {
 
 // notification is the display-ready content of an operator notification.
 type notification struct {
-	id      string
-	from    string // header display form, falling back to the envelope sender
-	to      string // header To/Cc display form, falling back to the envelope rcpts
-	subject string
-	size    int
-	hidden  []string // envelope recipients not in the headers (Bcc)
-	body    string
+	id          string
+	from        string // header display form, falling back to the envelope sender
+	to          string // header To/Cc display form, falling back to the envelope rcpts
+	subject     string
+	size        int
+	hidden      []string // envelope recipients not in the headers (Bcc)
+	body        string
+	attachments []attachment // attachment parts (filename/type/size — the exfil vector)
 }
 
 func displaySubject(s string) string {
@@ -248,18 +279,40 @@ func formatNotification(n notification) string {
 		fmt.Fprintf(&b, "\n(!) also delivering to (not in headers): %s", strings.Join(n.hidden, ", "))
 	}
 	header := b.String()
+	// The attachment line is security-critical (the exfil vector), so it is
+	// reserved in the cap budget and rendered after the body: the BODY truncates
+	// first, the attachment list always survives.
+	suffix := "\n\n" + attachmentsLine(n.attachments)
 	if n.body == "" {
-		return header + "\n\n(no text body)"
+		return header + "\n\n(no text body)" + suffix
 	}
 	prefix := header + "\n\n--- body ---\n"
-	avail := maxNotificationRunes - len([]rune(prefix)) - 40 // room for the marker
+	avail := maxNotificationRunes - len([]rune(prefix)) - len([]rune(suffix)) - 40 // room for the marker
 	if avail < 0 {
 		avail = 0
 	}
 	if br := []rune(n.body); len(br) > avail {
-		return prefix + string(br[:avail]) + fmt.Sprintf("\n...(truncated, %d bytes)", len(n.body))
+		return prefix + string(br[:avail]) + fmt.Sprintf("\n...(truncated, %d bytes)", len(n.body)) + suffix
 	}
-	return prefix + n.body
+	return prefix + n.body + suffix
+}
+
+// attachmentsLine lists the attachments (filename, content-type, human size) —
+// the bytes are uploaded separately. An over-cap attachment is flagged as not
+// previewable.
+func attachmentsLine(atts []attachment) string {
+	if len(atts) == 0 {
+		return "attachments: none"
+	}
+	parts := make([]string, len(atts))
+	for i, a := range atts {
+		if a.size > maxUpload {
+			parts[i] = fmt.Sprintf("%s (%s, %s, too large to preview)", a.filename, a.contentType, humanSize(a.size))
+		} else {
+			parts[i] = fmt.Sprintf("%s (%s, %s)", a.filename, a.contentType, humanSize(a.size))
+		}
+	}
+	return "attachments: " + strings.Join(parts, ", ")
 }
 
 // decisionKeyboard lays in all three decision buttons. The callbacks are wired
