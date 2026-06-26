@@ -4,7 +4,8 @@ Darbaan records its significant decisions as ADRs. Each file is one decision:
 its context, the decision, and the consequences. ADRs are immutable once
 Accepted — to change one, add a new ADR that supersedes it.
 
-These initial records (0001–0013) capture the v1 design locked on 2026-06-25.
+These records (0001–0015) capture the v1 design, locked 2026-06-25 and amended
+through 2026-06-26 (maintainer review).
 
 | ADR | Title |
 |---|---|
@@ -21,5 +22,6 @@ These initial records (0001–0013) capture the v1 design locked on 2026-06-25.
 | [0010](0010-multi-mailbox-v1-multi-agent-deferred.md) | Multi-mailbox in v1; multi-agent deferred |
 | [0011](0011-append-only-audit-log.md) | Append-only audit log |
 | [0012](0012-deployment-and-secrets-at-rest.md) | Deployment and secrets at rest |
-| [0013](0013-go-and-mit.md) | Go 1.24+, MIT license |
+| [0013](0013-go-and-mit.md) | Go (latest stable), MIT license |
 | [0014](0014-prefer-established-libraries.md) | Prefer established libraries over reinventing |
+| [0015](0015-storage-abstraction.md) | Abstract storage behind interfaces; config-selected backend |
