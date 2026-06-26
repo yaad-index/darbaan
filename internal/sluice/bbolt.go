@@ -69,7 +69,40 @@ func newBbolt(path string, al audit.AuditLog) (MessageStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("sluice: open blob store: %w", err)
 	}
-	return &bboltStore{db: db, blobs: blobs, audit: al}, nil
+	store := &bboltStore{db: db, blobs: blobs, audit: al}
+	// Reclaim blobs orphaned by a crash between blob and metadata writes. Safe at
+	// open: no concurrent writers yet (#83).
+	if err := store.sweepOrphans(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("sluice: sweep orphan blobs: %w", err)
+	}
+	return store, nil
+}
+
+// sweepOrphans deletes blobs with no referencing metadata record (#83). It is
+// run at open, before serving.
+func (s *bboltStore) sweepOrphans() error {
+	live := map[string]bool{}
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketMessages).ForEach(func(_, v []byte) error {
+			var rec stored
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return err
+			}
+			live[rec.ID] = true
+			return nil
+		})
+	}); err != nil {
+		return err
+	}
+	n, err := s.blobs.SweepOrphans(live)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		log.Printf("darbaan: sluice reclaimed %d orphan blob(s) at startup", n)
+	}
+	return nil
 }
 
 func (s *bboltStore) Close() error { return s.db.Close() }
