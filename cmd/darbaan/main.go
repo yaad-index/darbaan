@@ -24,6 +24,8 @@ import (
 	"github.com/yaad-index/darbaan/internal/approver"
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
+	"github.com/yaad-index/darbaan/internal/bounce"
+	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/listener"
 	"github.com/yaad-index/darbaan/internal/policy"
 	"github.com/yaad-index/darbaan/internal/sluice"
@@ -42,6 +44,9 @@ type CLI struct {
 
 	AuditType string `name:"audit-type" default:"bbolt" help:"Audit log backend: bbolt (hash-chained, on) or null (off)." enum:"bbolt,null"`
 	AuditDB   string `name:"audit-db" default:"darbaan-audit.db" help:"Path to the audit database (audit-type=bbolt)." type:"path"`
+
+	InboundType string `name:"inbound-type" default:"bbolt" help:"Inbound (served mailbox) store backend." enum:"bbolt"`
+	InboundDB   string `name:"inbound-db" default:"darbaan-inbound.db" help:"Path to the inbound store database." type:"path"`
 
 	ListenerAddr          string `name:"listener-addr" default:":1465" help:"SMTP submission listen address."`
 	ListenerDomain        string `name:"listener-domain" default:"localhost" help:"SMTP greeting domain."`
@@ -87,6 +92,11 @@ func (c *CLI) openStore() (sluice.MessageStore, func(), error) {
 		return nil, nil, err
 	}
 	return ms, func() { _ = ms.Close(); _ = al.Close() }, nil
+}
+
+// openInbound opens the inbound (served mailbox) store per config.
+func (c *CLI) openInbound() (inbound.InboundStore, error) {
+	return inbound.New(c.InboundType, c.InboundDB)
 }
 
 // VersionCmd prints the build version.
@@ -221,7 +231,7 @@ func (c *QueueApproveCmd) Run(cli *CLI) error {
 	defer closeStore()
 
 	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, cli.router(),
-		c.ID, approver.Verdict{Disposition: approver.Approve})
+		nil, "", c.ID, approver.Verdict{Disposition: approver.Approve})
 	if err != nil {
 		return err
 	}
@@ -251,8 +261,15 @@ func (c *QueueRejectCmd) Run(cli *CLI) error {
 	}
 	defer closeStore()
 
+	// Reject generates a DSN bounce delivered to the agent's inbound mailbox.
+	inbox, err := cli.openInbound()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = inbox.Close() }()
+
 	m, err := decideAndApply(context.Background(), q, backend.StubSender{}, cli.router(),
-		c.ID, approver.Verdict{Disposition: approver.Reject, Reason: c.Reason, Retryable: c.Retryable})
+		inbox, cli.ListenerDomain, c.ID, approver.Verdict{Disposition: approver.Reject, Reason: c.Reason, Retryable: c.Retryable})
 	if err != nil {
 		return err
 	}
@@ -275,7 +292,7 @@ func (c *QueueRejectCmd) Run(cli *CLI) error {
 // message is marked approved and handed to the (stubbed) Sender; the send result
 // is recorded and audited, never silently dropped (ADR 0003). On rejection the
 // reason is recorded. A Hold leaves the message pending.
-func decideAndApply(ctx context.Context, q sluice.MessageStore, sender backend.Sender, router *policy.Router, id string, human approver.Verdict) (sluice.Message, error) {
+func decideAndApply(ctx context.Context, q sluice.MessageStore, sender backend.Sender, router *policy.Router, inbox inbound.InboundStore, domain string, id string, human approver.Verdict) (sluice.Message, error) {
 	msg, err := q.Get(id)
 	if err != nil {
 		return sluice.Message{}, err
@@ -316,7 +333,25 @@ func decideAndApply(ctx context.Context, q sluice.MessageStore, sender backend.S
 		sendErr := sender.Send(ctx, approved)
 		return q.RecordSendAttempt(id, sendErr)
 	case approver.Reject:
-		return q.Reject(id, outcome.DecidedBy, outcome.Reason, outcome.Retryable)
+		rejected, err := q.Reject(id, outcome.DecidedBy, outcome.Reason, outcome.Retryable)
+		if err != nil {
+			return sluice.Message{}, err
+		}
+		// Generate the DSN bounce and deliver it to the agent's mailbox
+		// (ADR 0006). The rejected submission stays in the sluice; the bounce is
+		// a separate inbound object the IMAP face serves (#27).
+		if inbox != nil {
+			b, err := bounce.Generate(rejected, outcome.Reason, outcome.Retryable, domain)
+			if err != nil {
+				return sluice.Message{}, fmt.Errorf("generate bounce: %w", err)
+			}
+			if _, err := inbox.Add(inbound.Delivery{
+				Owner: b.Owner, From: b.From, To: b.To, Subject: b.Subject, Raw: b.Raw,
+			}); err != nil {
+				return sluice.Message{}, fmt.Errorf("deliver bounce: %w", err)
+			}
+		}
+		return rejected, nil
 	default: // Hold — stays pending, fail-closed
 		return msg, nil
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/approver"
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
+	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/policy"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
@@ -38,7 +39,7 @@ func TestApproveReachesStubSenderAndNothingLeaves(t *testing.T) {
 	q, id := newSeededSluice(t)
 
 	out, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		id, approver.Verdict{Disposition: approver.Approve})
+		nil, "", id, approver.Verdict{Disposition: approver.Approve})
 	require.NoError(t, err)
 
 	assert.Equal(t, sluice.StatusApproved, out.Status)
@@ -47,15 +48,28 @@ func TestApproveReachesStubSenderAndNothingLeaves(t *testing.T) {
 	assert.Equal(t, backend.ErrSendPending.Error(), out.SendErr)
 }
 
-func TestRejectRecordsReason(t *testing.T) {
+func TestRejectGeneratesBounceIntoInbound(t *testing.T) {
 	q, id := newSeededSluice(t)
+	inbox, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	defer func() { _ = inbox.Close() }()
 
 	out, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		id, approver.Verdict{Disposition: approver.Reject, Reason: "smells like exfiltration", Retryable: false})
+		inbox, "darbaan.test", id, approver.Verdict{Disposition: approver.Reject, Reason: "smells like exfiltration", Retryable: false})
 	require.NoError(t, err)
-
 	assert.Equal(t, sluice.StatusRejected, out.Status)
 	assert.Equal(t, "smells like exfiltration", out.Reason)
+
+	// A DSN bounce was delivered to the agent's inbound mailbox (ADR 0006).
+	msgs, err := inbox.List("agent") // owner = original submitting agent
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	b := msgs[0]
+	assert.Equal(t, "MAILER-DAEMON@darbaan.test", b.From)
+	assert.Equal(t, "a@local", b.To) // returned to the original submitter
+	assert.False(t, b.Seen)          // lands unseen
+	assert.Contains(t, string(b.Raw), "smells like exfiltration")
+	assert.Contains(t, string(b.Raw), "5.7.1") // permanent policy reject
 }
 
 func TestNoDecisionLeavesPending(t *testing.T) {
@@ -64,7 +78,7 @@ func TestNoDecisionLeavesPending(t *testing.T) {
 	// A Hold verdict (the human took no action) must leave the message pending —
 	// fail-closed.
 	out, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		id, approver.Verdict{Disposition: approver.Hold})
+		nil, "", id, approver.Verdict{Disposition: approver.Hold})
 	require.NoError(t, err)
 	assert.Equal(t, sluice.StatusPending, out.Status)
 
@@ -77,10 +91,10 @@ func TestApproveTwiceIsRefused(t *testing.T) {
 	q, id := newSeededSluice(t)
 
 	_, err := decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		id, approver.Verdict{Disposition: approver.Approve})
+		nil, "", id, approver.Verdict{Disposition: approver.Approve})
 	require.NoError(t, err)
 
 	_, err = decideAndApply(context.Background(), q, backend.StubSender{}, router(),
-		id, approver.Verdict{Disposition: approver.Approve})
+		nil, "", id, approver.Verdict{Disposition: approver.Approve})
 	require.Error(t, err) // already approved, not pending
 }
