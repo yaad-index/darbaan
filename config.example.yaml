@@ -22,6 +22,17 @@ audit-db: darbaan-audit.db
 inbound-type: bbolt
 inbound-db: darbaan-inbound.db
 
+# DKIM signing of bounces (ADR 0007). Every Darbaan-issued bounce is signed so
+# the agent, holding only the pinned public key, trusts only bounces Darbaan
+# produced. The key is a PEM-encoded ed25519 private key FILE (PKCS#8); only its
+# path is config — the file is the secret (ADR 0012), never inlined here.
+# Required for the reject/bounce path (fail-closed). Generate with:
+#   openssl genpkey -algorithm ed25519 -out dkim.pem
+# Publish/pin the public record from: darbaan dkim-pubkey
+dkim-key-file: ""            # path to the ed25519 private key (PEM)
+dkim-selector: darbaan
+dkim-domain: ""              # signing domain (d=); typically the listener domain
+
 # SMTP submission face.
 listener-addr: ":1465"
 listener-domain: localhost
