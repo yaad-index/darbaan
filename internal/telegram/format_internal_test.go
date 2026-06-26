@@ -1,11 +1,15 @@
 package telegram
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/go-telegram/bot/models"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/yaad-index/darbaan/internal/admin"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
@@ -35,4 +39,23 @@ func TestDecisionKeyboard(t *testing.T) {
 	assert.Len(t, labels, 3)
 	assert.Equal(t, []string{"approve:42", "reject_perm:42", "reject_retry:42"}, data)
 	assert.Contains(t, strings.Join(labels, "|"), "Approve")
+}
+
+func TestDecisionResult(t *testing.T) {
+	assert.Equal(t, "Approved 7 — approved and sent upstream",
+		decisionResult("Approved", "7", admin.Outcome{Detail: "approved and sent upstream"}, nil))
+	assert.Contains(t,
+		decisionResult("Approved", "7", admin.Outcome{Detail: "approved", Warn: "send failed permanently"}, nil),
+		"[warning: send failed permanently]")
+	assert.Contains(t,
+		decisionResult("Approved", "7", admin.Outcome{}, errors.New("message is rejected, not pending")),
+		"failed (7): message is rejected")
+}
+
+func TestIsOperatorGate(t *testing.T) {
+	c, err := New("123:fake", 999, 0, admin.NewClient("127.0.0.1:1144", "t"))
+	require.NoError(t, err)
+	assert.True(t, c.isOperator(&models.CallbackQuery{From: models.User{ID: 999}}))
+	assert.False(t, c.isOperator(&models.CallbackQuery{From: models.User{ID: 111}})) // not the operator
+	assert.False(t, c.isOperator(nil))
 }

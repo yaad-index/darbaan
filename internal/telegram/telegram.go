@@ -64,13 +64,16 @@ func New(token string, operatorID int64, pollInterval time.Duration, adminClient
 	if err != nil {
 		return nil, fmt.Errorf("telegram: init bot: %w", err)
 	}
-	return &Client{
+	c := &Client{
 		bot:          b,
 		admin:        adminClient,
 		operatorID:   operatorID,
 		pollInterval: pollInterval,
 		posted:       make(map[string]bool),
-	}, nil
+	}
+	// [Approve] button. The reject buttons are wired in the next increment.
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbApprove, bot.MatchTypePrefix, c.handleApprove)
+	return c, nil
 }
 
 // Run connects to Telegram, logs readiness, polls the queue for new held
@@ -169,5 +172,62 @@ func decisionKeyboard(id string) models.InlineKeyboardMarkup {
 	}
 }
 
-// ignoreUpdate drops incoming updates until the approve/reject handlers land.
+// handleApprove is the [Approve] button callback: verify the operator, approve
+// via the admin API, and edit the notification to show the outcome.
+func (c *Client) handleApprove(ctx context.Context, b *bot.Bot, update *models.Update) {
+	cq := update.CallbackQuery
+	if !c.isOperator(cq) {
+		c.denyCallback(ctx, b, cq)
+		return
+	}
+	id := strings.TrimPrefix(cq.Data, cbApprove)
+	out, err := c.admin.Approve(ctx, id)
+	c.finishDecision(ctx, b, cq, "Approved", id, out, err)
+}
+
+// isOperator reports whether a callback came from the configured operator — the
+// core security property: only the operator may decide (ADR 0002).
+func (c *Client) isOperator(cq *models.CallbackQuery) bool {
+	return cq != nil && cq.From.ID == c.operatorID
+}
+
+// denyCallback rejects a callback from anyone but the operator.
+func (c *Client) denyCallback(ctx context.Context, b *bot.Bot, cq *models.CallbackQuery) {
+	log.Printf("darbaan telegram: ignored callback from non-operator %d", cq.From.ID)
+	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+		CallbackQueryID: cq.ID, Text: "Not authorized.", ShowAlert: true,
+	})
+}
+
+// finishDecision dismisses the button spinner and rewrites the notification to
+// the outcome, clearing the keyboard so it cannot be tapped again.
+func (c *Client) finishDecision(ctx context.Context, b *bot.Bot, cq *models.CallbackQuery, verb, id string, out admin.Outcome, err error) {
+	result := decisionResult(verb, id, out, err)
+	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cq.ID, Text: verb})
+	if msg := cq.Message.Message; msg != nil {
+		_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:      msg.Chat.ID,
+			MessageID:   msg.ID,
+			Text:        result,
+			ReplyMarkup: models.InlineKeyboardMarkup{}, // clear the buttons
+		})
+	}
+	log.Printf("darbaan telegram: %s", result)
+}
+
+// decisionResult renders the operator-facing outcome line. A committed verdict
+// with a downstream send/bounce warning is shown as such (distinct from a
+// failed verdict).
+func decisionResult(verb, id string, out admin.Outcome, err error) string {
+	switch {
+	case err != nil:
+		return fmt.Sprintf("%s failed (%s): %v", verb, id, err)
+	case out.Warn != "":
+		return fmt.Sprintf("%s %s — %s [warning: %s]", verb, id, out.Detail, out.Warn)
+	default:
+		return fmt.Sprintf("%s %s — %s", verb, id, out.Detail)
+	}
+}
+
+// ignoreUpdate drops updates that aren't a wired decision callback.
 func ignoreUpdate(context.Context, *bot.Bot, *models.Update) {}
