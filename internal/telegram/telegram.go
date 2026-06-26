@@ -312,14 +312,22 @@ func (c *Client) finishDecision(ctx context.Context, b *bot.Bot, cq *models.Call
 	}
 }
 
-// editResult rewrites a notification to a final outcome line, clearing any
-// keyboard so it cannot be acted on again.
+// emptyKeyboard removes an inline keyboard on edit. It must carry a non-nil
+// empty slice: the zero value InlineKeyboardMarkup{} marshals to
+// `{"inline_keyboard":null}`, which Telegram treats as "no change" and leaves
+// the buttons; an empty slice marshals to `[]`, which actually clears them.
+func emptyKeyboard() models.InlineKeyboardMarkup {
+	return models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{}}
+}
+
+// editResult rewrites a notification to a final outcome line, clearing the
+// keyboard so a decided message cannot be tapped again.
 func (c *Client) editResult(ctx context.Context, b *bot.Bot, chatID int64, msgID int, result string) {
 	_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
 		ChatID:      chatID,
 		MessageID:   msgID,
 		Text:        result,
-		ReplyMarkup: models.InlineKeyboardMarkup{},
+		ReplyMarkup: emptyKeyboard(),
 	})
 	log.Printf("darbaan telegram: %s", result)
 }

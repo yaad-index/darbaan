@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -12,6 +13,19 @@ import (
 
 	"github.com/yaad-index/darbaan/internal/admin"
 )
+
+func TestEmptyKeyboardClearsOnEdit(t *testing.T) {
+	b, err := json.Marshal(emptyKeyboard())
+	require.NoError(t, err)
+	// [] actually removes the keyboard on editMessageText.
+	assert.Equal(t, `{"inline_keyboard":[]}`, string(b))
+
+	// The zero value would serialize to null, which Telegram leaves untouched —
+	// the bug this guards against.
+	z, err := json.Marshal(models.InlineKeyboardMarkup{})
+	require.NoError(t, err)
+	assert.Equal(t, `{"inline_keyboard":null}`, string(z))
+}
 
 func TestDisplaySubject(t *testing.T) {
 	assert.Equal(t, "deploy keys", displaySubject("deploy keys"))
