@@ -61,3 +61,24 @@ func TestUnknownTypeErrors(t *testing.T) {
 	_, err := inbound.New("does-not-exist", "x.db")
 	require.Error(t, err)
 }
+
+func TestSetSeen(t *testing.T) {
+	s := newStore(t)
+	m, err := s.Add(inbound.Delivery{Owner: "agent", Raw: []byte("x")})
+	require.NoError(t, err)
+	require.False(t, m.Seen)
+
+	require.NoError(t, s.SetSeen("agent", m.ID, true))
+	got, err := s.Get("agent", m.ID)
+	require.NoError(t, err)
+	assert.True(t, got.Seen)
+
+	require.NoError(t, s.SetSeen("agent", m.ID, false))
+	got, err = s.Get("agent", m.ID)
+	require.NoError(t, err)
+	assert.False(t, got.Seen)
+
+	// owner-scoped + not-found
+	require.ErrorIs(t, s.SetSeen("other", m.ID, true), inbound.ErrNotFound)
+	require.ErrorIs(t, s.SetSeen("agent", "999", true), inbound.ErrNotFound)
+}

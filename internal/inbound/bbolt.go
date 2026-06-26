@@ -90,6 +90,37 @@ func (s *bboltStore) List(owner string) ([]Message, error) {
 	return out, nil
 }
 
+func (s *bboltStore) SetSeen(owner, id string, seen bool) error {
+	seq, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%w: invalid id %q", ErrNotFound, id)
+	}
+	key := seqkey.Encode(seq)
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketInbound)
+		v := b.Get(key)
+		if v == nil {
+			return ErrNotFound
+		}
+		var m Message
+		if err := json.Unmarshal(v, &m); err != nil {
+			return err
+		}
+		if m.Owner != owner {
+			return ErrNotFound // do not touch another owner's message
+		}
+		if m.Seen == seen {
+			return nil
+		}
+		m.Seen = seen
+		enc, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		return b.Put(key, enc)
+	})
+}
+
 func (s *bboltStore) Get(owner, id string) (Message, error) {
 	seq, err := strconv.ParseUint(id, 10, 64)
 	if err != nil {

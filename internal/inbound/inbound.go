@@ -46,6 +46,9 @@ type InboundStore interface {
 	List(owner string) ([]Message, error)
 	// Get returns one of the owner's messages, or ErrNotFound.
 	Get(owner, id string) (Message, error)
+	// SetSeen sets or clears the \Seen flag on the owner's message — the only
+	// mutable flag the v1 IMAP face persists. Owner-scoped like Get.
+	SetSeen(owner, id string, seen bool) error
 	// Close releases the underlying resources.
 	Close() error
 }

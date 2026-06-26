@@ -59,6 +59,8 @@ type CLI struct {
 	ListenerTLSKey        string `name:"listener-tls-key" help:"Path to the TLS private key (PEM)." type:"path"`
 	ListenerAllowInsecure bool   `name:"listener-allow-insecure" help:"Allow AUTH over plaintext (local testing only)."`
 
+	IMAPAddr string `name:"imap-addr" default:":1143" help:"IMAP read-face listen address (serves the agent's bounces); reuses the agent credential and listener TLS."`
+
 	AgentUsername string `name:"agent-username" help:"The agent's Darbaan SMTP username. The password is supplied out-of-band via DARBAAN_AGENT_PASS, never inlined in config (ADR 0012)."`
 
 	ApprovalStrict []string `name:"approval-strict" default:"manual" help:"Approver chain for the strict path."`
@@ -167,7 +169,15 @@ func (*ServeCmd) Run(cli *CLI) error {
 	}
 	defer closeStore()
 
-	srv, err := listener.NewServer(listener.ServerConfig{
+	inbox, err := cli.openInbound()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = inbox.Close() }()
+
+	// One local service hosts both faces (ADR 0001): the SMTP submission face
+	// (outbound trap) and the IMAP read face (the agent reads its bounces).
+	smtpSrv, err := listener.NewServer(listener.ServerConfig{
 		Addr:          cli.ListenerAddr,
 		Domain:        cli.ListenerDomain,
 		TLSConfig:     tlsConfig,
@@ -176,19 +186,42 @@ func (*ServeCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
+	imapSrv, err := listener.NewIMAPServer(listener.IMAPServerConfig{
+		Addr:          cli.IMAPAddr,
+		TLSConfig:     tlsConfig,
+		AllowInsecure: cli.ListenerAllowInsecure,
+	}, cred, inbox)
+	if err != nil {
+		return err
+	}
 
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
-		_ = srv.Close()
+		_ = smtpSrv.Close()
+		_ = imapSrv.Close()
 	}()
 
-	fmt.Fprintf(os.Stderr, "darbaan: SMTP submission face on %s (db %s)\n", cli.ListenerAddr, cli.SluiceDB)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, net.ErrClosed) {
+	ignoreClosed := func(err error) error {
+		if errors.Is(err, net.ErrClosed) {
+			return nil
+		}
 		return err
 	}
-	return nil
+	errs := make(chan error, 2)
+	go func() { errs <- ignoreClosed(smtpSrv.ListenAndServe()) }()
+	go func() { errs <- ignoreClosed(imapSrv.ListenAndServe(cli.IMAPAddr)) }()
+
+	fmt.Fprintf(os.Stderr, "darbaan: SMTP on %s, IMAP on %s (sluice %s, inbound %s)\n",
+		cli.ListenerAddr, cli.IMAPAddr, cli.SluiceDB, cli.InboundDB)
+
+	// Return on the first face to exit; close the other and drain it.
+	err = <-errs
+	_ = smtpSrv.Close()
+	_ = imapSrv.Close()
+	<-errs
+	return err
 }
 
 // QueueCmd groups the queue inspection and decision subcommands.
