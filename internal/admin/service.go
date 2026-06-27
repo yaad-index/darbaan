@@ -11,10 +11,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/yaad-index/darbaan/internal/approver"
 	"github.com/yaad-index/darbaan/internal/backend"
 	"github.com/yaad-index/darbaan/internal/bounce"
+	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/policy"
 	"github.com/yaad-index/darbaan/internal/sluice"
@@ -33,6 +35,8 @@ type Service struct {
 	signer Signer
 	router *policy.Router
 	domain string
+	filter *filter.Filter // inbound filter, for the hold-for-human queue (ADR 0021)
+	owner  string         // the agent whose inbound mailbox the holds belong to
 }
 
 // NewService wires the approval service. inbox and signer may be nil only when
@@ -40,6 +44,44 @@ type Service struct {
 // serve they are always provided.
 func NewService(store sluice.MessageStore, inbox inbound.InboundStore, sender backend.Sender, signer Signer, router *policy.Router, domain string) *Service {
 	return &Service{store: store, inbox: inbox, sender: sender, signer: signer, router: router, domain: domain}
+}
+
+// SetInboundHolds wires the inbound hold-for-human queue (ADR 0021): the filter
+// that decides which synced messages are held, and the agent (owner) they belong
+// to. Without it, HeldList is empty.
+func (s *Service) SetInboundHolds(flt *filter.Filter, owner string) {
+	s.filter, s.owner = flt, owner
+}
+
+// HeldList returns the inbound messages held for a human decision (a hold-rule
+// match with no decision yet, ADR 0021) — the inbound mirror of the outbound
+// List.
+func (s *Service) HeldList() ([]inbound.Message, error) {
+	if s.inbox == nil {
+		return nil, nil
+	}
+	msgs, err := s.inbox.List(s.owner)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	var held []inbound.Message
+	for _, m := range msgs {
+		if s.filter.Decide(m, now) == filter.Hold && m.HoldDecision == "" {
+			held = append(held, m)
+		}
+	}
+	return held, nil
+}
+
+// ExposeHeld approves a held message for the agent to see (ADR 0021).
+func (s *Service) ExposeHeld(id string) (inbound.Message, error) {
+	return s.inbox.SetHoldDecision(s.owner, id, inbound.HoldApproved)
+}
+
+// DropHeld rejects a held message — it stays hidden from the agent (ADR 0021).
+func (s *Service) DropHeld(id string) (inbound.Message, error) {
+	return s.inbox.SetHoldDecision(s.owner, id, inbound.HoldRejected)
 }
 
 // Outcome is the result of an approve/reject action. Status is the committed

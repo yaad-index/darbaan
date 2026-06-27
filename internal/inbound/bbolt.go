@@ -349,6 +349,28 @@ func (s *bboltStore) ClearKeywordsDirty(owner, id string) error {
 	})
 }
 
+// SetHoldDecision persists the human's hold-for-human decision (ADR 0021) on the
+// owner's message (metadata only; the blob is untouched) and returns it.
+func (s *bboltStore) SetHoldDecision(owner, id, decision string) (Message, error) {
+	var msg Message
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		rec, key, err := loadStored(tx, id)
+		if err != nil {
+			return err
+		}
+		if rec.Owner != owner {
+			return ErrNotFound
+		}
+		rec.HoldDecision = decision
+		msg = rec.Message
+		return putStored(tx, key, rec)
+	})
+	if err != nil {
+		return Message{}, fmt.Errorf("inbound: set hold decision %s: %w", id, err)
+	}
+	return msg, nil
+}
+
 // DirtyKeywords returns the owner's messages whose keywords await upstream
 // replication (metadata only), for the sync to reconcile.
 func (s *bboltStore) DirtyKeywords(owner string) ([]Message, error) {

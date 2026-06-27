@@ -99,25 +99,46 @@ type imapSession struct {
 	selected      []inbound.Message // metadata snapshot taken at Select (no content)
 }
 
-// visible lists the owner's messages and applies the inbound filter (ADR 0021):
-// only allow-verdict messages are returned (hide / hold-for-human are omitted
-// from the read face in this increment). Evaluated fresh each call (no cache).
-func (s *imapSession) visible() ([]inbound.Message, error) {
-	msgs, err := s.store.List(s.owner)
+// listAndFilter returns the owner's full message list and the filtered-visible
+// subset (ADR 0021). The full list is kept so UIDNEXT can be derived from the
+// highest UID overall — deriving it from the visible subset would under-report
+// when the highest-UID messages are hidden, breaking client sync. allow is
+// visible; hide and undecided/rejected hold are omitted. Evaluated fresh each
+// call (no cache).
+func (s *imapSession) listAndFilter() (full, visible []inbound.Message, err error) {
+	full, err = s.store.List(s.owner)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if s.filter == nil {
-		return msgs, nil
+		return full, full, nil
 	}
 	now := time.Now()
-	out := msgs[:0] // in-place filter; msgs is a fresh slice per call
-	for _, m := range msgs {
-		if s.filter.Decide(m, now) == filter.Allow {
-			out = append(out, m)
+	for _, m := range full { // new backing slice — leave full intact for UIDNEXT
+		switch s.filter.Decide(m, now) {
+		case filter.Allow:
+			visible = append(visible, m)
+		case filter.Hold:
+			// Held messages are hidden until a human approves exposure (ADR 0021);
+			// rejected/undecided stay hidden (fail-safe).
+			if m.HoldDecision == inbound.HoldApproved {
+				visible = append(visible, m)
+			}
 		}
 	}
-	return out, nil
+	return full, visible, nil
+}
+
+// uidNext returns the next UID, derived from the highest UID across ALL stored
+// messages (not the filtered view), so a client never sees a too-low UIDNEXT.
+func uidNext(full []inbound.Message) imap.UID {
+	next := uint32(1) // UID 0 is invalid (RFC 3501)
+	for _, m := range full {
+		if u := uint32(uidOf(m)); u >= next {
+			next = u + 1
+		}
+	}
+	return imap.UID(next)
 }
 
 func (s *imapSession) Close() error { return nil }
@@ -135,20 +156,16 @@ func (s *imapSession) Select(mailbox string, _ *imap.SelectOptions) (*imap.Selec
 	if mailbox != imapMailbox {
 		return nil, fmt.Errorf("imap: no such mailbox %q", mailbox)
 	}
-	msgs, err := s.visible()
+	full, visible, err := s.listAndFilter()
 	if err != nil {
 		return nil, err
 	}
-	s.selected = msgs
+	s.selected = visible
 
-	firstUnseen, uidNext := uint32(0), uint32(1) // UID 0 is invalid (RFC 3501)
+	firstUnseen := uint32(0)
 	seen := map[imap.Flag]bool{}
 	keywords := []imap.Flag{}
-	for i, m := range msgs {
-		uid := uint32(uidOf(m))
-		if uid >= uidNext {
-			uidNext = uid + 1
-		}
+	for i, m := range visible {
 		if !m.Seen && firstUnseen == 0 {
 			firstUnseen = uint32(i) + 1
 		}
@@ -166,9 +183,9 @@ func (s *imapSession) Select(mailbox string, _ *imap.SelectOptions) (*imap.Selec
 	return &imap.SelectData{
 		Flags:             append([]imap.Flag{imap.FlagSeen}, keywords...),
 		PermanentFlags:    permanent,
-		NumMessages:       uint32(len(msgs)),
+		NumMessages:       uint32(len(visible)),
 		FirstUnseenSeqNum: firstUnseen,
-		UIDNext:           imap.UID(uidNext),
+		UIDNext:           uidNext(full), // from the full store, not the visible view
 		UIDValidity:       1,
 	}, nil
 }
@@ -182,32 +199,26 @@ func (s *imapSession) Status(mailbox string, options *imap.StatusOptions) (*imap
 	if mailbox != imapMailbox {
 		return nil, fmt.Errorf("imap: no such mailbox %q", mailbox)
 	}
-	msgs, err := s.visible()
+	full, visible, err := s.listAndFilter()
 	if err != nil {
 		return nil, err
 	}
 	data := &imap.StatusData{Mailbox: mailbox}
 	if options.NumMessages {
-		n := uint32(len(msgs))
+		n := uint32(len(visible))
 		data.NumMessages = &n
 	}
 	if options.NumUnseen {
 		var unseen uint32
-		for _, m := range msgs {
+		for _, m := range visible {
 			if !m.Seen {
 				unseen++
 			}
 		}
 		data.NumUnseen = &unseen
 	}
-	uidNext := uint32(1) // UID 0 is invalid (RFC 3501)
-	for _, m := range msgs {
-		if u := uint32(uidOf(m)); u >= uidNext {
-			uidNext = u + 1
-		}
-	}
 	if options.UIDNext {
-		data.UIDNext = imap.UID(uidNext)
+		data.UIDNext = uidNext(full) // from the full store, not the visible view
 	}
 	if options.UIDValidity {
 		data.UIDValidity = 1

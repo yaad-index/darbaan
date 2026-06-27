@@ -438,6 +438,72 @@ func TestIMAPFilterHidesMessages(t *testing.T) {
 	assert.Equal(t, "keep", msgs[0].Envelope.Subject) // only the allowed one is served
 }
 
+// A hold-for-human message is hidden until approved, then becomes visible (ADR
+// 0021): undecided → hidden; HoldApproved → served.
+func TestIMAPHoldForHuman(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	_, _, err = store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "keep", UpstreamUID: 1, UIDValidity: 1,
+		Envelope: &inbound.Envelope{Subject: "keep"},
+	})
+	require.NoError(t, err)
+	_, held, err := store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "review-me", UpstreamUID: 2, UIDValidity: 1,
+		Envelope: &inbound.Envelope{Subject: "review-me"}, Keywords: []string{"review"},
+	})
+	require.NoError(t, err)
+
+	flt, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]"))
+	require.NoError(t, err)
+	addr := startIMAPFull(t, store, nil, nil, flt)
+
+	c, err := imapclient.DialInsecure(addr, nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+
+	sel, err := c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1), sel.NumMessages) // held one hidden pending decision
+
+	// A human approves exposure → it becomes visible on the next select.
+	_, err = store.SetHoldDecision("agent", held.ID, inbound.HoldApproved)
+	require.NoError(t, err)
+	c2, err := imapclient.DialInsecure(addr, nil)
+	require.NoError(t, err)
+	defer func() { _ = c2.Close() }()
+	require.NoError(t, c2.Login("agent", "pw").Wait())
+	sel, err = c2.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(2), sel.NumMessages) // now exposed
+}
+
+// UIDNEXT is derived from the full store, so hiding the highest-UID message does
+// not under-report it (ADR 0021).
+func TestIMAPUIDNextFromFullStore(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	_, _, err = store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1}) // id 1, visible
+	require.NoError(t, err)
+	_, _, err = store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 2, UIDValidity: 1, Keywords: []string{"junk"}}) // id 2, hidden
+	require.NoError(t, err)
+
+	flt, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: junk}], action: hide}]"))
+	require.NoError(t, err)
+
+	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, nil, flt), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	sel, err := c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1), sel.NumMessages) // only id 1 visible
+	assert.Equal(t, imap.UID(3), sel.UIDNext)   // but UIDNEXT reflects hidden id 2
+}
+
 func TestIMAPBadAuthRejected(t *testing.T) {
 	c, err := imapclient.DialInsecure(startIMAP(t, seedInbound(t)), nil)
 	require.NoError(t, err)

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
@@ -92,6 +93,49 @@ func (c *Client) Approve(ctx context.Context, id string) (Outcome, error) {
 func (c *Client) Reject(ctx context.Context, id, reason string, retryable bool) (Outcome, error) {
 	body, _ := json.Marshal(map[string]any{"reason": reason, "retryable": retryable})
 	return c.action(ctx, "/queue/"+id+"/reject", bytes.NewReader(body))
+}
+
+// HeldList returns the inbound messages held for a human decision (ADR 0021).
+func (c *Client) HeldList(ctx context.Context) ([]inbound.Message, error) {
+	resp, err := c.request(ctx, http.MethodGet, "/holds", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errorFrom(resp)
+	}
+	var held []inbound.Message
+	if err := json.NewDecoder(resp.Body).Decode(&held); err != nil {
+		return nil, err
+	}
+	return held, nil
+}
+
+// Expose approves a held message for the agent to see (ADR 0021).
+func (c *Client) Expose(ctx context.Context, id string) (inbound.Message, error) {
+	return c.hold(ctx, "/holds/"+id+"/expose")
+}
+
+// Drop rejects a held message — it stays hidden from the agent (ADR 0021).
+func (c *Client) Drop(ctx context.Context, id string) (inbound.Message, error) {
+	return c.hold(ctx, "/holds/"+id+"/drop")
+}
+
+func (c *Client) hold(ctx context.Context, path string) (inbound.Message, error) {
+	resp, err := c.request(ctx, http.MethodPost, path, nil)
+	if err != nil {
+		return inbound.Message{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return inbound.Message{}, errorFrom(resp)
+	}
+	var m inbound.Message
+	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+		return inbound.Message{}, err
+	}
+	return m, nil
 }
 
 func (c *Client) action(ctx context.Context, path string, body io.Reader) (Outcome, error) {

@@ -18,6 +18,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/admin"
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
+	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/policy"
 	"github.com/yaad-index/darbaan/internal/signer"
@@ -86,6 +87,9 @@ func (failingInbound) SetKeywords(string, string, []string) (inbound.Message, er
 func (failingInbound) ClearKeywordsDirty(string, string) error { return nil }
 func (failingInbound) DirtyKeywords(string) ([]inbound.Message, error) {
 	return nil, nil
+}
+func (failingInbound) SetHoldDecision(string, string, string) (inbound.Message, error) {
+	return inbound.Message{}, errors.New("inbound store down")
 }
 func (failingInbound) List(string) ([]inbound.Message, error) { return nil, nil }
 func (failingInbound) Get(string, string) (inbound.Message, error) {
@@ -211,4 +215,39 @@ func TestListAndShow(t *testing.T) {
 
 	_, err = svc.Show("999")
 	require.ErrorIs(t, err, sluice.ErrNotFound)
+}
+
+func TestInboundHoldQueue(t *testing.T) {
+	q, _ := seedStore(t)
+	inbox := newInbound(t)
+	svc := admin.NewService(q, inbox, backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	flt, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]"))
+	require.NoError(t, err)
+	svc.SetInboundHolds(flt, "agent")
+
+	_, _, err = inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1}) // allowed
+	require.NoError(t, err)
+	_, held, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 2, UIDValidity: 1, Keywords: []string{"review"}})
+	require.NoError(t, err)
+
+	list, err := svc.HeldList()
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, held.ID, list[0].ID)
+
+	// Expose decides it → off the held list, and the read face would now show it.
+	_, err = svc.ExposeHeld(held.ID)
+	require.NoError(t, err)
+	list, err = svc.HeldList()
+	require.NoError(t, err)
+	assert.Empty(t, list)
+
+	// Drop also decides (stays hidden) → off the held list.
+	_, held2, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 3, UIDValidity: 1, Keywords: []string{"review"}})
+	require.NoError(t, err)
+	_, err = svc.DropHeld(held2.ID)
+	require.NoError(t, err)
+	list, err = svc.HeldList()
+	require.NoError(t, err)
+	assert.Empty(t, list)
 }
