@@ -5,9 +5,11 @@
 #   3. docker compose up -d
 #
 # Safe by default: sender-type=stub, so the container sends NOTHING until you set
-# DARBAAN_SENDER_TYPE=smtp + DARBAAN_SMTP_PASSWORD (a Gmail app password). Ports
-# bind to 127.0.0.1 only — Darbaan is a local-trusted-host service, not
-# internet-facing (ADR 0012). Secrets come from .env / mounts, never the image.
+# DARBAAN_SENDER_TYPE=smtp + DARBAAN_SMTP_PASSWORD (a Gmail app password). The
+# agent faces bind to 127.0.0.1 by default — Darbaan is a local-trusted-host
+# service, not internet-facing (ADR 0012). To reach it from a trusted LAN, set
+# DARBAAN_FACE_BIND=0.0.0.0 in .env (the admin API stays container-internal
+# regardless). Secrets come from .env / mounts, never the image.
 
 services:
   darbaan:
@@ -18,8 +20,8 @@ services:
       # Only the agent faces are published. The admin API (127.0.0.1:1144) is
       # deliberately NOT here — it stays container-internal, reached only via
       # `docker exec darbaan darbaan queue ...`, never from the host or the agent.
-      - "127.0.0.1:1465:1465"   # SMTP submission (agent -> Darbaan)
-      - "127.0.0.1:1143:1143"   # IMAP read (agent reads its bounces)
+      - "${DARBAAN_FACE_BIND:-127.0.0.1}:1465:1465"   # SMTP submission (agent -> Darbaan)
+      - "${DARBAAN_FACE_BIND:-127.0.0.1}:1143:1143"   # IMAP read (agent reads its bounces)
     environment:
       # Agent credential. Username here, password from .env.
       DARBAAN_AGENT_USERNAME: "agent"

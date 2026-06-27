@@ -18,3 +18,7 @@ age-identity*
 
 # Sluice / bbolt database files
 *.db
+
+# Box-local deployment config / secrets — never commit
+secrets/
+docker-compose.override.yml
