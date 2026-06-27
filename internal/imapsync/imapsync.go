@@ -3,6 +3,7 @@ package imapsync
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -89,6 +90,10 @@ func (s *Syncer) Sync(ctx context.Context) (int, error) {
 			return stored, err
 		}
 	}
+
+	// Retry any label writes that failed their immediate upstream replicate
+	// (ADR 0020 best-effort write-through). Best-effort; never fails the sync.
+	s.reconcileKeywords()
 	return stored, nil
 }
 
@@ -290,6 +295,113 @@ func (s *Syncer) FetchContent(owner, id string) (inbound.Message, error) {
 		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: upstream uid %d not found", id, m.UpstreamUID)
 	}
 	return s.store.SetContent(owner, id, raw)
+}
+
+// WriteKeywords replicates a message's keyword set to the upstream backend over a
+// SEPARATE read-write session — the narrow label-write exception to read-only
+// upstream (ADR 0020). It converges the upstream message to want by FETCHing its
+// current keywords and applying the +/- delta, so it is idempotent and handles
+// both additions and removals (content + delete stay read-only). The local store
+// is canonical; a failure here is returned so the caller logs + reconciles later.
+func (s *Syncer) WriteKeywords(owner, id string, want []string) error {
+	m, err := s.store.Get(owner, id)
+	if err != nil {
+		return err
+	}
+	if m.UpstreamUID == 0 {
+		return fmt.Errorf("imapsync: keyword write for %s: no upstream uid", id)
+	}
+
+	c, err := s.dial()
+	if err != nil {
+		return fmt.Errorf("imapsync: connect: %w", err)
+	}
+	defer func() { _ = c.Logout().Wait(); _ = c.Close() }()
+
+	sel, err := c.Select(s.mailbox, nil).Wait() // read-write session
+	if err != nil {
+		return fmt.Errorf("imapsync: select %q: %w", s.mailbox, err)
+	}
+	if sel.UIDValidity != m.UIDValidity {
+		return fmt.Errorf("imapsync: keyword write for %s: mailbox reset (uidvalidity %d != %d)", id, sel.UIDValidity, m.UIDValidity)
+	}
+
+	var set imap.UIDSet
+	set.AddNum(imap.UID(m.UpstreamUID))
+	fetched, err := c.Fetch(set, &imap.FetchOptions{UID: true, Flags: true}).Collect()
+	if err != nil {
+		return fmt.Errorf("imapsync: keyword write fetch: %w", err)
+	}
+	var current []string
+	if len(fetched) > 0 {
+		current = keywordsOf(fetched[0].Flags)
+	}
+	add, remove := diffKeywords(current, want)
+	if len(add) > 0 {
+		if err := c.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: toFlags(add)}, nil).Close(); err != nil {
+			return fmt.Errorf("imapsync: keyword add: %w", err)
+		}
+	}
+	if len(remove) > 0 {
+		if err := c.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsDel, Silent: true, Flags: toFlags(remove)}, nil).Close(); err != nil {
+			return fmt.Errorf("imapsync: keyword remove: %w", err)
+		}
+	}
+	return nil
+}
+
+// reconcileKeywords re-replicates locally-dirty keyword sets to upstream — a label
+// write whose immediate upstream replicate failed is retried here on the next sync
+// (ADR 0020). Best-effort: failures are logged, never fatal to the sync.
+func (s *Syncer) reconcileKeywords() {
+	dirty, err := s.store.DirtyKeywords(s.owner)
+	if err != nil {
+		log.Printf("darbaan: keyword reconcile list: %v", err)
+		return
+	}
+	for _, m := range dirty {
+		if err := s.WriteKeywords(s.owner, m.ID, m.Keywords); err != nil {
+			log.Printf("darbaan: keyword reconcile %s deferred: %v", m.ID, err)
+			continue
+		}
+		if err := s.store.ClearKeywordsDirty(s.owner, m.ID); err != nil {
+			log.Printf("darbaan: keyword reconcile clear %s: %v", m.ID, err)
+		}
+	}
+}
+
+// diffKeywords returns the keywords to add and to remove to converge current to
+// want.
+func diffKeywords(current, want []string) (add, remove []string) {
+	cur := map[string]bool{}
+	for _, k := range current {
+		cur[k] = true
+	}
+	wnt := map[string]bool{}
+	for _, k := range want {
+		wnt[k] = true
+	}
+	for k := range wnt {
+		if !cur[k] {
+			add = append(add, k)
+		}
+	}
+	for k := range cur {
+		if !wnt[k] {
+			remove = append(remove, k)
+		}
+	}
+	sort.Strings(add)
+	sort.Strings(remove)
+	return add, remove
+}
+
+func toFlags(kw []string) []imap.Flag {
+	f := make([]imap.Flag, len(kw))
+	for i, k := range kw {
+		f[i] = imap.Flag(k)
+	}
+	return f
 }
 
 func deliveryOf(owner string, m *imapclient.FetchMessageBuffer) inbound.Delivery {

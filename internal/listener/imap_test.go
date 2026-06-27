@@ -1,6 +1,7 @@
 package listener_test
 
 import (
+	"errors"
 	"net"
 	"path/filepath"
 	"testing"
@@ -35,11 +36,15 @@ func startIMAP(t *testing.T, store inbound.InboundStore) string {
 }
 
 func startIMAPWithFetch(t *testing.T, store inbound.InboundStore, fetch listener.ContentFetch) string {
+	return startIMAPFull(t, store, fetch, nil)
+}
+
+func startIMAPFull(t *testing.T, store inbound.InboundStore, fetch listener.ContentFetch, wk listener.KeywordWriter) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		listener.Credential{Username: "agent", Password: "pw"}, store, fetch)
+		listener.Credential{Username: "agent", Password: "pw"}, store, fetch, wk)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -307,6 +312,69 @@ func TestIMAPFetchServesKeywords(t *testing.T) {
 	assert.Contains(t, msgs[0].Flags, imap.Flag("$Important"))
 }
 
+// STORE +FLAGS of a keyword commits locally (canonical) and replicates upstream
+// via the writer; on success the record is no longer dirty (ADR 0020).
+func TestIMAPStoreKeywordWritesThrough(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1})
+	require.NoError(t, err)
+
+	var wroteID string
+	var wrote []string
+	wk := func(owner, id string, want []string) error { wroteID, wrote = id, want; return nil }
+
+	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	_, err = c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+
+	require.NoError(t, c.Store(imap.SeqSetNum(1),
+		&imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{"useless"}}, nil).Close())
+
+	got, err := store.Get("agent", m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"useless"}, got.Keywords) // local store is canonical
+	assert.Equal(t, m.ID, wroteID)
+	assert.Equal(t, []string{"useless"}, wrote) // replicated the new set upstream
+	dirty, err := store.DirtyKeywords("agent")
+	require.NoError(t, err)
+	assert.Empty(t, dirty) // cleared on successful replicate
+}
+
+// If the upstream replicate fails, the keyword still commits locally and the
+// record stays dirty for the sync to reconcile — never an error to the agent.
+func TestIMAPStoreKeywordWriteFailureStaysDirty(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1})
+	require.NoError(t, err)
+
+	wk := func(owner, id string, want []string) error { return errors.New("upstream down") }
+
+	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	_, err = c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+
+	// The STORE itself succeeds for the agent even though upstream failed.
+	require.NoError(t, c.Store(imap.SeqSetNum(1),
+		&imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{"useless"}}, nil).Close())
+
+	got, err := store.Get("agent", m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"useless"}, got.Keywords) // committed locally
+	dirty, err := store.DirtyKeywords("agent")
+	require.NoError(t, err)
+	assert.Len(t, dirty, 1) // stays dirty for reconcile
+}
+
 func TestIMAPBadAuthRejected(t *testing.T) {
 	c, err := imapclient.DialInsecure(startIMAP(t, seedInbound(t)), nil)
 	require.NoError(t, err)
@@ -316,6 +384,6 @@ func TestIMAPBadAuthRejected(t *testing.T) {
 
 func TestIMAPRequiresTLS(t *testing.T) {
 	_, err := listener.NewIMAPServer(listener.IMAPServerConfig{},
-		listener.Credential{Username: "agent", Password: "pw"}, seedInbound(t), nil)
+		listener.Credential{Username: "agent", Password: "pw"}, seedInbound(t), nil, nil)
 	require.Error(t, err)
 }

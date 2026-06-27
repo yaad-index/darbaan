@@ -120,6 +120,13 @@ type InboundStore interface {
 	// SetContent fills a pending message's body (write the content blob, mark it
 	// present) and returns the now-complete message. Owner-scoped.
 	SetContent(owner, id string, raw []byte) (Message, error)
+	// SetKeywords replaces a message's keyword set (ADR 0020) and marks it dirty
+	// for upstream reconcile. Local store is canonical. Owner-scoped.
+	SetKeywords(owner, id string, keywords []string) (Message, error)
+	// ClearKeywordsDirty clears the dirty flag after upstream replication succeeds.
+	ClearKeywordsDirty(owner, id string) error
+	// DirtyKeywords returns messages whose keywords await upstream replication.
+	DirtyKeywords(owner string) ([]Message, error)
 	// List returns the owner's messages' metadata (no content/Raw) in receive
 	// order; a body is fetched per-message via Get / the content fetcher.
 	List(owner string) ([]Message, error)
