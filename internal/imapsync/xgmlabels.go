@@ -24,8 +24,8 @@ type LabelStoreFunc func(uid, uidValidity uint32, add, remove []string) error
 // — it is the narrow label-write exception to read-only upstream, reusing the
 // app password. Write-only: it never reads/parses X-GM-LABELS. Capability-gated
 // (X-GM-EXT-1); on any other backend it reports ErrNotXGM and the caller uses
-// plain keywords. Tracking issue #101 covers swapping this for upstream go-imap
-// support when it lands.
+// plain keywords. Issue #103 tracks swapping this for upstream go-imap support
+// when it lands.
 func RawGmailLabelStore(addr, username, password, mailbox string) LabelStoreFunc {
 	host := addr
 	if i := strings.LastIndex(addr, ":"); i > 0 {

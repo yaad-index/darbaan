@@ -1,9 +1,7 @@
-//go:build !no_manual_approver
-
 package main
 
-// Compile in the manual (human) approver by registering it via blank import
-// (ADR 0004). Build with -tags no_manual_approver to exclude it; with no
-// approver compiled in, the approval chain fails closed and nothing can be
-// approved.
+// Register the manual (human) approver via blank import. It is always compiled
+// in; approver selection is a runtime concern (the approval-strict/-light chains,
+// ADR 0017), not a build-time one. The chain is fail-closed: with no approver
+// registered for a path, nothing on it can be approved.
 import _ "github.com/yaad-index/darbaan/internal/approver/manual"
