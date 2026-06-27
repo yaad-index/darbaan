@@ -43,8 +43,8 @@ func New(dial DialFunc, mailbox, owner string, store inbound.InboundStore, state
 }
 
 // Dialer is the production DialFunc: TLS-connect to addr and log in with the
-// Darbaan-held upstream credentials. The connection is exercised live (Inc 2);
-// the engine is tested with an injected DialFunc.
+// Darbaan-held upstream credentials. The engine is tested with an injected
+// DialFunc against an in-process server.
 func Dialer(addr, username, password string) DialFunc {
 	return func() (*imapclient.Client, error) {
 		c, err := imapclient.DialTLS(addr, nil)
