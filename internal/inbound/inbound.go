@@ -16,6 +16,33 @@ import (
 // ErrNotFound is returned by Get when no message matches.
 var ErrNotFound = errors.New("inbound: message not found")
 
+// Address is one parsed envelope address. It mirrors the IMAP envelope address
+// (name + mailbox@host) without importing the IMAP library, keeping the store
+// IMAP-type-free (ADR 0016).
+type Address struct {
+	Name    string `json:"name,omitempty"`
+	Mailbox string `json:"mailbox,omitempty"`
+	Host    string `json:"host,omitempty"`
+}
+
+// Envelope is the parsed message envelope (RFC 3501 §7.4.2), stored as metadata
+// so the IMAP read face can serve FETCH ENVELOPE and header SEARCH from the store
+// without fetching the body (lazy, ADR 0019). nil for records synced before the
+// envelope was stored and for some locally-generated messages — callers fall
+// back to parsing the raw for those.
+type Envelope struct {
+	Date      time.Time `json:"date,omitempty"`
+	Subject   string    `json:"subject,omitempty"`
+	From      []Address `json:"from,omitempty"`
+	Sender    []Address `json:"sender,omitempty"`
+	ReplyTo   []Address `json:"reply_to,omitempty"`
+	To        []Address `json:"to,omitempty"`
+	Cc        []Address `json:"cc,omitempty"`
+	Bcc       []Address `json:"bcc,omitempty"`
+	InReplyTo []string  `json:"in_reply_to,omitempty"`
+	MessageID string    `json:"message_id,omitempty"`
+}
+
 // Delivery is a new inbound message to store.
 type Delivery struct {
 	Owner   string // the agent whose mailbox this is (whose send was rejected)
@@ -29,6 +56,13 @@ type Delivery struct {
 	// dedup an idempotent re-sync and (later) to fetch content on demand.
 	UpstreamUID uint32
 	UIDValidity uint32
+
+	// Envelope + Size are stored metadata so the IMAP read face serves FETCH
+	// ENVELOPE / RFC822Size / header SEARCH without the body (ADR 0019). Envelope
+	// is nil and Size 0 for locally-generated deliveries; the read face falls back
+	// to the raw for those.
+	Envelope *Envelope
+	Size     int64
 }
 
 // Message is a stored inbound message.
@@ -51,6 +85,14 @@ type Message struct {
 	// demand (Syncer.FetchContent → SetContent); callers must not treat a pending
 	// message's empty Raw as "no body".
 	Pending bool `json:"pending,omitempty"`
+
+	// Envelope + Size are stored metadata for the IMAP read face: FETCH ENVELOPE,
+	// RFC822Size, and header SEARCH (Subject/From/To/Date) serve from these
+	// without the body. Envelope is nil / Size 0 for records stored before the
+	// envelope was captured (pre-#93 syncs, bounces); the read face then derives
+	// from the raw.
+	Envelope *Envelope `json:"envelope,omitempty"`
+	Size     int64     `json:"size,omitempty"`
 }
 
 // InboundStore is the agent's served mailbox. Implementations are selected by

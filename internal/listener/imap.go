@@ -6,8 +6,10 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -188,7 +190,6 @@ func (s *imapSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 		}
 	}
 
-	needRaw := fetchNeedsRaw(options)
 	var ferr error
 	s.forEach(numSet, func(seqNum uint32, m *inbound.Message) {
 		if ferr != nil {
@@ -201,28 +202,39 @@ func (s *imapSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 			}
 			m.Seen = true // also updates s.selected via the pointer
 		}
-		msg := *m
-		if needRaw {
-			// Resolve content on demand (blob, or upstream for a pending record).
-			// A failure surfaces as an IMAP error, never empty/wrong content.
-			full, err := s.fetch(s.owner, m.ID)
-			if err != nil {
-				ferr = err
-				return
-			}
-			full.Seen = m.Seen // keep the in-session flag state
-			msg = full
-		}
-		ferr = fetchMessage(w.CreateMessage(seqNum), msg, options)
+		// fetchMessage resolves content lazily: ENVELOPE / RFC822Size / header
+		// fields serve from stored metadata when present, and only a body request
+		// (or a record with no stored metadata) triggers getRaw. A resolve failure
+		// surfaces as an IMAP error, never empty/wrong content.
+		ferr = fetchMessage(w.CreateMessage(seqNum), *m, options, s.rawResolver(*m))
 	})
 	return ferr
 }
 
-// fetchNeedsRaw reports whether any requested item requires the message body;
-// flags/UID/internal-date alone do not, so a metadata-only FETCH never triggers
-// an on-demand content fetch.
-func fetchNeedsRaw(o *imap.FetchOptions) bool {
-	return o.RFC822Size || o.Envelope || o.BodyStructure != nil || len(o.BodySection) > 0
+// rawFunc lazily resolves a message's raw content.
+type rawFunc func() ([]byte, error)
+
+// rawResolver returns a memoized resolver for a message's raw content: it calls
+// the content fetcher at most once, and only when a field actually needs the body
+// (BodyStructure/BodySection, or ENVELOPE/size/header on a record with no stored
+// metadata). Present records resolve from a local blob; a pending record fetches
+// upstream once, then is cached present.
+func (s *imapSession) rawResolver(m inbound.Message) rawFunc {
+	var (
+		raw  []byte
+		err  error
+		done bool
+	)
+	return func() ([]byte, error) {
+		if !done {
+			done = true
+			var full inbound.Message
+			if full, err = s.fetch(s.owner, m.ID); err == nil {
+				raw = full.Raw
+			}
+		}
+		return raw, err
+	}
 }
 
 func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) error {
@@ -295,7 +307,6 @@ func (s *imapSession) Append(string, imap.LiteralReader, *imap.AppendOptions) (*
 // matching for HEADER/BODY/TEXT. (Returning an error here surfaces as a
 // NO [SERVERBUG] and breaks real clients — #53.)
 func (s *imapSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCriteria, _ *imap.SearchOptions) (*imap.SearchData, error) {
-	needRaw := searchNeedsRaw(criteria)
 	var (
 		data   imap.SearchData
 		seqSet imap.SeqSet
@@ -304,18 +315,16 @@ func (s *imapSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCr
 	for i := range s.selected {
 		m := &s.selected[i]
 		seqNum := uint32(i) + 1
-		cand := *m
-		if needRaw {
-			// Content-bearing criteria (size / header / body / text) need the
-			// body — resolve it on demand for this candidate.
-			full, err := s.fetch(s.owner, m.ID)
-			if err != nil {
-				return nil, err
-			}
-			full.Seen = m.Seen
-			cand = full
+		// matchSearch resolves content lazily and only for content-bearing
+		// criteria on records without stored metadata. If a candidate's content
+		// can't be resolved, skip it (degrade, don't [SERVERBUG] the whole SEARCH)
+		// — but log it: a skipped candidate is a silently-missing result.
+		ok, err := matchSearch(seqNum, m, criteria, s.rawResolver(*m))
+		if err != nil {
+			log.Printf("darbaan: imap search skipped message %s: %v", m.ID, err)
+			continue
 		}
-		if !matchSearch(seqNum, &cand, criteria) {
+		if !ok {
 			continue
 		}
 		uid := uidOf(*m)
@@ -346,89 +355,181 @@ func (s *imapSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCr
 	return &data, nil
 }
 
-// searchNeedsRaw reports whether any criterion needs the message body (size /
-// header / body / text), recursing into NOT/OR — so a metadata-only search
-// (seq/uid/flags/date) never triggers an on-demand content fetch.
-func searchNeedsRaw(c *imap.SearchCriteria) bool {
-	if c.Larger != 0 || c.Smaller != 0 || len(c.Header) > 0 || len(c.Body) > 0 || len(c.Text) > 0 {
-		return true
-	}
-	for i := range c.Not {
-		if searchNeedsRaw(&c.Not[i]) {
-			return true
-		}
-	}
-	for _, or := range c.Or {
-		if searchNeedsRaw(&or[0]) || searchNeedsRaw(&or[1]) {
-			return true
-		}
-	}
-	return false
-}
-
-func matchSearch(seqNum uint32, m *inbound.Message, c *imap.SearchCriteria) bool {
+// matchSearch reports whether a message matches the criteria. Metadata criteria
+// (seq/uid/flags/date) and stored-metadata criteria (size, and Subject/From/To/
+// Date/... headers when the envelope is stored) match without the body; only
+// BODY/TEXT and headers on records with no stored envelope call getRaw. An error
+// means the content couldn't be resolved (caller skips + logs the candidate).
+func matchSearch(seqNum uint32, m *inbound.Message, c *imap.SearchCriteria, getRaw rawFunc) (bool, error) {
 	for _, set := range c.SeqNum {
 		if !set.Contains(seqNum) {
-			return false
+			return false, nil
 		}
 	}
 	for _, set := range c.UID {
 		if !set.Contains(uidOf(*m)) {
-			return false
+			return false, nil
 		}
 	}
 	if !matchDate(m.ReceivedAt, c.Since, c.Before) {
-		return false
+		return false, nil
 	}
 	for _, f := range c.Flag {
 		if !hasFlag(m, f) {
-			return false
+			return false, nil
 		}
 	}
 	for _, f := range c.NotFlag {
 		if hasFlag(m, f) {
-			return false
+			return false, nil
 		}
 	}
-	if c.Larger != 0 && int64(len(m.Raw)) <= c.Larger {
-		return false
-	}
-	if c.Smaller != 0 && int64(len(m.Raw)) >= c.Smaller {
-		return false
-	}
-	// Only lower-case the (potentially large) raw message when a content
-	// criterion actually needs it — the common SEARCH (ALL / flags / seq) skips
-	// this allocation entirely (#56).
-	if len(c.Header) > 0 || len(c.Text) > 0 || len(c.Body) > 0 {
-		low := bytes.ToLower(m.Raw)
-		for _, h := range c.Header {
-			if !bytes.Contains(low, bytes.ToLower([]byte(h.Key))) ||
-				(h.Value != "" && !bytes.Contains(low, bytes.ToLower([]byte(h.Value)))) {
-				return false
-			}
+	if c.Larger != 0 || c.Smaller != 0 {
+		size, err := sizeOf(m, getRaw)
+		if err != nil {
+			return false, err
 		}
+		if c.Larger != 0 && size <= c.Larger {
+			return false, nil
+		}
+		if c.Smaller != 0 && size >= c.Smaller {
+			return false, nil
+		}
+	}
+	for _, h := range c.Header {
+		ok, err := matchHeader(m, h, getRaw)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, nil
+		}
+	}
+	if len(c.Text) > 0 || len(c.Body) > 0 {
+		raw, err := getRaw()
+		if err != nil {
+			return false, err
+		}
+		low := bytes.ToLower(raw)
 		for _, t := range c.Text {
 			if !bytes.Contains(low, bytes.ToLower([]byte(t))) {
-				return false
+				return false, nil
 			}
 		}
 		for _, b := range c.Body {
 			if !bytes.Contains(low, bytes.ToLower([]byte(b))) {
-				return false
+				return false, nil
 			}
 		}
 	}
 	for i := range c.Not {
-		if matchSearch(seqNum, m, &c.Not[i]) {
-			return false
+		ok, err := matchSearch(seqNum, m, &c.Not[i], getRaw)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return false, nil
 		}
 	}
 	for _, or := range c.Or {
-		if !matchSearch(seqNum, m, &or[0]) && !matchSearch(seqNum, m, &or[1]) {
-			return false
+		a, err := matchSearch(seqNum, m, &or[0], getRaw)
+		if err != nil {
+			return false, err
+		}
+		b := false
+		if !a {
+			if b, err = matchSearch(seqNum, m, &or[1], getRaw); err != nil {
+				return false, err
+			}
+		}
+		if !a && !b {
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
+}
+
+// sizeOf returns the message size from stored metadata, falling back to the raw
+// length for records synced before the size was stored.
+func sizeOf(m *inbound.Message, getRaw rawFunc) (int64, error) {
+	if m.Size > 0 {
+		return m.Size, nil
+	}
+	raw, err := getRaw()
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(raw)), nil
+}
+
+// matchHeader matches one SEARCH HEADER criterion. Stored-envelope headers
+// (Subject/From/To/Cc/Bcc/Sender/Reply-To/Date/Message-Id/In-Reply-To) match
+// against the stored envelope (no body fetch); any other header — or a record
+// with no stored envelope — falls back to a substring match over the raw.
+func matchHeader(m *inbound.Message, h imap.SearchCriteriaHeaderField, getRaw rawFunc) (bool, error) {
+	if m.Envelope != nil {
+		if v, ok := envelopeHeader(m.Envelope, h.Key); ok {
+			if h.Value == "" {
+				return v != "", nil // header-present check
+			}
+			return strings.Contains(strings.ToLower(v), strings.ToLower(h.Value)), nil
+		}
+	}
+	raw, err := getRaw()
+	if err != nil {
+		return false, err
+	}
+	low := bytes.ToLower(raw)
+	if !bytes.Contains(low, bytes.ToLower([]byte(h.Key))) {
+		return false, nil
+	}
+	return h.Value == "" || bytes.Contains(low, bytes.ToLower([]byte(h.Value))), nil
+}
+
+// envelopeHeader renders a stored-envelope field for substring matching, or
+// ok=false for a header not carried by the envelope (match via raw instead).
+func envelopeHeader(e *inbound.Envelope, key string) (string, bool) {
+	switch strings.ToLower(key) {
+	case "subject":
+		return e.Subject, true
+	case "from":
+		return formatAddrs(e.From), true
+	case "sender":
+		return formatAddrs(e.Sender), true
+	case "reply-to":
+		return formatAddrs(e.ReplyTo), true
+	case "to":
+		return formatAddrs(e.To), true
+	case "cc":
+		return formatAddrs(e.Cc), true
+	case "bcc":
+		return formatAddrs(e.Bcc), true
+	case "message-id":
+		return e.MessageID, true
+	case "in-reply-to":
+		return strings.Join(e.InReplyTo, " "), true
+	case "date":
+		if e.Date.IsZero() {
+			return "", true
+		}
+		return e.Date.Format(time.RFC1123Z), true
+	}
+	return "", false
+}
+
+func formatAddrs(as []inbound.Address) string {
+	if len(as) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(as))
+	for _, a := range as {
+		addr := a.Mailbox + "@" + a.Host
+		if a.Name != "" {
+			addr = a.Name + " <" + addr + ">"
+		}
+		parts = append(parts, addr)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // hasFlag reports whether the message has an IMAP flag. v1 persists only \Seen.
@@ -462,7 +563,7 @@ func (s *imapSession) Idle(_ *imapserver.UpdateWriter, stop <-chan struct{}) err
 	return nil
 }
 
-func fetchMessage(w *imapserver.FetchResponseWriter, m inbound.Message, options *imap.FetchOptions) error {
+func fetchMessage(w *imapserver.FetchResponseWriter, m inbound.Message, options *imap.FetchOptions, getRaw rawFunc) error {
 	w.WriteUID(uidOf(m))
 	if options.Flags {
 		w.WriteFlags(flagList(m))
@@ -471,18 +572,34 @@ func fetchMessage(w *imapserver.FetchResponseWriter, m inbound.Message, options 
 		w.WriteInternalDate(m.ReceivedAt)
 	}
 	if options.RFC822Size {
-		w.WriteRFC822Size(int64(len(m.Raw)))
+		size, err := sizeOf(&m, getRaw)
+		if err != nil {
+			return err
+		}
+		w.WriteRFC822Size(size)
 	}
 	if options.Envelope {
-		if h, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(m.Raw))); err == nil {
-			w.WriteEnvelope(imapserver.ExtractEnvelope(h))
+		env, err := envelopeFor(m, getRaw)
+		if err != nil {
+			return err
+		}
+		if env != nil {
+			w.WriteEnvelope(env)
 		}
 	}
 	if options.BodyStructure != nil {
-		w.WriteBodyStructure(imapserver.ExtractBodyStructure(bytes.NewReader(m.Raw)))
+		raw, err := getRaw()
+		if err != nil {
+			return err
+		}
+		w.WriteBodyStructure(imapserver.ExtractBodyStructure(bytes.NewReader(raw)))
 	}
 	for _, bs := range options.BodySection {
-		buf := imapserver.ExtractBodySection(bytes.NewReader(m.Raw), bs)
+		raw, err := getRaw()
+		if err != nil {
+			return err
+		}
+		buf := imapserver.ExtractBodySection(bytes.NewReader(raw), bs)
 		wc := w.WriteBodySection(bs, int64(len(buf)))
 		_, writeErr := wc.Write(buf)
 		closeErr := wc.Close()
@@ -494,6 +611,50 @@ func fetchMessage(w *imapserver.FetchResponseWriter, m inbound.Message, options 
 		}
 	}
 	return w.Close()
+}
+
+// envelopeFor returns the IMAP envelope from stored metadata when present, else
+// parses it from the (lazily-resolved) raw — for records synced before the
+// envelope was stored, and for locally-generated messages.
+func envelopeFor(m inbound.Message, getRaw rawFunc) (*imap.Envelope, error) {
+	if m.Envelope != nil {
+		return toIMAPEnvelope(m.Envelope), nil
+	}
+	raw, err := getRaw()
+	if err != nil {
+		return nil, err
+	}
+	h, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
+	if err != nil {
+		return nil, nil // unparseable header: omit the envelope (prior behavior)
+	}
+	return imapserver.ExtractEnvelope(h), nil
+}
+
+func toIMAPEnvelope(e *inbound.Envelope) *imap.Envelope {
+	return &imap.Envelope{
+		Date:      e.Date,
+		Subject:   e.Subject,
+		From:      toIMAPAddrs(e.From),
+		Sender:    toIMAPAddrs(e.Sender),
+		ReplyTo:   toIMAPAddrs(e.ReplyTo),
+		To:        toIMAPAddrs(e.To),
+		Cc:        toIMAPAddrs(e.Cc),
+		Bcc:       toIMAPAddrs(e.Bcc),
+		InReplyTo: e.InReplyTo,
+		MessageID: e.MessageID,
+	}
+}
+
+func toIMAPAddrs(as []inbound.Address) []imap.Address {
+	if len(as) == 0 {
+		return nil
+	}
+	out := make([]imap.Address, len(as))
+	for i, a := range as {
+		out[i] = imap.Address{Name: a.Name, Mailbox: a.Mailbox, Host: a.Host}
+	}
+	return out
 }
 
 func flagList(m inbound.Message) []imap.Flag {

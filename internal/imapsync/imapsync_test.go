@@ -99,6 +99,11 @@ func TestSyncPullsIncrementally(t *testing.T) {
 	assert.Equal(t, "agent", msgs[0].Owner) // synced to the agent's mailbox
 	assert.True(t, msgs[0].Pending)
 	assert.Empty(t, msgs[0].Raw)
+	// Envelope + size are stored as metadata (served by the read face without the
+	// body): the envelope subject matches and the size is non-zero.
+	require.NotNil(t, msgs[0].Envelope)
+	assert.True(t, subjects[msgs[0].Envelope.Subject], "envelope subject stored")
+	assert.Positive(t, msgs[0].Size)
 
 	// Idempotent: a second sync with no new mail pulls nothing.
 	n, err = syncer.Sync(context.Background())

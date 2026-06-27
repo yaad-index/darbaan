@@ -112,11 +112,13 @@ func (s *Syncer) pull(c *imapclient.Client, uidValidity, uidNext, last uint32) (
 		set.AddRange(imap.UID(last+1), 0) // fallback: dynamic "*"
 	}
 
-	// Headers-only: ENVELOPE (for the metadata) but no BODY[] — the body is
-	// fetched on demand when first read (lazy, ADR 0019).
+	// Headers-only: ENVELOPE + RFC822.SIZE (stored as metadata so the read face
+	// serves FETCH ENVELOPE / RFC822Size / header SEARCH without the body) but no
+	// BODY[] — the body is fetched on demand when first read (lazy, ADR 0019).
 	cmd := c.Fetch(set, &imap.FetchOptions{
-		UID:      true,
-		Envelope: true,
+		UID:        true,
+		Envelope:   true,
+		RFC822Size: true,
 	})
 
 	stored, highest := 0, last
@@ -219,13 +221,42 @@ func (s *Syncer) FetchContent(owner, id string) (inbound.Message, error) {
 }
 
 func deliveryOf(owner string, m *imapclient.FetchMessageBuffer) inbound.Delivery {
-	d := inbound.Delivery{Owner: owner, Raw: rawBody(m)}
+	d := inbound.Delivery{Owner: owner, Raw: rawBody(m), Size: m.RFC822Size}
 	if m.Envelope != nil {
 		d.Subject = m.Envelope.Subject
 		d.From = firstAddr(m.Envelope.From)
 		d.To = joinAddrs(m.Envelope.To)
+		d.Envelope = mapEnvelope(m.Envelope)
 	}
 	return d
+}
+
+// mapEnvelope mirrors an IMAP envelope into the store's IMAP-free Envelope so the
+// read face can serve FETCH ENVELOPE / header SEARCH from metadata.
+func mapEnvelope(e *imap.Envelope) *inbound.Envelope {
+	return &inbound.Envelope{
+		Date:      e.Date,
+		Subject:   e.Subject,
+		From:      mapAddrs(e.From),
+		Sender:    mapAddrs(e.Sender),
+		ReplyTo:   mapAddrs(e.ReplyTo),
+		To:        mapAddrs(e.To),
+		Cc:        mapAddrs(e.Cc),
+		Bcc:       mapAddrs(e.Bcc),
+		InReplyTo: e.InReplyTo,
+		MessageID: e.MessageID,
+	}
+}
+
+func mapAddrs(as []imap.Address) []inbound.Address {
+	if len(as) == 0 {
+		return nil
+	}
+	out := make([]inbound.Address, len(as))
+	for i, a := range as {
+		out[i] = inbound.Address{Name: a.Name, Mailbox: a.Mailbox, Host: a.Host}
+	}
+	return out
 }
 
 func rawBody(m *imapclient.FetchMessageBuffer) []byte {
