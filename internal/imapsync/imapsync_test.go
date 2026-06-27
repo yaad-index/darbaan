@@ -56,6 +56,13 @@ func appendMsgAt(t *testing.T, user *imapmemserver.User, raw string, when time.T
 	require.NoError(t, err)
 }
 
+// appendMsgKw appends a message carrying custom keyword flags (ADR 0020).
+func appendMsgKw(t *testing.T, user *imapmemserver.User, raw string, flags []imap.Flag) {
+	t.Helper()
+	_, err := user.Append("INBOX", bytes.NewReader([]byte(raw)), &imap.AppendOptions{Flags: flags})
+	require.NoError(t, err)
+}
+
 func dialFor(addr string) imapsync.DialFunc {
 	return func() (*imapclient.Client, error) {
 		c, err := imapclient.DialInsecure(addr, nil)
@@ -224,6 +231,24 @@ func TestSyncDedupsOnCursorReset(t *testing.T) {
 	msgs, err := store.List("agent")
 	require.NoError(t, err)
 	assert.Len(t, msgs, 2) // no duplicates
+}
+
+// Sync pulls a message's custom keywords into the record metadata (ADR 0020);
+// system flags like \Seen are not keywords and are dropped.
+func TestSyncPullsKeywords(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsgKw(t, user, "Subject: tagged\r\n\r\nx", []imap.Flag{"useless", "$Important", imap.FlagSeen})
+
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
+	n, err := syncer.Sync(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	msgs, err := store.List("agent")
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	assert.ElementsMatch(t, []string{"useless", "$Important"}, msgs[0].Keywords)
 }
 
 // A recency cutoff (inbound-max-age) pulls only messages newer than the cutoff
