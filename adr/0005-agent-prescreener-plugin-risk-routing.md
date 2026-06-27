@@ -25,3 +25,11 @@ medium/high or any flag → the **strict** chain, per a configured routing table
 The pre-screener runs as the mandatory first stage when compiled in. **If it is
 not compiled in, the router defaults to the strict chain** (fail-safe) — absence
 of a risk signal is treated as "could be risky," never as "low."
+
+## Amendment (2026-06-27): no longer compile-time
+The pre-screener is no longer selected via a build tag — ADR 0004's compile-time
+mechanism was removed (#50), superseded by ADR 0017's runtime clients. It remains
+"just another approver," now selected at **runtime** via the approval chains; the
+"compile-time plugin" framing in the title and decision above is historical. The
+fail-safe still holds: when no pre-screener is registered, the router defaults to
+the strict chain.

@@ -27,3 +27,12 @@ window, the message is **not** sent; it stays queued. A timeout never
 auto-sends, consistent with default-deny (ADR 0003). Operators may configure
 escalation or an explicit expiry-to-rejected (which then bounces per ADR 0006),
 but the default on timeout is "keep waiting," never "send."
+
+## Amendment (2026-06-27): compile-time selection removed
+The "compile time (Go build tags)" half of approver selection is gone. ADR 0017
+made the interfaces runtime clients over the local admin API, and the last build
+tag (`no_manual_approver`) was dropped (#50). Approvers are now **always
+compiled in** and selected purely at **runtime** via the configured chains
+(`approval-strict` / `approval-light`). The blank-import registry stays; only the
+build-tag gating is removed. The chain remains fail-closed — a path with no
+approver registered approves nothing.
