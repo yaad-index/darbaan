@@ -32,6 +32,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/admin"
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
+	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/imapsync"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/listener"
@@ -82,6 +83,7 @@ type CLI struct {
 	InboundIMAPPollInterval time.Duration `name:"inbound-imap-poll-interval" default:"60s" help:"How often to poll the upstream mailbox for new mail."`
 	InboundSyncDB           string        `name:"inbound-sync-db" default:"darbaan-sync.db" help:"Path to the inbound sync-state (UIDVALIDITY + last UID) database." type:"path"`
 	InboundMaxAge           string        `name:"inbound-max-age" help:"Recency cutoff for the initial/full sync, e.g. 1y, 30d, 12h (ADR 0008). Empty = no cutoff (pull everything). Forward-only: widening it later needs a re-sync."`
+	InboundFilter           string        `name:"inbound-filter" help:"Path to the inbound filter rules (YAML, ADR 0021): serve-time allow/hide over synced mail. Empty = no filter (allow all)." type:"path"`
 
 	AgentUsername string `name:"agent-username" help:"The agent's Darbaan SMTP username. The password is supplied out-of-band via DARBAAN_AGENT_PASS, never inlined in config (ADR 0012)."`
 
@@ -375,11 +377,15 @@ func (*ServeCmd) Run(cli *CLI) error {
 	}
 	defer stopSync()
 
+	flt, err := filter.Load(cli.InboundFilter)
+	if err != nil {
+		return err
+	}
 	imapSrv, err := listener.NewIMAPServer(listener.IMAPServerConfig{
 		Addr:          cli.IMAPAddr,
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
-	}, cred, inbox, imapContentFetch(syncer), imapKeywordWriter(syncer))
+	}, cred, inbox, imapContentFetch(syncer), imapKeywordWriter(syncer), flt)
 	if err != nil {
 		return err
 	}

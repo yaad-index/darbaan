@@ -61,6 +61,9 @@ services:
       # Forward-only: widening it later needs a re-sync (old UIDs are behind the
       # cursor). Bounds both the store and the first pull on a deep mailbox.
       # DARBAAN_INBOUND_MAX_AGE: "1y"
+      # Inbound filter rules (ADR 0021): serve-time allow/hide over synced mail.
+      # Mount a YAML rules file and point at it; empty = no filter (allow all).
+      # DARBAAN_INBOUND_FILTER: /etc/darbaan/inbound-filter.yaml
       DARBAAN_INBOUND_IMAP_PASSWORD: "${DARBAAN_INBOUND_IMAP_PASSWORD:-}"
     volumes:
       - darbaan-data:/data # the three bbolt DBs (sluice / audit / inbound)
