@@ -95,6 +95,7 @@ type CLI struct {
 
 	Serve      ServeCmd      `cmd:"" help:"Run the SMTP + IMAP faces and the admin API."`
 	Queue      QueueCmd      `cmd:"" help:"Inspect and decide held messages (via the running serve's admin API)."`
+	Holds      HoldsCmd      `cmd:"" help:"Inspect and decide inbound messages held for a human (ADR 0021)."`
 	Telegram   TelegramCmd   `cmd:"" help:"Run the Telegram approval client (a separate admin-API client process)."`
 	DkimPubkey DkimPubkeyCmd `cmd:"" name:"dkim-pubkey" help:"Print the DKIM public-key record to pin to the agent."`
 	Version    VersionCmd    `cmd:"" help:"Print version and exit."`
@@ -381,6 +382,9 @@ func (*ServeCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
+	// The admin hold-for-human queue and the read face share one filter + owner
+	// (ADR 0021): the read face hides held mail, the admin surface decides it.
+	svc.SetInboundHolds(flt, cli.AgentUsername)
 	imapSrv, err := listener.NewIMAPServer(listener.IMAPServerConfig{
 		Addr:          cli.IMAPAddr,
 		TLSConfig:     tlsConfig,
@@ -535,5 +539,73 @@ func printOutcome(out admin.Outcome) error {
 	if out.Warn != "" {
 		return fmt.Errorf("%s", out.Warn)
 	}
+	return nil
+}
+
+// HoldsCmd decides inbound messages held for a human (ADR 0021), the inbound
+// mirror of `queue`.
+type HoldsCmd struct {
+	Ls     HoldsLsCmd     `cmd:"" help:"List inbound messages held for a decision."`
+	Expose HoldsExposeCmd `cmd:"" help:"Expose a held message to the agent (approve)."`
+	Drop   HoldsDropCmd   `cmd:"" help:"Keep a held message hidden from the agent (reject)."`
+}
+
+type HoldsLsCmd struct{}
+
+func (*HoldsLsCmd) Run(cli *CLI) error {
+	c, err := cli.adminClient()
+	if err != nil {
+		return err
+	}
+	held, err := c.HeldList(context.Background())
+	if err != nil {
+		return err
+	}
+	if len(held) == 0 {
+		fmt.Fprintln(os.Stderr, "no messages held for a decision")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "ID\tFROM\tSUBJECT\tRECEIVED")
+	for _, m := range held {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			m.ID, m.From, truncate(m.Subject, 40), m.ReceivedAt.Format(time.RFC3339))
+	}
+	return w.Flush()
+}
+
+// HoldsExposeCmd exposes a held message to the agent.
+type HoldsExposeCmd struct {
+	ID string `arg:"" help:"Message id."`
+}
+
+func (c *HoldsExposeCmd) Run(cli *CLI) error {
+	client, err := cli.adminClient()
+	if err != nil {
+		return err
+	}
+	m, err := client.Expose(context.Background(), c.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("message %s exposed to the agent\n", m.ID)
+	return nil
+}
+
+// HoldsDropCmd keeps a held message hidden from the agent.
+type HoldsDropCmd struct {
+	ID string `arg:"" help:"Message id."`
+}
+
+func (c *HoldsDropCmd) Run(cli *CLI) error {
+	client, err := cli.adminClient()
+	if err != nil {
+		return err
+	}
+	m, err := client.Drop(context.Background(), c.ID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("message %s dropped (stays hidden from the agent)\n", m.ID)
 	return nil
 }

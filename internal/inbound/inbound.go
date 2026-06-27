@@ -101,7 +101,19 @@ type Message struct {
 	// Keywords are the message's custom IMAP keywords/labels (ADR 0020), served
 	// on FETCH FLAGS. The agent sets them via STORE (write-through to upstream).
 	Keywords []string `json:"keywords,omitempty"`
+
+	// HoldDecision records the human's call on a hold-for-human message (ADR
+	// 0021): "" = undecided (held, hidden from the agent), "approved" = exposed to
+	// the agent, "rejected" = stays hidden. Only meaningful while a hold rule
+	// matches the message; it is the one persisted, human-supplied filter state.
+	HoldDecision string `json:"hold_decision,omitempty"`
 }
+
+// Hold decision values for Message.HoldDecision (ADR 0021).
+const (
+	HoldApproved = "approved"
+	HoldRejected = "rejected"
+)
 
 // InboundStore is the agent's served mailbox. Implementations are selected by
 // config (inbound-type) and constructed through New.
@@ -127,6 +139,9 @@ type InboundStore interface {
 	ClearKeywordsDirty(owner, id string) error
 	// DirtyKeywords returns messages whose keywords await upstream replication.
 	DirtyKeywords(owner string) ([]Message, error)
+	// SetHoldDecision persists the human's hold-for-human decision (ADR 0021):
+	// "approved" exposes the message, "rejected" keeps it hidden. Owner-scoped.
+	SetHoldDecision(owner, id, decision string) (Message, error)
 	// List returns the owner's messages' metadata (no content/Raw) in receive
 	// order; a body is fetched per-message via Get / the content fetcher.
 	List(owner string) ([]Message, error)

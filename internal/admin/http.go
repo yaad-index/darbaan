@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
@@ -33,6 +34,12 @@ func NewServer(addr, token string, svc *Service) (*Server, error) {
 	mux.HandleFunc("GET /queue/{id}", s.auth(s.handleShow))
 	mux.HandleFunc("POST /queue/{id}/approve", s.auth(s.handleApprove))
 	mux.HandleFunc("POST /queue/{id}/reject", s.auth(s.handleReject))
+
+	// Inbound hold-for-human queue (ADR 0021): expose = show to the agent, drop =
+	// keep hidden.
+	mux.HandleFunc("GET /holds", s.auth(s.handleHeldList))
+	mux.HandleFunc("POST /holds/{id}/expose", s.auth(s.handleExpose))
+	mux.HandleFunc("POST /holds/{id}/drop", s.auth(s.handleDrop))
 
 	s.http = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
@@ -89,6 +96,40 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	out, err := s.svc.ApproveID(r.Context(), r.PathValue("id"))
 	writeAction(w, out, err)
+}
+
+func (s *Server) handleHeldList(w http.ResponseWriter, _ *http.Request) {
+	held, err := s.svc.HeldList()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if held == nil {
+		held = []inbound.Message{}
+	}
+	writeJSON(w, http.StatusOK, held)
+}
+
+func (s *Server) handleExpose(w http.ResponseWriter, r *http.Request) {
+	m, err := s.svc.ExposeHeld(r.PathValue("id"))
+	s.writeHold(w, m, err)
+}
+
+func (s *Server) handleDrop(w http.ResponseWriter, r *http.Request) {
+	m, err := s.svc.DropHeld(r.PathValue("id"))
+	s.writeHold(w, m, err)
+}
+
+func (s *Server) writeHold(w http.ResponseWriter, m inbound.Message, err error) {
+	if errors.Is(err, inbound.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
 }
 
 func (s *Server) handleReject(w http.ResponseWriter, r *http.Request) {

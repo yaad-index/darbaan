@@ -10,6 +10,8 @@ import (
 
 	"github.com/yaad-index/darbaan/internal/admin"
 	"github.com/yaad-index/darbaan/internal/backend"
+	"github.com/yaad-index/darbaan/internal/filter"
+	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
@@ -85,4 +87,34 @@ func TestAdminShowNotFound(t *testing.T) {
 	addr := startServer(t, svc, "tok")
 	_, err := admin.NewClient(addr, "tok").Show(context.Background(), "999")
 	require.Error(t, err)
+}
+
+func TestHoldsRoundtrip(t *testing.T) {
+	q, _ := seedStore(t)
+	inbox := newInbound(t)
+	svc := admin.NewService(q, inbox, fakeSender{nil}, testSigner(t), strictRouter(), "darbaan.test")
+	flt, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]"))
+	require.NoError(t, err)
+	svc.SetInboundHolds(flt, "agent")
+	_, held, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", Subject: "review me", UpstreamUID: 1, UIDValidity: 1, Keywords: []string{"review"}})
+	require.NoError(t, err)
+
+	c := admin.NewClient(startServer(t, svc, "tok"), "tok")
+	ctx := context.Background()
+
+	list, err := c.HeldList(ctx)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, held.ID, list[0].ID)
+
+	m, err := c.Expose(ctx, held.ID)
+	require.NoError(t, err)
+	assert.Equal(t, held.ID, m.ID)
+
+	list, err = c.HeldList(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, list) // decided -> off the queue
+
+	_, err = c.Expose(ctx, "999") // unknown id -> error
+	assert.Error(t, err)
 }
