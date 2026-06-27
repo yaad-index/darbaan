@@ -3,12 +3,15 @@
 // localhost-only admin API (#52). It is NOT compiled into serve; it holds only
 // a bot token and an admin-API token, never the mail credentials (ADR 0002).
 //
-// It polls the admin queue and posts each new held message to the operator
-// chat with an [Approve] / [Reject permanent] / [Reject retryable] keyboard,
-// then applies the operator's decision via the admin API: Approve sends through
+// It polls the admin queue and posts each new held OUTBOUND message to the
+// operator chat with an [Approve] / [Reject permanent] / [Reject retryable]
+// keyboard, then applies the decision via the admin API: Approve sends through
 // immediately; either Reject first prompts (force-reply) for a reason that
-// becomes the DSN bounce reason. Only the configured operator may decide
-// (ADR 0002) — both the button taps and the reason reply are gated to them.
+// becomes the DSN bounce reason. It also polls the INBOUND hold-for-human queue
+// (ADR 0021) and posts each held message with an [Expose] / [Drop] keyboard —
+// Expose reveals it to the agent, Drop keeps it hidden (see holds.go). Only the
+// configured operator may decide (ADR 0002) — every tap and reply is gated to
+// them.
 package telegram
 
 import (
@@ -33,6 +36,10 @@ const (
 	cbApprove     = "approve:"
 	cbRejectPerm  = "reject_perm:"
 	cbRejectRetry = "reject_retry:"
+	// Inbound hold-for-human decisions (ADR 0021): expose = show to the agent,
+	// drop = keep hidden.
+	cbExpose = "expose:"
+	cbDrop   = "drop:"
 )
 
 // Client is the Telegram approval interface.
@@ -42,9 +49,10 @@ type Client struct {
 	operatorID   int64
 	pollInterval time.Duration
 
-	mu      sync.Mutex
-	posted  map[string]bool     // message ids already sent to the operator
-	pending map[int]rejectState // reject reason prompts awaiting the operator's reply, keyed by prompt message id
+	mu          sync.Mutex
+	posted      map[string]bool     // sluice message ids already sent to the operator
+	postedHolds map[string]bool     // inbound-hold ids already sent (separate id space)
+	pending     map[int]rejectState // reject reason prompts awaiting the operator's reply, keyed by prompt message id
 }
 
 // rejectState remembers, for a reason force-reply prompt, which held message it
@@ -88,11 +96,15 @@ func New(token string, operatorID int64, pollInterval time.Duration, adminClient
 		operatorID:   operatorID,
 		pollInterval: pollInterval,
 		posted:       make(map[string]bool),
+		postedHolds:  make(map[string]bool),
 		pending:      make(map[int]rejectState),
 	}
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbApprove, bot.MatchTypePrefix, c.handleApprove)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbRejectPerm, bot.MatchTypePrefix, c.handleRejectPermanent)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbRejectRetry, bot.MatchTypePrefix, c.handleRejectRetryable)
+	// Inbound hold-for-human decisions (ADR 0021).
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbExpose, bot.MatchTypePrefix, c.handleExpose)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbDrop, bot.MatchTypePrefix, c.handleDrop)
 	// The reason force-reply arrives as a normal reply message, not a callback.
 	b.RegisterHandlerMatchFunc(isReply, c.handleReasonReply)
 	return c, nil
@@ -116,12 +128,14 @@ func (c *Client) pollLoop(ctx context.Context) {
 	t := time.NewTicker(c.pollInterval)
 	defer t.Stop()
 	c.poll(ctx) // post anything already pending at startup
+	c.pollHolds(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 			c.poll(ctx)
+			c.pollHolds(ctx)
 		}
 	}
 }
