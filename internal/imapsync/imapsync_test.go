@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -249,6 +250,77 @@ func TestSyncPullsKeywords(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
 	assert.ElementsMatch(t, []string{"useless", "$Important"}, msgs[0].Keywords)
+}
+
+// upstreamKeywords reads a message's custom keywords from the upstream by UID.
+func upstreamKeywords(t *testing.T, addr string, uid uint32) []string {
+	t.Helper()
+	c, err := dialFor(addr)()
+	require.NoError(t, err)
+	defer func() { _ = c.Logout().Wait() }()
+	_, err = c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	var set imap.UIDSet
+	set.AddNum(imap.UID(uid))
+	msgs, err := c.Fetch(set, &imap.FetchOptions{UID: true, Flags: true}).Collect()
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	var kw []string
+	for _, f := range msgs[0].Flags {
+		if !strings.HasPrefix(string(f), "\\") {
+			kw = append(kw, string(f))
+		}
+	}
+	return kw
+}
+
+// WriteKeywords replicates a keyword set to the upstream over a separate session,
+// converging by add/remove delta (ADR 0020 write-through).
+func TestWriteKeywordsToUpstream(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "Subject: x\r\n\r\ny") // upstream UID 1
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
+	_, err := syncer.Sync(context.Background())
+	require.NoError(t, err)
+	msgs, err := store.List("agent")
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+
+	require.NoError(t, syncer.WriteKeywords("agent", msgs[0].ID, []string{"useless", "handled"}))
+	assert.ElementsMatch(t, []string{"useless", "handled"}, upstreamKeywords(t, addr, 1))
+
+	// Converges: removing one upstream.
+	require.NoError(t, syncer.WriteKeywords("agent", msgs[0].ID, []string{"handled"}))
+	assert.ElementsMatch(t, []string{"handled"}, upstreamKeywords(t, addr, 1))
+}
+
+// A dirty keyword set (a failed immediate write) is reconciled to upstream on the
+// next sync, then the dirty flag clears.
+func TestSyncReconcilesDirtyKeywords(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "Subject: x\r\n\r\ny")
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
+	_, err := syncer.Sync(context.Background())
+	require.NoError(t, err)
+	msgs, err := store.List("agent")
+	require.NoError(t, err)
+
+	// Mark dirty locally (as if the immediate upstream write had failed).
+	_, err = store.SetKeywords("agent", msgs[0].ID, []string{"useless"})
+	require.NoError(t, err)
+	dirty, err := store.DirtyKeywords("agent")
+	require.NoError(t, err)
+	require.Len(t, dirty, 1)
+
+	// Next sync reconciles it upstream and clears dirty.
+	_, err = syncer.Sync(context.Background())
+	require.NoError(t, err)
+	dirty, err = store.DirtyKeywords("agent")
+	require.NoError(t, err)
+	assert.Empty(t, dirty)
+	assert.ElementsMatch(t, []string{"useless"}, upstreamKeywords(t, addr, 1))
 }
 
 // A recency cutoff (inbound-max-age) pulls only messages newer than the cutoff

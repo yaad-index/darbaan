@@ -39,6 +39,10 @@ func init() {
 type stored struct {
 	Message
 	Blobbed bool `json:"blobbed,omitempty"`
+	// KeywordsDirty marks a record whose local keyword set has not yet been
+	// confirmed replicated to the upstream backend (ADR 0020 write-through). The
+	// local store is canonical; the sync reconciles dirty records best-effort.
+	KeywordsDirty bool `json:"keywords_dirty,omitempty"`
 }
 
 // bboltStore is the bbolt-backed InboundStore. Metadata lives in its database;
@@ -297,6 +301,70 @@ func (s *bboltStore) SetSeen(owner, id string, seen bool) error {
 		rec.Seen = seen
 		return putStored(tx, key, rec) // metadata only; the blob is untouched
 	})
+}
+
+// SetKeywords replaces the owner's message's keyword set (ADR 0020) and marks it
+// dirty for upstream reconcile. The local store is canonical; the returned
+// message carries the new keywords (without content). Metadata-only write.
+func (s *bboltStore) SetKeywords(owner, id string, keywords []string) (Message, error) {
+	var msg Message
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		rec, key, err := loadStored(tx, id)
+		if err != nil {
+			return err
+		}
+		if rec.Owner != owner {
+			return ErrNotFound
+		}
+		rec.Keywords = keywords
+		rec.KeywordsDirty = true
+		msg = rec.Message
+		return putStored(tx, key, rec)
+	})
+	if err != nil {
+		return Message{}, fmt.Errorf("inbound: set keywords %s: %w", id, err)
+	}
+	return msg, nil
+}
+
+// ClearKeywordsDirty clears the dirty flag after a successful upstream replicate.
+func (s *bboltStore) ClearKeywordsDirty(owner, id string) error {
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		rec, key, err := loadStored(tx, id)
+		if err != nil {
+			return err
+		}
+		if rec.Owner != owner {
+			return ErrNotFound
+		}
+		if !rec.KeywordsDirty {
+			return nil
+		}
+		rec.KeywordsDirty = false
+		return putStored(tx, key, rec)
+	})
+}
+
+// DirtyKeywords returns the owner's messages whose keywords await upstream
+// replication (metadata only), for the sync to reconcile.
+func (s *bboltStore) DirtyKeywords(owner string) ([]Message, error) {
+	var out []Message
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketInbound).ForEach(func(_, v []byte) error {
+			var rec stored
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return err
+			}
+			if rec.KeywordsDirty && rec.Owner == owner {
+				out = append(out, rec.Message)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("inbound: dirty keywords: %w", err)
+	}
+	return out, nil
 }
 
 func (s *bboltStore) Get(owner, id string) (Message, error) {

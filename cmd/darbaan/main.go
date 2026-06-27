@@ -208,6 +208,16 @@ func imapContentFetch(syncer *imapsync.Syncer) listener.ContentFetch {
 	return syncer.FetchContent
 }
 
+// imapKeywordWriter is the read face's label write-through (ADR 0020): the
+// syncer's WriteKeywords when sync is on, else nil (local-only labels — a
+// sync-disabled deploy has no upstream to replicate to).
+func imapKeywordWriter(syncer *imapsync.Syncer) listener.KeywordWriter {
+	if syncer == nil {
+		return nil
+	}
+	return syncer.WriteKeywords
+}
+
 // runSyncLoop polls the upstream mailbox on the configured interval until ctx is
 // cancelled. Sync errors are logged, never fatal — a flaky or unreachable
 // upstream must not take down serve.
@@ -365,7 +375,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 		Addr:          cli.IMAPAddr,
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
-	}, cred, inbox, imapContentFetch(syncer))
+	}, cred, inbox, imapContentFetch(syncer), imapKeywordWriter(syncer))
 	if err != nil {
 		return err
 	}

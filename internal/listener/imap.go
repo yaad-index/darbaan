@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,12 @@ type IMAPServerConfig struct {
 // (lazy, ADR 0019). It is called per-FETCH, never at SELECT.
 type ContentFetch func(owner, id string) (inbound.Message, error)
 
+// KeywordWriter replicates a message's keyword set to the upstream backend (the
+// label write-through, ADR 0020). The local store is canonical; a returned error
+// means the upstream replicate failed and is reconciled later. nil disables
+// write-through (local-only labels — e.g. sync disabled).
+type KeywordWriter func(owner, id string, want []string) error
+
 // IMAPServer serves the agent's mailbox (the InboundStore) over IMAP as a
 // translation adapter (ADR 0016): the store is canonical. SELECT snapshots
 // metadata only; a body FETCH resolves content per-message via a ContentFetch.
@@ -50,7 +57,7 @@ type IMAPServer struct {
 // content on demand; if nil it defaults to reading straight from the store
 // (no upstream — bounce-only / sync-disabled deployments have no pending
 // records).
-func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundStore, fetch ContentFetch) (*IMAPServer, error) {
+func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter) (*IMAPServer, error) {
 	if cfg.TLSConfig == nil && !cfg.AllowInsecure {
 		return nil, errors.New("listener: IMAP TLS required (set TLSConfig, or AllowInsecure for local testing)")
 	}
@@ -59,7 +66,7 @@ func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundS
 	}
 	srv := imapserver.New(&imapserver.Options{
 		NewSession: func(_ *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return &imapSession{cred: cred, store: store, fetch: fetch}, nil, nil
+			return &imapSession{cred: cred, store: store, fetch: fetch, writeKeywords: writeKeywords}, nil, nil
 		},
 		TLSConfig:    cfg.TLSConfig,
 		InsecureAuth: cfg.AllowInsecure,
@@ -80,12 +87,13 @@ func (s *IMAPServer) Close() error { return s.imap.Close() }
 // authenticated agent (owner). Every store access is owner-keyed, so a session
 // can only ever see the agent's own messages.
 type imapSession struct {
-	cred     Credential
-	store    inbound.InboundStore
-	fetch    ContentFetch // resolves message content on demand (per-FETCH)
-	owner    string
-	authed   bool
-	selected []inbound.Message // metadata snapshot taken at Select (no content)
+	cred          Credential
+	store         inbound.InboundStore
+	fetch         ContentFetch  // resolves message content on demand (per-FETCH)
+	writeKeywords KeywordWriter // replicates a keyword change upstream (nil = local-only)
+	owner         string
+	authed        bool
+	selected      []inbound.Message // metadata snapshot taken at Select (no content)
 }
 
 func (s *imapSession) Close() error { return nil }
@@ -127,9 +135,13 @@ func (s *imapSession) Select(mailbox string, _ *imap.SelectOptions) (*imap.Selec
 			}
 		}
 	}
+	// \* in PERMANENTFLAGS signals the client may create new keywords via STORE
+	// (ADR 0020 write-through).
+	permanent := append([]imap.Flag{imap.FlagSeen}, keywords...)
+	permanent = append(permanent, imap.FlagWildcard)
 	return &imap.SelectData{
 		Flags:             append([]imap.Flag{imap.FlagSeen}, keywords...),
-		PermanentFlags:    append([]imap.Flag{imap.FlagSeen}, keywords...),
+		PermanentFlags:    permanent,
 		NumMessages:       uint32(len(msgs)),
 		FirstUnseenSeqNum: firstUnseen,
 		UIDNext:           imap.UID(uidNext),
@@ -248,6 +260,8 @@ func (s *imapSession) rawResolver(m inbound.Message) rawFunc {
 func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) error {
 	seen, touchesSeen := seenFromStoreFlags(flags)
 
+	kw := keywordFlags(flags.Flags) // custom keywords in the STORE request (ADR 0020)
+
 	var serr error
 	s.forEach(numSet, func(seqNum uint32, m *inbound.Message) {
 		if serr != nil {
@@ -260,6 +274,27 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 			}
 			m.Seen = seen // also updates s.selected via the pointer
 		}
+		// Keyword change: a SET always recomputes (it can clear keywords); ADD/DEL
+		// only when keyword atoms are present.
+		if flags.Op == imap.StoreFlagsSet || len(kw) > 0 {
+			next, added, removed := applyKeywordOp(m.Keywords, flags.Op, kw)
+			if len(added) > 0 || len(removed) > 0 {
+				if _, err := s.store.SetKeywords(s.owner, m.ID, next); err != nil {
+					serr = err
+					return
+				}
+				m.Keywords = next // local store is canonical; update the snapshot
+				// Best-effort upstream replicate; a failure leaves the record dirty
+				// for the sync to reconcile, never an error to the agent (ADR 0020).
+				if s.writeKeywords != nil {
+					if err := s.writeKeywords(s.owner, m.ID, next); err != nil {
+						log.Printf("darbaan: imap keyword write-through for %s deferred: %v", m.ID, err)
+					} else {
+						_ = s.store.ClearKeywordsDirty(s.owner, m.ID)
+					}
+				}
+			}
+		}
 		if flags.Silent {
 			return
 		}
@@ -271,6 +306,67 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 		}
 	})
 	return serr
+}
+
+// keywordFlags returns the custom keyword atoms from a STORE's flags (dropping
+// backslash-prefixed system flags like \Seen, handled separately).
+func keywordFlags(flags []imap.Flag) []string {
+	var kw []string
+	for _, f := range flags {
+		if !strings.HasPrefix(string(f), "\\") {
+			kw = append(kw, string(f))
+		}
+	}
+	return kw
+}
+
+// applyKeywordOp applies an IMAP STORE op to a keyword set, returning the new set
+// plus the keywords added and removed (for the upstream delta). SET replaces the
+// whole set; ADD/DEL adjust it.
+func applyKeywordOp(current []string, op imap.StoreFlagsOp, kw []string) (next, added, removed []string) {
+	set := map[string]bool{}
+	for _, k := range current {
+		set[k] = true
+	}
+	switch op {
+	case imap.StoreFlagsAdd:
+		for _, k := range kw {
+			if !set[k] {
+				set[k] = true
+				added = append(added, k)
+			}
+		}
+	case imap.StoreFlagsDel:
+		for _, k := range kw {
+			if set[k] {
+				delete(set, k)
+				removed = append(removed, k)
+			}
+		}
+	case imap.StoreFlagsSet:
+		want := map[string]bool{}
+		for _, k := range kw {
+			want[k] = true
+		}
+		for _, k := range kw {
+			if !set[k] {
+				added = append(added, k)
+			}
+		}
+		for k := range set {
+			if !want[k] {
+				removed = append(removed, k)
+			}
+		}
+		set = want
+	}
+	for k := range set {
+		next = append(next, k)
+	}
+	sort.Strings(next)
+	sort.Strings(added)
+	sort.Strings(removed)
+	return next, added, removed
 }
 
 // forEach calls fn for each selected message matching numSet, computing its

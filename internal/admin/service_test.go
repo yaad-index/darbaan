@@ -80,6 +80,13 @@ func (failingInbound) AddSyncedPending(inbound.Delivery) (bool, inbound.Message,
 func (failingInbound) SetContent(string, string, []byte) (inbound.Message, error) {
 	return inbound.Message{}, errors.New("inbound store down")
 }
+func (failingInbound) SetKeywords(string, string, []string) (inbound.Message, error) {
+	return inbound.Message{}, errors.New("inbound store down")
+}
+func (failingInbound) ClearKeywordsDirty(string, string) error { return nil }
+func (failingInbound) DirtyKeywords(string) ([]inbound.Message, error) {
+	return nil, nil
+}
 func (failingInbound) List(string) ([]inbound.Message, error) { return nil, nil }
 func (failingInbound) Get(string, string) (inbound.Message, error) {
 	return inbound.Message{}, inbound.ErrNotFound
