@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/listener"
 )
@@ -36,15 +37,15 @@ func startIMAP(t *testing.T, store inbound.InboundStore) string {
 }
 
 func startIMAPWithFetch(t *testing.T, store inbound.InboundStore, fetch listener.ContentFetch) string {
-	return startIMAPFull(t, store, fetch, nil)
+	return startIMAPFull(t, store, fetch, nil, nil)
 }
 
-func startIMAPFull(t *testing.T, store inbound.InboundStore, fetch listener.ContentFetch, wk listener.KeywordWriter) string {
+func startIMAPFull(t *testing.T, store inbound.InboundStore, fetch listener.ContentFetch, wk listener.KeywordWriter, flt *filter.Filter) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		listener.Credential{Username: "agent", Password: "pw"}, store, fetch, wk)
+		listener.Credential{Username: "agent", Password: "pw"}, store, fetch, wk, flt)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -325,7 +326,7 @@ func TestIMAPStoreKeywordWritesThrough(t *testing.T) {
 	var wroteAdd []string
 	wk := func(owner, id string, add, remove []string) error { wroteID, wroteAdd = id, add; return nil }
 
-	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk), nil)
+	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk, nil), nil)
 	require.NoError(t, err)
 	defer func() { _ = c.Close() }()
 	require.NoError(t, c.Login("agent", "pw").Wait())
@@ -356,7 +357,7 @@ func TestIMAPStoreKeywordWriteFailureStaysDirty(t *testing.T) {
 
 	wk := func(owner, id string, add, remove []string) error { return errors.New("upstream down") }
 
-	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk), nil)
+	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk, nil), nil)
 	require.NoError(t, err)
 	defer func() { _ = c.Close() }()
 	require.NoError(t, c.Login("agent", "pw").Wait())
@@ -383,7 +384,7 @@ func TestIMAPStoreKeywordLocalOnlyNoUpstream(t *testing.T) {
 	called := false
 	wk := func(owner, id string, add, remove []string) error { called = true; return nil }
 
-	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk), nil)
+	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk, nil), nil)
 	require.NoError(t, err)
 	defer func() { _ = c.Close() }()
 	require.NoError(t, c.Login("agent", "pw").Wait())
@@ -402,6 +403,41 @@ func TestIMAPStoreKeywordLocalOnlyNoUpstream(t *testing.T) {
 	assert.Empty(t, dirty) // not dirty → never enters reconcile
 }
 
+// A hide rule omits matching messages from the read face (ADR 0021): SELECT
+// counts and serves only the allowed ones.
+func TestIMAPFilterHidesMessages(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	_, _, err = store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "keep", UpstreamUID: 1, UIDValidity: 1,
+		Envelope: &inbound.Envelope{Subject: "keep"},
+	})
+	require.NoError(t, err)
+	_, _, err = store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "junk", UpstreamUID: 2, UIDValidity: 1,
+		Envelope: &inbound.Envelope{Subject: "junk"}, Keywords: []string{"useless"},
+	})
+	require.NoError(t, err)
+
+	flt, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: useless}], action: hide}]"))
+	require.NoError(t, err)
+
+	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, nil, flt), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	sel, err := c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1), sel.NumMessages) // the "useless" message is hidden
+
+	msgs, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{Envelope: true}).Collect()
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	require.NotNil(t, msgs[0].Envelope)
+	assert.Equal(t, "keep", msgs[0].Envelope.Subject) // only the allowed one is served
+}
+
 func TestIMAPBadAuthRejected(t *testing.T) {
 	c, err := imapclient.DialInsecure(startIMAP(t, seedInbound(t)), nil)
 	require.NoError(t, err)
@@ -411,6 +447,6 @@ func TestIMAPBadAuthRejected(t *testing.T) {
 
 func TestIMAPRequiresTLS(t *testing.T) {
 	_, err := listener.NewIMAPServer(listener.IMAPServerConfig{},
-		listener.Credential{Username: "agent", Password: "pw"}, seedInbound(t), nil, nil)
+		listener.Credential{Username: "agent", Password: "pw"}, seedInbound(t), nil, nil, nil)
 	require.Error(t, err)
 }

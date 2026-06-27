@@ -17,6 +17,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/emersion/go-message/textproto"
 
+	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/inbound"
 )
 
@@ -58,7 +59,7 @@ type IMAPServer struct {
 // content on demand; if nil it defaults to reading straight from the store
 // (no upstream — bounce-only / sync-disabled deployments have no pending
 // records).
-func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter) (*IMAPServer, error) {
+func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter, flt *filter.Filter) (*IMAPServer, error) {
 	if cfg.TLSConfig == nil && !cfg.AllowInsecure {
 		return nil, errors.New("listener: IMAP TLS required (set TLSConfig, or AllowInsecure for local testing)")
 	}
@@ -67,7 +68,7 @@ func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundS
 	}
 	srv := imapserver.New(&imapserver.Options{
 		NewSession: func(_ *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return &imapSession{cred: cred, store: store, fetch: fetch, writeKeywords: writeKeywords}, nil, nil
+			return &imapSession{cred: cred, store: store, fetch: fetch, writeKeywords: writeKeywords, filter: flt}, nil, nil
 		},
 		TLSConfig:    cfg.TLSConfig,
 		InsecureAuth: cfg.AllowInsecure,
@@ -90,11 +91,33 @@ func (s *IMAPServer) Close() error { return s.imap.Close() }
 type imapSession struct {
 	cred          Credential
 	store         inbound.InboundStore
-	fetch         ContentFetch  // resolves message content on demand (per-FETCH)
-	writeKeywords KeywordWriter // replicates a keyword change upstream (nil = local-only)
+	fetch         ContentFetch   // resolves message content on demand (per-FETCH)
+	writeKeywords KeywordWriter  // replicates a keyword change upstream (nil = local-only)
+	filter        *filter.Filter // serve-time inbound filter (nil = allow all; ADR 0021)
 	owner         string
 	authed        bool
 	selected      []inbound.Message // metadata snapshot taken at Select (no content)
+}
+
+// visible lists the owner's messages and applies the inbound filter (ADR 0021):
+// only allow-verdict messages are returned (hide / hold-for-human are omitted
+// from the read face in this increment). Evaluated fresh each call (no cache).
+func (s *imapSession) visible() ([]inbound.Message, error) {
+	msgs, err := s.store.List(s.owner)
+	if err != nil {
+		return nil, err
+	}
+	if s.filter == nil {
+		return msgs, nil
+	}
+	now := time.Now()
+	out := msgs[:0] // in-place filter; msgs is a fresh slice per call
+	for _, m := range msgs {
+		if s.filter.Decide(m, now) == filter.Allow {
+			out = append(out, m)
+		}
+	}
+	return out, nil
 }
 
 func (s *imapSession) Close() error { return nil }
@@ -112,7 +135,7 @@ func (s *imapSession) Select(mailbox string, _ *imap.SelectOptions) (*imap.Selec
 	if mailbox != imapMailbox {
 		return nil, fmt.Errorf("imap: no such mailbox %q", mailbox)
 	}
-	msgs, err := s.store.List(s.owner)
+	msgs, err := s.visible()
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +182,7 @@ func (s *imapSession) Status(mailbox string, options *imap.StatusOptions) (*imap
 	if mailbox != imapMailbox {
 		return nil, fmt.Errorf("imap: no such mailbox %q", mailbox)
 	}
-	msgs, err := s.store.List(s.owner)
+	msgs, err := s.visible()
 	if err != nil {
 		return nil, err
 	}
