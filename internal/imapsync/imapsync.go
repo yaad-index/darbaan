@@ -156,6 +156,66 @@ func (s *Syncer) pull(c *imapclient.Client, uidValidity, uidNext, last uint32) (
 	return stored, highest, nil
 }
 
+// FetchContent fills a pending message's body on demand (ADR 0019, the read-time
+// half): it dials upstream, fetches that message's body by its stored UID, and
+// SetContents it (marking the record present). A present message is returned
+// as-is without contacting upstream — content is fetched once, then cached. It
+// errors cleanly when the mailbox UIDVALIDITY has changed (the stored UID is
+// stale) or the message is gone upstream, so the read face can surface a
+// transient error rather than empty content.
+func (s *Syncer) FetchContent(owner, id string) (inbound.Message, error) {
+	m, err := s.store.Get(owner, id)
+	if err != nil {
+		return inbound.Message{}, err
+	}
+	if !m.Pending {
+		return m, nil // already present — no upstream contact
+	}
+
+	c, err := s.dial()
+	if err != nil {
+		return inbound.Message{}, fmt.Errorf("imapsync: connect: %w", err)
+	}
+	defer func() { _ = c.Logout().Wait(); _ = c.Close() }()
+
+	sel, err := c.Select(s.mailbox, nil).Wait()
+	if err != nil {
+		return inbound.Message{}, fmt.Errorf("imapsync: select %q: %w", s.mailbox, err)
+	}
+	if sel.UIDValidity != m.UIDValidity {
+		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: mailbox reset (uidvalidity %d != %d)", id, sel.UIDValidity, m.UIDValidity)
+	}
+
+	var set imap.UIDSet
+	set.AddNum(imap.UID(m.UpstreamUID))
+	cmd := c.Fetch(set, &imap.FetchOptions{
+		UID:         true,
+		BodySection: []*imap.FetchItemBodySection{{}},
+	})
+	var raw []byte
+	for {
+		data := cmd.Next()
+		if data == nil {
+			break
+		}
+		fm, err := data.Collect()
+		if err != nil {
+			_ = cmd.Close()
+			return inbound.Message{}, fmt.Errorf("imapsync: fetch content %s: %w", id, err)
+		}
+		if uint32(fm.UID) == m.UpstreamUID {
+			raw = rawBody(fm)
+		}
+	}
+	if err := cmd.Close(); err != nil {
+		return inbound.Message{}, fmt.Errorf("imapsync: fetch content %s: %w", id, err)
+	}
+	if raw == nil {
+		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: upstream uid %d not found", id, m.UpstreamUID)
+	}
+	return s.store.SetContent(owner, id, raw)
+}
+
 func deliveryOf(owner string, m *imapclient.FetchMessageBuffer) inbound.Delivery {
 	d := inbound.Delivery{Owner: owner, Raw: rawBody(m)}
 	if m.Envelope != nil {

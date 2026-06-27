@@ -45,6 +45,12 @@ type Message struct {
 	// Upstream coordinates (ADR 0019); zero for locally-generated messages.
 	UpstreamUID uint32 `json:"upstream_uid,omitempty"`
 	UIDValidity uint32 `json:"uid_validity,omitempty"`
+
+	// Pending means the headers are synced but the body/content has not been
+	// fetched yet (lazy sync, ADR 0019). Raw is empty until it is fetched on
+	// demand (Syncer.FetchContent → SetContent); callers must not treat a pending
+	// message's empty Raw as "no body".
+	Pending bool `json:"pending,omitempty"`
 }
 
 // InboundStore is the agent's served mailbox. Implementations are selected by
@@ -57,6 +63,13 @@ type InboundStore interface {
 	// already stored it is a no-op returning added=false; otherwise it is stored
 	// and added=true. The Delivery must carry non-zero upstream coordinates.
 	AddSynced(Delivery) (added bool, m Message, err error)
+	// AddSyncedPending stores a headers-only (Pending) record — metadata without
+	// content — for lazy sync (ADR 0019). Same idempotency as AddSynced; the
+	// Delivery's Raw is ignored. SetContent fills the body later.
+	AddSyncedPending(Delivery) (added bool, m Message, err error)
+	// SetContent fills a pending message's body (write the content blob, mark it
+	// present) and returns the now-complete message. Owner-scoped.
+	SetContent(owner, id string, raw []byte) (Message, error)
 	// List returns the owner's messages in receive order.
 	List(owner string) ([]Message, error)
 	// Get returns one of the owner's messages, or ErrNotFound.

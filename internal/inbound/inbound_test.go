@@ -54,6 +54,38 @@ func TestAddSyncedDedup(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestPendingThenSetContent(t *testing.T) {
+	s := newStore(t)
+	added, m, err := s.AddSyncedPending(inbound.Delivery{Owner: "agent", Subject: "hi", UpstreamUID: 7, UIDValidity: 1})
+	require.NoError(t, err)
+	assert.True(t, added)
+	assert.True(t, m.Pending)
+
+	// A pending record exposes its metadata but no content yet.
+	got, err := s.Get("agent", m.ID)
+	require.NoError(t, err)
+	assert.True(t, got.Pending)
+	assert.Empty(t, got.Raw)
+	assert.Equal(t, "hi", got.Subject)
+	list, err := s.List("agent")
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.True(t, list[0].Pending)
+	assert.Empty(t, list[0].Raw)
+
+	// SetContent fills the body and marks it present.
+	raw := []byte("Subject: hi\r\n\r\nbody")
+	filled, err := s.SetContent("agent", m.ID, raw)
+	require.NoError(t, err)
+	assert.False(t, filled.Pending)
+	assert.Equal(t, raw, filled.Raw)
+
+	got, err = s.Get("agent", m.ID)
+	require.NoError(t, err)
+	assert.False(t, got.Pending)
+	assert.Equal(t, raw, got.Raw)
+}
+
 func TestAddListGet(t *testing.T) {
 	s := newStore(t)
 	m, err := s.Add(inbound.Delivery{

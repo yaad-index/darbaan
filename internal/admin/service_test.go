@@ -74,6 +74,12 @@ func (failingInbound) Add(inbound.Delivery) (inbound.Message, error) {
 func (failingInbound) AddSynced(inbound.Delivery) (bool, inbound.Message, error) {
 	return false, inbound.Message{}, errors.New("inbound store down")
 }
+func (failingInbound) AddSyncedPending(inbound.Delivery) (bool, inbound.Message, error) {
+	return false, inbound.Message{}, errors.New("inbound store down")
+}
+func (failingInbound) SetContent(string, string, []byte) (inbound.Message, error) {
+	return inbound.Message{}, errors.New("inbound store down")
+}
 func (failingInbound) List(string) ([]inbound.Message, error) { return nil, nil }
 func (failingInbound) Get(string, string) (inbound.Message, error) {
 	return inbound.Message{}, inbound.ErrNotFound
