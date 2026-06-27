@@ -3,6 +3,7 @@ package imapsync_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"path/filepath"
 	"testing"
@@ -110,6 +111,29 @@ func TestSyncPullsIncrementally(t *testing.T) {
 	assert.Equal(t, 1, n)
 	msgs, _ = store.List("agent")
 	assert.Len(t, msgs, 3)
+}
+
+// Streaming pulls every message (no Collect-all into memory), and the concrete
+// UIDNEXT bound makes a no-new sync return 0 (not via the "N:*" quirk).
+func TestSyncStreamsManyMessages(t *testing.T) {
+	addr, user := startUpstream(t)
+	const n = 25
+	for i := 0; i < n; i++ {
+		appendMsg(t, user, fmt.Sprintf("Subject: m%d\r\n\r\nbody %d", i, i))
+	}
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t))
+
+	got, err := syncer.Sync(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, n, got)
+	msgs, err := store.List("agent")
+	require.NoError(t, err)
+	assert.Len(t, msgs, n)
+
+	got, err = syncer.Sync(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, got) // concrete bound: last+1 > UIDNEXT-1, no fetch
 }
 
 // A recorded cursor for a different UIDVALIDITY (mailbox reset) is discarded and

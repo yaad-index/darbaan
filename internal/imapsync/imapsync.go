@@ -3,7 +3,6 @@ package imapsync
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/emersion/go-imap/v2"
@@ -74,37 +73,9 @@ func (s *Syncer) Sync(ctx context.Context) (int, error) {
 		last = 0 // new or reset mailbox — full re-sync
 	}
 
-	// UID FETCH (last+1):* — a fresh mailbox (last 0) fetches 1:* (everything).
-	var set imap.UIDSet
-	set.AddRange(imap.UID(last+1), 0) // Stop 0 == "*"
-	msgs, err := c.Fetch(set, &imap.FetchOptions{
-		UID:         true,
-		Envelope:    true,
-		BodySection: []*imap.FetchItemBodySection{{}}, // whole message
-	}).Collect()
+	stored, highest, err := s.pull(c, uint32(sel.UIDNext), last)
 	if err != nil {
-		return 0, fmt.Errorf("imapsync: fetch: %w", err)
-	}
-
-	// Ascending UID so the cursor advances monotonically.
-	sort.Slice(msgs, func(i, j int) bool { return msgs[i].UID < msgs[j].UID })
-
-	highest := last
-	stored := 0
-	for _, m := range msgs {
-		uid := uint32(m.UID)
-		// "N:*" returns the highest existing message even when N is past it;
-		// skip anything not actually newer than the cursor.
-		if uid <= last {
-			continue
-		}
-		if _, err := s.store.Add(deliveryOf(s.owner, m)); err != nil {
-			return stored, fmt.Errorf("imapsync: store uid %d: %w", uid, err)
-		}
-		stored++
-		if uid > highest {
-			highest = uid
-		}
+		return stored, err
 	}
 
 	newState := State{UIDValidity: sel.UIDValidity, LastUID: highest}
@@ -114,6 +85,66 @@ func (s *Syncer) Sync(ctx context.Context) (int, error) {
 		}
 	}
 	return stored, nil
+}
+
+// pull fetches new messages and stores them, returning the count stored and the
+// new cursor (the highest UID stored, or the prior cursor if nothing was new).
+//
+// It uses a CONCRETE upper bound from the mailbox's UIDNEXT — go-imap's dynamic
+// "*" range (Stop 0) is mis-encoded on the wire against strict servers (e.g.
+// Gmail) and silently matches nothing; only when a server reports no UIDNEXT do
+// we fall back to the dynamic range, guarded against the "N:*" past-the-end
+// re-return.
+//
+// The fetch is STREAMED (one message buffered at a time via cmd.Next), so a
+// large mailbox never loads into memory at once. On a mid-stream error the
+// cursor is not advanced, so the next run re-syncs — at-least-once, no gaps.
+func (s *Syncer) pull(c *imapclient.Client, uidNext, last uint32) (int, uint32, error) {
+	var set imap.UIDSet
+	if uidNext > 0 {
+		hi := uidNext - 1 // highest possible existing UID
+		if last+1 > hi {
+			return 0, last, nil // no new messages
+		}
+		set.AddRange(imap.UID(last+1), imap.UID(hi))
+	} else {
+		set.AddRange(imap.UID(last+1), 0) // fallback: dynamic "*"
+	}
+
+	cmd := c.Fetch(set, &imap.FetchOptions{
+		UID:         true,
+		Envelope:    true,
+		BodySection: []*imap.FetchItemBodySection{{}}, // whole message
+	})
+
+	stored, highest := 0, last
+	for {
+		data := cmd.Next()
+		if data == nil {
+			break
+		}
+		m, err := data.Collect()
+		if err != nil {
+			_ = cmd.Close()
+			return stored, highest, fmt.Errorf("imapsync: fetch: %w", err)
+		}
+		uid := uint32(m.UID)
+		if uid <= last {
+			continue // dynamic "N:*" past-the-end guard
+		}
+		if _, err := s.store.Add(deliveryOf(s.owner, m)); err != nil {
+			_ = cmd.Close()
+			return stored, highest, fmt.Errorf("imapsync: store uid %d: %w", uid, err)
+		}
+		stored++
+		if uid > highest {
+			highest = uid
+		}
+	}
+	if err := cmd.Close(); err != nil {
+		return stored, highest, fmt.Errorf("imapsync: fetch: %w", err)
+	}
+	return stored, highest, nil
 }
 
 func deliveryOf(owner string, m *imapclient.FetchMessageBuffer) inbound.Delivery {
