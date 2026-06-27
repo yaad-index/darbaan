@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -79,6 +81,7 @@ type CLI struct {
 	InboundIMAPMailbox      string        `name:"inbound-imap-mailbox" default:"INBOX" help:"Upstream mailbox to sync."`
 	InboundIMAPPollInterval time.Duration `name:"inbound-imap-poll-interval" default:"60s" help:"How often to poll the upstream mailbox for new mail."`
 	InboundSyncDB           string        `name:"inbound-sync-db" default:"darbaan-sync.db" help:"Path to the inbound sync-state (UIDVALIDITY + last UID) database." type:"path"`
+	InboundMaxAge           string        `name:"inbound-max-age" help:"Recency cutoff for the initial/full sync, e.g. 1y, 30d, 12h (ADR 0008). Empty = no cutoff (pull everything). Forward-only: widening it later needs a re-sync."`
 
 	AgentUsername string `name:"agent-username" help:"The agent's Darbaan SMTP username. The password is supplied out-of-band via DARBAAN_AGENT_PASS, never inlined in config (ADR 0012)."`
 
@@ -155,13 +158,43 @@ func (cli *CLI) newSyncer(inbox inbound.InboundStore) (*imapsync.Syncer, func(),
 	if cli.InboundIMAPHost == "" {
 		return nil, func() {}, nil
 	}
+	maxAge, err := parseMaxAge(cli.InboundMaxAge)
+	if err != nil {
+		return nil, nil, fmt.Errorf("inbound-max-age: %w", err)
+	}
 	state, err := imapsync.NewStateStore(cli.InboundSyncDB)
 	if err != nil {
 		return nil, nil, err
 	}
 	dial := imapsync.Dialer(cli.InboundIMAPHost, cli.InboundIMAPUsername, os.Getenv("DARBAAN_INBOUND_IMAP_PASSWORD"))
-	syncer := imapsync.New(dial, cli.InboundIMAPMailbox, cli.AgentUsername, inbox, state)
+	syncer := imapsync.New(dial, cli.InboundIMAPMailbox, cli.AgentUsername, inbox, state, maxAge)
 	return syncer, func() { _ = state.Close() }, nil
+}
+
+// parseMaxAge parses the recency-cutoff duration: time.ParseDuration units
+// (h/m/s) plus the calendar-ish d/w/y suffixes it lacks (kong/ParseDuration would
+// reject "1y"). Empty or "0" means no cutoff. y is treated as 365 days.
+func parseMaxAge(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "0" {
+		return 0, nil
+	}
+	units := map[byte]time.Duration{
+		'd': 24 * time.Hour,
+		'w': 7 * 24 * time.Hour,
+		'y': 365 * 24 * time.Hour,
+	}
+	if mult, ok := units[s[len(s)-1]]; ok {
+		val, err := strconv.ParseFloat(s[:len(s)-1], 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid duration %q: %w", s, err)
+		}
+		if val < 0 {
+			return 0, fmt.Errorf("invalid duration %q: must not be negative", s)
+		}
+		return time.Duration(val * float64(mult)), nil
+	}
+	return time.ParseDuration(s)
 }
 
 // imapContentFetch is the read face's on-demand content resolver: the syncer's

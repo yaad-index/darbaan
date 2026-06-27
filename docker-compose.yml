@@ -56,6 +56,11 @@ services:
       # DARBAAN_INBOUND_IMAP_HOST: "imap.gmail.com:993"
       # DARBAAN_INBOUND_IMAP_USERNAME: "" # e.g. you@gmail.com
       # DARBAAN_INBOUND_IMAP_MAILBOX: "INBOX"
+      # Recency cutoff for the first/full sync (ADR 0008): only mail newer than
+      # this is pulled, e.g. 1y / 30d / 12h. Empty = no cutoff (pull everything).
+      # Forward-only: widening it later needs a re-sync (old UIDs are behind the
+      # cursor). Bounds both the store and the first pull on a deep mailbox.
+      # DARBAAN_INBOUND_MAX_AGE: "1y"
       DARBAAN_INBOUND_IMAP_PASSWORD: "${DARBAAN_INBOUND_IMAP_PASSWORD:-}"
     volumes:
       - darbaan-data:/data # the three bbolt DBs (sluice / audit / inbound)
