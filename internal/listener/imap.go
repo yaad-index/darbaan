@@ -31,22 +31,33 @@ type IMAPServerConfig struct {
 	AllowInsecure bool        // permit AUTH over plaintext — local/testing only
 }
 
+// ContentFetch resolves a message's full content (Raw) on demand: for a present
+// record from its blob, for a pending record by fetching the body from upstream
+// (lazy, ADR 0019). It is called per-FETCH, never at SELECT.
+type ContentFetch func(owner, id string) (inbound.Message, error)
+
 // IMAPServer serves the agent's mailbox (the InboundStore) over IMAP as a
-// translation adapter (ADR 0016): the store is canonical, there is no upstream
-// IMAP proxy and no upstream fetch in v1.
+// translation adapter (ADR 0016): the store is canonical. SELECT snapshots
+// metadata only; a body FETCH resolves content per-message via a ContentFetch.
 type IMAPServer struct {
 	imap *imapserver.Server
 }
 
 // NewIMAPServer wires the IMAP read face. TLS is required unless AllowInsecure
-// is set (local/testing), mirroring the SMTP face.
-func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundStore) (*IMAPServer, error) {
+// is set (local/testing), mirroring the SMTP face. fetch resolves message
+// content on demand; if nil it defaults to reading straight from the store
+// (no upstream — bounce-only / sync-disabled deployments have no pending
+// records).
+func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundStore, fetch ContentFetch) (*IMAPServer, error) {
 	if cfg.TLSConfig == nil && !cfg.AllowInsecure {
 		return nil, errors.New("listener: IMAP TLS required (set TLSConfig, or AllowInsecure for local testing)")
 	}
+	if fetch == nil {
+		fetch = func(owner, id string) (inbound.Message, error) { return store.Get(owner, id) }
+	}
 	srv := imapserver.New(&imapserver.Options{
 		NewSession: func(_ *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return &imapSession{cred: cred, store: store}, nil, nil
+			return &imapSession{cred: cred, store: store, fetch: fetch}, nil, nil
 		},
 		TLSConfig:    cfg.TLSConfig,
 		InsecureAuth: cfg.AllowInsecure,
@@ -69,9 +80,10 @@ func (s *IMAPServer) Close() error { return s.imap.Close() }
 type imapSession struct {
 	cred     Credential
 	store    inbound.InboundStore
+	fetch    ContentFetch // resolves message content on demand (per-FETCH)
 	owner    string
 	authed   bool
-	selected []inbound.Message // snapshot taken at Select
+	selected []inbound.Message // metadata snapshot taken at Select (no content)
 }
 
 func (s *imapSession) Close() error { return nil }
@@ -176,6 +188,7 @@ func (s *imapSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 		}
 	}
 
+	needRaw := fetchNeedsRaw(options)
 	var ferr error
 	s.forEach(numSet, func(seqNum uint32, m *inbound.Message) {
 		if ferr != nil {
@@ -188,9 +201,28 @@ func (s *imapSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 			}
 			m.Seen = true // also updates s.selected via the pointer
 		}
-		ferr = fetchMessage(w.CreateMessage(seqNum), *m, options)
+		msg := *m
+		if needRaw {
+			// Resolve content on demand (blob, or upstream for a pending record).
+			// A failure surfaces as an IMAP error, never empty/wrong content.
+			full, err := s.fetch(s.owner, m.ID)
+			if err != nil {
+				ferr = err
+				return
+			}
+			full.Seen = m.Seen // keep the in-session flag state
+			msg = full
+		}
+		ferr = fetchMessage(w.CreateMessage(seqNum), msg, options)
 	})
 	return ferr
+}
+
+// fetchNeedsRaw reports whether any requested item requires the message body;
+// flags/UID/internal-date alone do not, so a metadata-only FETCH never triggers
+// an on-demand content fetch.
+func fetchNeedsRaw(o *imap.FetchOptions) bool {
+	return o.RFC822Size || o.Envelope || o.BodyStructure != nil || len(o.BodySection) > 0
 }
 
 func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) error {
@@ -263,6 +295,7 @@ func (s *imapSession) Append(string, imap.LiteralReader, *imap.AppendOptions) (*
 // matching for HEADER/BODY/TEXT. (Returning an error here surfaces as a
 // NO [SERVERBUG] and breaks real clients — #53.)
 func (s *imapSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCriteria, _ *imap.SearchOptions) (*imap.SearchData, error) {
+	needRaw := searchNeedsRaw(criteria)
 	var (
 		data   imap.SearchData
 		seqSet imap.SeqSet
@@ -271,7 +304,18 @@ func (s *imapSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCr
 	for i := range s.selected {
 		m := &s.selected[i]
 		seqNum := uint32(i) + 1
-		if !matchSearch(seqNum, m, criteria) {
+		cand := *m
+		if needRaw {
+			// Content-bearing criteria (size / header / body / text) need the
+			// body — resolve it on demand for this candidate.
+			full, err := s.fetch(s.owner, m.ID)
+			if err != nil {
+				return nil, err
+			}
+			full.Seen = m.Seen
+			cand = full
+		}
+		if !matchSearch(seqNum, &cand, criteria) {
 			continue
 		}
 		uid := uidOf(*m)
@@ -300,6 +344,26 @@ func (s *imapSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCr
 		data.All = uidSet
 	}
 	return &data, nil
+}
+
+// searchNeedsRaw reports whether any criterion needs the message body (size /
+// header / body / text), recursing into NOT/OR — so a metadata-only search
+// (seq/uid/flags/date) never triggers an on-demand content fetch.
+func searchNeedsRaw(c *imap.SearchCriteria) bool {
+	if c.Larger != 0 || c.Smaller != 0 || len(c.Header) > 0 || len(c.Body) > 0 || len(c.Text) > 0 {
+		return true
+	}
+	for i := range c.Not {
+		if searchNeedsRaw(&c.Not[i]) {
+			return true
+		}
+	}
+	for _, or := range c.Or {
+		if searchNeedsRaw(&or[0]) || searchNeedsRaw(&or[1]) {
+			return true
+		}
+	}
+	return false
 }
 
 func matchSearch(seqNum uint32, m *inbound.Message, c *imap.SearchCriteria) bool {

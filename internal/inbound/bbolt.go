@@ -28,15 +28,14 @@ func init() {
 }
 
 // stored is the bbolt record: message metadata plus the tiering flag. The raw
-// bytes live in a blob (Blobbed=true; Message.Raw is nil here), except for
-// legacy records written before ADR 0018, which have Blobbed=false and the raw
-// inline. Subject is already a stored field, so only the raw is reassembled.
+// bytes live in a blob (Blobbed=true; Message.Raw is nil here), except for legacy
+// records written before ADR 0018 (Blobbed=false, raw inline) and pending records
+// (Message.Pending=true, no content yet — ADR 0019). Subject is metadata.
 //
-// Unlike the sluice (whose List returns blob-free Meta), inbound's List returns
-// full Messages and reassembles Raw from blobs — the IMAP face snapshots the raw
-// at SELECT for FETCH/SEARCH. That eager read-time load is removed by the future
-// lazy-inbound-sync work (ADR 0018 names it as future); this change is the
-// storage tier only, keeping bbolt small regardless of mailbox size.
+// List returns metadata only (no blob reads): the IMAP read face snapshots
+// metadata at SELECT and fetches a message's content per-FETCH via Get / the
+// content fetcher (ADR 0019), so bbolt stays small and SELECT never reassembles
+// the whole mailbox.
 type stored struct {
 	Message
 	Blobbed bool `json:"blobbed,omitempty"`
@@ -268,15 +267,14 @@ func (s *bboltStore) List(owner string) ([]Message, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inbound: list: %w", err)
 	}
-	// Reassemble each message's raw from its blob outside the txn, so file IO
-	// never holds the read transaction.
+	// Metadata only: List never loads content (no blob reads, no eager mailbox
+	// reassembly at SELECT). Callers fetch a message's body on demand via Get /
+	// the content fetcher (ADR 0019).
 	out := make([]Message, 0, len(recs))
 	for _, rec := range recs {
-		msg, err := s.withRaw(rec)
-		if err != nil {
-			return nil, fmt.Errorf("inbound: list: %w", err)
-		}
-		out = append(out, msg)
+		m := rec.Message
+		m.Raw = nil
+		out = append(out, m)
 	}
 	return out, nil
 }

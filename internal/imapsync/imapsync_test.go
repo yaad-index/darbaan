@@ -93,16 +93,23 @@ func TestSyncPullsIncrementally(t *testing.T) {
 	msgs, err := store.List("agent")
 	require.NoError(t, err)
 	require.Len(t, msgs, 2)
+	// Headers-only sync: metadata from the envelope, bodies pending (lazy).
 	subjects := map[string]bool{msgs[0].Subject: true, msgs[1].Subject: true}
 	assert.True(t, subjects["one"] && subjects["two"], "subjects from envelope")
 	assert.Equal(t, "agent", msgs[0].Owner) // synced to the agent's mailbox
-	bodies := string(msgs[0].Raw) + string(msgs[1].Raw)
-	assert.Contains(t, bodies, "body one") // full raw round-trips
+	assert.True(t, msgs[0].Pending)
+	assert.Empty(t, msgs[0].Raw)
 
 	// Idempotent: a second sync with no new mail pulls nothing.
 	n, err = syncer.Sync(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, n)
+
+	// The body is fetched on demand.
+	filled, err := syncer.FetchContent("agent", msgs[0].ID)
+	require.NoError(t, err)
+	assert.False(t, filled.Pending)
+	assert.Contains(t, string(filled.Raw), "body")
 
 	// Only genuinely-new mail is pulled on the next cycle.
 	appendMsg(t, user, "From: carol@x.test\r\nSubject: three\r\n\r\nbody three")
@@ -130,6 +137,9 @@ func TestSyncStreamsManyMessages(t *testing.T) {
 	msgs, err := store.List("agent")
 	require.NoError(t, err)
 	assert.Len(t, msgs, n)
+	for _, m := range msgs {
+		assert.True(t, m.Pending) // headers-only
+	}
 
 	got, err = syncer.Sync(context.Background())
 	require.NoError(t, err)

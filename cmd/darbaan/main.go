@@ -148,39 +148,50 @@ func (c *CLI) openSender() (backend.Sender, error) {
 	})
 }
 
-// startInboundSync starts the upstream IMAP poll-sync loop (ADR 0019) if an
-// upstream is configured; otherwise it is a no-op, gated off by default like the
-// stub sender. It returns a stop func that closes the sync-state store. Sync
-// errors are logged, never fatal — a flaky or unreachable upstream must not take
-// down serve.
-func (cli *CLI) startInboundSync(ctx context.Context, inbox inbound.InboundStore) (func(), error) {
+// newSyncer builds the inbound sync engine (ADR 0019) if an upstream is
+// configured; otherwise returns nil (gated off by default like the stub sender).
+// The returned stop func closes the sync-state store.
+func (cli *CLI) newSyncer(inbox inbound.InboundStore) (*imapsync.Syncer, func(), error) {
 	if cli.InboundIMAPHost == "" {
-		fmt.Fprintln(os.Stderr, "darbaan: inbound sync disabled (no inbound-imap-host configured)")
-		return func() {}, nil
+		return nil, func() {}, nil
 	}
 	state, err := imapsync.NewStateStore(cli.InboundSyncDB)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	dial := imapsync.Dialer(cli.InboundIMAPHost, cli.InboundIMAPUsername, os.Getenv("DARBAAN_INBOUND_IMAP_PASSWORD"))
 	syncer := imapsync.New(dial, cli.InboundIMAPMailbox, cli.AgentUsername, inbox, state)
+	return syncer, func() { _ = state.Close() }, nil
+}
 
-	go func() {
-		t := time.NewTicker(cli.InboundIMAPPollInterval)
-		defer t.Stop()
-		runSync(ctx, syncer) // initial pull at startup
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				runSync(ctx, syncer)
-			}
-		}
-	}()
+// imapContentFetch is the read face's on-demand content resolver: the syncer's
+// FetchContent when sync is on (serves a pending body by fetching upstream),
+// else nil — the read face then reads content from the store (no pending records
+// exist without sync).
+func imapContentFetch(syncer *imapsync.Syncer) listener.ContentFetch {
+	if syncer == nil {
+		return nil
+	}
+	return syncer.FetchContent
+}
+
+// runSyncLoop polls the upstream mailbox on the configured interval until ctx is
+// cancelled. Sync errors are logged, never fatal — a flaky or unreachable
+// upstream must not take down serve.
+func (cli *CLI) runSyncLoop(ctx context.Context, syncer *imapsync.Syncer) {
 	fmt.Fprintf(os.Stderr, "darbaan: inbound sync on %s (%s as %s) every %s\n",
 		cli.InboundIMAPHost, cli.InboundIMAPMailbox, cli.InboundIMAPUsername, cli.InboundIMAPPollInterval)
-	return func() { _ = state.Close() }, nil
+	t := time.NewTicker(cli.InboundIMAPPollInterval)
+	defer t.Stop()
+	runSync(ctx, syncer) // initial pull at startup
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			runSync(ctx, syncer)
+		}
+	}
 }
 
 func runSync(ctx context.Context, s *imapsync.Syncer) {
@@ -308,11 +319,20 @@ func (*ServeCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
+	// Inbound mailbox sync (ADR 0019) — built before the read face so its
+	// FetchContent serves pending bodies on demand. nil when no upstream is
+	// configured (the read face then reads content straight from the store).
+	syncer, stopSync, err := cli.newSyncer(inbox)
+	if err != nil {
+		return err
+	}
+	defer stopSync()
+
 	imapSrv, err := listener.NewIMAPServer(listener.IMAPServerConfig{
 		Addr:          cli.IMAPAddr,
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
-	}, cred, inbox)
+	}, cred, inbox, imapContentFetch(syncer))
 	if err != nil {
 		return err
 	}
@@ -320,13 +340,12 @@ func (*ServeCmd) Run(cli *CLI) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Inbound mailbox sync (ADR 0019) — a no-op unless an upstream is configured.
-	// It shares the shutdown ctx; sync errors are logged, never fatal.
-	stopSync, err := cli.startInboundSync(ctx, inbox)
-	if err != nil {
-		return err
+	// Run the sync poll loop (shares the shutdown ctx; errors logged, never fatal).
+	if syncer != nil {
+		go cli.runSyncLoop(ctx, syncer)
+	} else {
+		fmt.Fprintln(os.Stderr, "darbaan: inbound sync disabled (no inbound-imap-host configured)")
 	}
-	defer stopSync()
 
 	closeAll := func() {
 		_ = smtpSrv.Close()
