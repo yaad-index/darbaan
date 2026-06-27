@@ -121,9 +121,11 @@ func TestApprovePermanentFailureBounces(t *testing.T) {
 	msgs, err := inbox.List("agent")
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
-	assert.Contains(t, string(msgs[0].Raw), "upstream delivery failed permanently")
-	assert.NotContains(t, string(msgs[0].Raw), "mailbox unavailable") // never echo upstream body
-	assert.Contains(t, string(msgs[0].Raw), "DKIM-Signature:")
+	bounce, err := inbox.Get("agent", msgs[0].ID) // List is metadata-only; content via Get
+	require.NoError(t, err)
+	assert.Contains(t, string(bounce.Raw), "upstream delivery failed permanently")
+	assert.NotContains(t, string(bounce.Raw), "mailbox unavailable") // never echo upstream body
+	assert.Contains(t, string(bounce.Raw), "DKIM-Signature:")
 
 	got, _ := q.Get(id)
 	assert.Equal(t, sluice.StatusApproved, got.Status) // not sent
@@ -158,9 +160,11 @@ func TestRejectDeliversSignedBounce(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
 	assert.Equal(t, "MAILER-DAEMON@darbaan.test", msgs[0].From)
-	assert.Contains(t, string(msgs[0].Raw), "smells like exfiltration")
-	assert.Contains(t, string(msgs[0].Raw), "5.7.1")
-	assert.Contains(t, string(msgs[0].Raw), "DKIM-Signature:")
+	bounce, err := inbox.Get("agent", msgs[0].ID) // List is metadata-only; content via Get
+	require.NoError(t, err)
+	assert.Contains(t, string(bounce.Raw), "smells like exfiltration")
+	assert.Contains(t, string(bounce.Raw), "5.7.1")
+	assert.Contains(t, string(bounce.Raw), "DKIM-Signature:")
 }
 
 func TestRejectBounceFailureDistinct(t *testing.T) {

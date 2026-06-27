@@ -43,10 +43,12 @@ func TestAddTiersContent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, m.Raw, got.Raw) // reassembled from the blob
 
+	// List is metadata-only (no blob reads): content comes per-FETCH via Get.
 	list, err := s.List("agent")
 	require.NoError(t, err)
 	require.Len(t, list, 1)
-	assert.Equal(t, m.Raw, list[0].Raw) // List reassembles (IMAP snapshot needs it)
+	assert.Equal(t, "bounce", list[0].Subject)
+	assert.Empty(t, list[0].Raw)
 }
 
 // sweepOrphans reclaims a blob with no metadata record but keeps a referenced one.
@@ -83,10 +85,13 @@ func TestLegacyInlineFallback(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, legacy.Raw, got.Raw) // inline raw, no blob read
 
+	// List is metadata-only now (content fetched per-FETCH): metadata present,
+	// Raw empty even for a legacy inline record.
 	list, err := s.List("agent")
 	require.NoError(t, err)
 	require.Len(t, list, 1)
-	assert.Equal(t, legacy.Raw, list[0].Raw)
+	assert.Equal(t, "old", list[0].Subject)
+	assert.Empty(t, list[0].Raw)
 
 	// SetSeen mutates metadata and keeps the inline raw readable.
 	require.NoError(t, s.SetSeen("agent", "1", true))

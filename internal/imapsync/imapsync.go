@@ -47,11 +47,12 @@ func Dialer(addr, username, password string) DialFunc {
 	}
 }
 
-// Sync runs one incremental pull: SELECT the mailbox, UID-FETCH everything newer
-// than the stored cursor, store each via inbound.Add (tiered), and advance the
-// cursor. A UIDVALIDITY change resets the cursor and re-syncs from scratch. The
-// upstream is read-only (no flag/delete write-back, v1). Returns the count
-// stored this run.
+// Sync runs one incremental pull: SELECT the mailbox, UID-FETCH the ENVELOPE of
+// everything newer than the stored cursor, store each headers-only (pending) via
+// inbound.AddSyncedPending, and advance the cursor. Bodies are fetched on demand
+// (FetchContent) when first read. A UIDVALIDITY change resets the cursor and
+// re-syncs from scratch. The upstream is read-only (no flag/delete write-back,
+// v1). Returns the count stored this run.
 func (s *Syncer) Sync(ctx context.Context) (int, error) {
 	c, err := s.dial()
 	if err != nil {
@@ -111,10 +112,11 @@ func (s *Syncer) pull(c *imapclient.Client, uidValidity, uidNext, last uint32) (
 		set.AddRange(imap.UID(last+1), 0) // fallback: dynamic "*"
 	}
 
+	// Headers-only: ENVELOPE (for the metadata) but no BODY[] — the body is
+	// fetched on demand when first read (lazy, ADR 0019).
 	cmd := c.Fetch(set, &imap.FetchOptions{
-		UID:         true,
-		Envelope:    true,
-		BodySection: []*imap.FetchItemBodySection{{}}, // whole message
+		UID:      true,
+		Envelope: true,
 	})
 
 	stored, highest := 0, last
@@ -135,9 +137,9 @@ func (s *Syncer) pull(c *imapclient.Client, uidValidity, uidNext, last uint32) (
 		d := deliveryOf(s.owner, m)
 		d.UpstreamUID = uid
 		d.UIDValidity = uidValidity
-		// AddSynced is idempotent on (owner, UIDVALIDITY, UID): a re-fetched
-		// message (e.g. after a crash) is a no-op (added=false).
-		added, _, err := s.store.AddSynced(d)
+		// Store headers-only (pending); the body is fetched on demand. Idempotent
+		// on (owner, UIDVALIDITY, UID): a re-fetched message is a no-op.
+		added, _, err := s.store.AddSyncedPending(d)
 		if err != nil {
 			_ = cmd.Close()
 			return stored, highest, fmt.Errorf("imapsync: store uid %d: %w", uid, err)

@@ -31,15 +31,64 @@ func seedInbound(t *testing.T) inbound.InboundStore {
 }
 
 func startIMAP(t *testing.T, store inbound.InboundStore) string {
+	return startIMAPWithFetch(t, store, nil)
+}
+
+func startIMAPWithFetch(t *testing.T, store inbound.InboundStore, fetch listener.ContentFetch) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		listener.Credential{Username: "agent", Password: "pw"}, store)
+		listener.Credential{Username: "agent", Password: "pw"}, store, fetch)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return l.Addr().String()
+}
+
+// A body FETCH of a pending (headers-only) record resolves its content on demand
+// via the ContentFetch; a flags-only FETCH does not touch the fetcher.
+func TestIMAPFetchResolvesPendingOnDemand(t *testing.T) {
+	store := seedInbound(t) // present bounce at seq 1
+	_, m, err := store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "lazy", UpstreamUID: 5, UIDValidity: 1,
+	})
+	require.NoError(t, err) // pending record at seq 2
+
+	var fetchCalls int
+	fetch := func(owner, id string) (inbound.Message, error) {
+		fetchCalls++
+		if id == m.ID { // simulate the on-demand upstream fill
+			return store.SetContent(owner, id, []byte("Subject: lazy\r\n\r\nlazy-body"))
+		}
+		return store.Get(owner, id)
+	}
+
+	c, err := imapclient.DialInsecure(startIMAPWithFetch(t, store, fetch), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	_, err = c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+
+	// Flags-only FETCH: no content needed → fetcher untouched.
+	_, err = c.Fetch(imap.SeqSetNum(1, 2), &imap.FetchOptions{UID: true, Flags: true}).Collect()
+	require.NoError(t, err)
+	assert.Equal(t, 0, fetchCalls, "flags-only fetch must not resolve content")
+
+	// BODY[] FETCH of the pending record resolves it on demand.
+	msgs, err := c.Fetch(imap.SeqSetNum(2), &imap.FetchOptions{
+		UID:         true,
+		BodySection: []*imap.FetchItemBodySection{{}},
+	}).Collect()
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	assert.Contains(t, string(msgs[0].FindBodySection(&imap.FetchItemBodySection{})), "lazy-body")
+	assert.GreaterOrEqual(t, fetchCalls, 1)
+
+	got, err := store.Get("agent", m.ID)
+	require.NoError(t, err)
+	assert.False(t, got.Pending) // cached present after the on-demand fetch
 }
 
 func TestIMAPFetchMarksSeenAndPersists(t *testing.T) {
@@ -165,6 +214,6 @@ func TestIMAPBadAuthRejected(t *testing.T) {
 
 func TestIMAPRequiresTLS(t *testing.T) {
 	_, err := listener.NewIMAPServer(listener.IMAPServerConfig{},
-		listener.Credential{Username: "agent", Password: "pw"}, seedInbound(t))
+		listener.Credential{Username: "agent", Password: "pw"}, seedInbound(t), nil)
 	require.Error(t, err)
 }

@@ -70,9 +70,10 @@ type InboundStore interface {
 	// SetContent fills a pending message's body (write the content blob, mark it
 	// present) and returns the now-complete message. Owner-scoped.
 	SetContent(owner, id string, raw []byte) (Message, error)
-	// List returns the owner's messages in receive order.
+	// List returns the owner's messages' metadata (no content/Raw) in receive
+	// order; a body is fetched per-message via Get / the content fetcher.
 	List(owner string) ([]Message, error)
-	// Get returns one of the owner's messages, or ErrNotFound.
+	// Get returns one of the owner's messages with content, or ErrNotFound.
 	Get(owner, id string) (Message, error)
 	// SetSeen sets or clears the \Seen flag on the owner's message — the only
 	// mutable flag the v1 IMAP face persists. Owner-scoped like Get.
