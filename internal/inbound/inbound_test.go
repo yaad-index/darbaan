@@ -54,6 +54,35 @@ func TestAddSyncedDedup(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// SetKeywords marks a record dirty only when it has an upstream to replicate to;
+// a local-only record (no UpstreamUID, e.g. a bounce) gets keywords but stays
+// out of reconcile (ADR 0020).
+func TestSetKeywordsDirtyOnlyWithUpstream(t *testing.T) {
+	s := newStore(t)
+
+	// Local-only record (Add → no UpstreamUID): keywords set, not dirty.
+	local, err := s.Add(inbound.Delivery{Owner: "agent", Subject: "bounce"})
+	require.NoError(t, err)
+	_, err = s.SetKeywords("agent", local.ID, []string{"x"})
+	require.NoError(t, err)
+	got, err := s.Get("agent", local.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"x"}, got.Keywords)
+	dirty, err := s.DirtyKeywords("agent")
+	require.NoError(t, err)
+	assert.Empty(t, dirty)
+
+	// Synced record (has UpstreamUID): keyword change IS dirty.
+	_, synced, err := s.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 5, UIDValidity: 1})
+	require.NoError(t, err)
+	_, err = s.SetKeywords("agent", synced.ID, []string{"y"})
+	require.NoError(t, err)
+	dirty, err = s.DirtyKeywords("agent")
+	require.NoError(t, err)
+	require.Len(t, dirty, 1)
+	assert.Equal(t, synced.ID, dirty[0].ID)
+}
+
 func TestPendingThenSetContent(t *testing.T) {
 	s := newStore(t)
 	added, m, err := s.AddSyncedPending(inbound.Delivery{Owner: "agent", Subject: "hi", UpstreamUID: 7, UIDValidity: 1})

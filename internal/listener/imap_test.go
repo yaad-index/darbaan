@@ -375,6 +375,33 @@ func TestIMAPStoreKeywordWriteFailureStaysDirty(t *testing.T) {
 	assert.Len(t, dirty, 1) // stays dirty for reconcile
 }
 
+// A keyword STORE on a local-only record (a bounce, no UpstreamUID) commits
+// locally but does NOT attempt an upstream write or mark the record dirty —
+// nothing to replicate (ADR 0020).
+func TestIMAPStoreKeywordLocalOnlyNoUpstream(t *testing.T) {
+	store := seedInbound(t) // a bounce: Add → no UpstreamUID, seq 1
+	called := false
+	wk := func(owner, id string, want []string) error { called = true; return nil }
+
+	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	_, err = c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+
+	require.NoError(t, c.Store(imap.SeqSetNum(1),
+		&imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{"useless"}}, nil).Close())
+
+	got, err := store.Get("agent", "1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"useless"}, got.Keywords) // local label still set
+	assert.False(t, called, "no upstream write for a local-only record")
+	dirty, err := store.DirtyKeywords("agent")
+	require.NoError(t, err)
+	assert.Empty(t, dirty) // not dirty → never enters reconcile
+}
+
 func TestIMAPBadAuthRejected(t *testing.T) {
 	c, err := imapclient.DialInsecure(startIMAP(t, seedInbound(t)), nil)
 	require.NoError(t, err)

@@ -317,7 +317,11 @@ func (s *bboltStore) SetKeywords(owner, id string, keywords []string) (Message, 
 			return ErrNotFound
 		}
 		rec.Keywords = keywords
-		rec.KeywordsDirty = true
+		// Only mark dirty when there is an upstream to replicate to. A
+		// locally-generated record (no UpstreamUID, e.g. a bounce) has no backend
+		// label to sync, so it must never enter reconcile (which would log on every
+		// poll). Its keywords are local-only and already "replicated".
+		rec.KeywordsDirty = rec.UpstreamUID != 0
 		msg = rec.Message
 		return putStored(tx, key, rec)
 	})
