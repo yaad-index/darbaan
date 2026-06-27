@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4.0](https://github.com/yaad-index/darbaan/compare/v0.3.0...v0.4.0) (2026-06-27)
+
+
+### Features
+
+* **filter:** inbound filter engine + serve-time allow/hide (ADR 0021 21a) ([#107](https://github.com/yaad-index/darbaan/issues/107)) ([8d07600](https://github.com/yaad-index/darbaan/commit/8d07600d0d69bbcb9902a846d6f72ba31733acdd))
+* **imapsync:** Gmail X-GM-LABELS write-through (ADR 0020 20c) ([#102](https://github.com/yaad-index/darbaan/issues/102)) ([eff3ec3](https://github.com/yaad-index/darbaan/commit/eff3ec332f0fc2299c3a0566818ed99bd660e812))
+* **imapsync:** inbound-max-age recency cutoff via SEARCH SINCE (ADR 0008) ([#96](https://github.com/yaad-index/darbaan/issues/96)) ([f1a4ab1](https://github.com/yaad-index/darbaan/commit/f1a4ab183172ffc2d63c98a740f377f3b66350a3))
+* **inbound:** hold-for-human queue + UIDNEXT-from-full-store (ADR 0021 21b) ([#108](https://github.com/yaad-index/darbaan/issues/108)) ([3d28d8b](https://github.com/yaad-index/darbaan/commit/3d28d8ba14eba9bb3ca9942c975129c6e218822f))
+* **inbound:** keyword write-through — STORE to local-canonical + best-effort upstream (ADR 0020 20b) ([#99](https://github.com/yaad-index/darbaan/issues/99)) ([657dfeb](https://github.com/yaad-index/darbaan/commit/657dfeb00a06d309da10db48d8d930e05ded7e04))
+* **inbound:** read upstream keywords into metadata + serve on FETCH FLAGS (ADR 0020 20a) ([#98](https://github.com/yaad-index/darbaan/issues/98)) ([b647e74](https://github.com/yaad-index/darbaan/commit/b647e741487fe6fe4ade52d83b5cd6306a967ccd))
+* **inbound:** serve ENVELOPE/RFC822Size/header-search from stored metadata (ADR 0019 Inc 3b-iii) ([#94](https://github.com/yaad-index/darbaan/issues/94)) ([2f3fe19](https://github.com/yaad-index/darbaan/commit/2f3fe19690e67f16a863926f4eb172386449de72))
+* **telegram:** inbound hold-for-human surface (ADR 0021 21c) ([#109](https://github.com/yaad-index/darbaan/issues/109)) ([ce3bdad](https://github.com/yaad-index/darbaan/commit/ce3bdade229c95f173902396b81cefa8f04b3b56))
+
+
+### Bug Fixes
+
+* **inbound:** don't reconcile keyword writes on local-only records (ADR 0020) ([#100](https://github.com/yaad-index/darbaan/issues/100)) ([8685066](https://github.com/yaad-index/darbaan/commit/8685066ee9bef47a790f36947e42fecfba02d101))
+
 ## [0.3.0](https://github.com/yaad-index/darbaan/compare/v0.2.0...v0.3.0) (2026-06-27)
 
 
