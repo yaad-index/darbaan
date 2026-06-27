@@ -136,6 +136,50 @@ func TestSyncStreamsManyMessages(t *testing.T) {
 	assert.Equal(t, 0, got) // concrete bound: last+1 > UIDNEXT-1, no fetch
 }
 
+// FetchContent fills a pending (headers-only) record's body from upstream on
+// demand, marks it present, and is a no-op on an already-present message.
+func TestFetchContentFillsPending(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "Subject: real\r\n\r\nreal body") // upstream UID 1, UIDVALIDITY 1
+
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t))
+
+	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", Subject: "real", UpstreamUID: 1, UIDValidity: 1})
+	require.NoError(t, err)
+	require.True(t, m.Pending)
+
+	filled, err := syncer.FetchContent("agent", m.ID)
+	require.NoError(t, err)
+	assert.False(t, filled.Pending)
+	assert.Contains(t, string(filled.Raw), "real body")
+
+	got, err := store.Get("agent", m.ID)
+	require.NoError(t, err)
+	assert.False(t, got.Pending)
+	assert.Contains(t, string(got.Raw), "real body")
+
+	// Present message → no upstream contact, returned as-is.
+	again, err := syncer.FetchContent("agent", m.ID)
+	require.NoError(t, err)
+	assert.False(t, again.Pending)
+}
+
+// A pending record whose UIDVALIDITY no longer matches upstream errors cleanly
+// (stale UID) rather than serving wrong/empty content.
+func TestFetchContentStaleUIDValidity(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "Subject: x\r\n\r\ny")
+
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t))
+	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 999})
+	require.NoError(t, err)
+
+	_, err = syncer.FetchContent("agent", m.ID)
+	require.Error(t, err)
+}
+
 // A lost/reset sync cursor re-fetches everything, but the upstream-UID dedup
 // (AddSynced) keeps the store free of duplicates — the crash-mid-sync window.
 func TestSyncDedupsOnCursorReset(t *testing.T) {

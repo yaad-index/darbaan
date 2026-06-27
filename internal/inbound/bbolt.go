@@ -117,7 +117,7 @@ func (s *bboltStore) Add(d Delivery) (Message, error) {
 	var msg Message
 	err := s.db.Update(func(tx *bbolt.Tx) error {
 		var e error
-		msg, _, e = s.put(tx, d)
+		msg, _, e = s.put(tx, d, false)
 		return e
 	})
 	if err != nil {
@@ -126,11 +126,22 @@ func (s *bboltStore) Add(d Delivery) (Message, error) {
 	return msg, nil
 }
 
-// AddSynced stores an upstream-pulled message idempotently: if its upstream
-// (owner, UIDValidity, UpstreamUID) is already indexed, it's a no-op returning
-// added=false, so a crash-mid-sync re-fetch never duplicates (#87). Otherwise it
-// stores the message and indexes it.
+// AddSynced stores an upstream-pulled message (with content) idempotently.
 func (s *bboltStore) AddSynced(d Delivery) (bool, Message, error) {
+	return s.addSynced(d, false)
+}
+
+// AddSyncedPending stores a headers-only (pending) record idempotently — no
+// content blob; SetContent fills it later (lazy sync, ADR 0019).
+func (s *bboltStore) AddSyncedPending(d Delivery) (bool, Message, error) {
+	return s.addSynced(d, true)
+}
+
+// addSynced is the shared dedup path: if the upstream (owner, UIDValidity,
+// UpstreamUID) is already indexed it's a no-op (added=false, returns the
+// existing record), so a crash-mid-sync re-fetch never duplicates (#87);
+// otherwise it stores the message (pending or present) and indexes it.
+func (s *bboltStore) addSynced(d Delivery, pending bool) (bool, Message, error) {
 	if d.UpstreamUID == 0 {
 		return false, Message{}, fmt.Errorf("inbound: AddSynced requires a non-zero upstream UID")
 	}
@@ -142,7 +153,6 @@ func (s *bboltStore) AddSynced(d Delivery) (bool, Message, error) {
 	err := s.db.Update(func(tx *bbolt.Tx) error {
 		idx := tx.Bucket(bucketSynced)
 		if ref := idx.Get(idxKey); ref != nil {
-			// Already stored — idempotent no-op; return the existing metadata.
 			if v := tx.Bucket(bucketInbound).Get(ref); v != nil {
 				var rec stored
 				if err := json.Unmarshal(v, &rec); err != nil {
@@ -152,7 +162,7 @@ func (s *bboltStore) AddSynced(d Delivery) (bool, Message, error) {
 			}
 			return nil
 		}
-		m, key, err := s.put(tx, d)
+		m, key, err := s.put(tx, d, pending)
 		if err != nil {
 			return err
 		}
@@ -165,9 +175,38 @@ func (s *bboltStore) AddSynced(d Delivery) (bool, Message, error) {
 	return added, msg, nil
 }
 
-// put builds and persists a new message from a delivery (blob first, then
-// metadata) and returns it with its bbolt key. The caller is inside a write txn.
-func (s *bboltStore) put(tx *bbolt.Tx, d Delivery) (Message, []byte, error) {
+// SetContent fills a pending message's body: write the content blob and mark the
+// record present. Owner-scoped; returns the now-complete message.
+func (s *bboltStore) SetContent(owner, id string, raw []byte) (Message, error) {
+	var msg Message
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		rec, key, err := loadStored(tx, id)
+		if err != nil {
+			return err
+		}
+		if rec.Owner != owner {
+			return ErrNotFound
+		}
+		// Content blob first, then the metadata flip (same ordering as Add).
+		if err := s.blobs.Put(id, raw); err != nil {
+			return fmt.Errorf("write content: %w", err)
+		}
+		rec.Pending = false
+		rec.Blobbed = true
+		msg = rec.Message
+		msg.Raw = raw
+		return putStored(tx, key, rec)
+	})
+	if err != nil {
+		return Message{}, fmt.Errorf("inbound: set content %s: %w", id, err)
+	}
+	return msg, nil
+}
+
+// put builds and persists a new message. For a present message it writes the
+// content blob first (ADR 0018 ordering); a pending message has no blob yet.
+// Returns the message and its bbolt key. The caller is inside a write txn.
+func (s *bboltStore) put(tx *bbolt.Tx, d Delivery, pending bool) (Message, []byte, error) {
 	b := tx.Bucket(bucketInbound)
 	seq, err := b.NextSequence()
 	if err != nil {
@@ -179,19 +218,22 @@ func (s *bboltStore) put(tx *bbolt.Tx, d Delivery) (Message, []byte, error) {
 		From:        d.From,
 		To:          d.To,
 		Subject:     d.Subject,
-		Raw:         d.Raw,
 		Seen:        false,
 		ReceivedAt:  time.Now().UTC(),
 		UpstreamUID: d.UpstreamUID,
 		UIDValidity: d.UIDValidity,
+		Pending:     pending,
 	}
 	key := seqkey.Encode(seq)
-	// Content tier first: the durable blob is on disk before the referencing
-	// metadata commits (ADR 0018), so a crash can only orphan a blob.
-	if err := s.blobs.Put(msg.ID, d.Raw); err != nil {
-		return Message{}, nil, fmt.Errorf("write content: %w", err)
+	blobbed := false
+	if !pending {
+		msg.Raw = d.Raw // present (return carries it; storedRec drops it for storage)
+		if err := s.blobs.Put(msg.ID, d.Raw); err != nil {
+			return Message{}, nil, fmt.Errorf("write content: %w", err)
+		}
+		blobbed = true
 	}
-	if err := putStored(tx, key, storedFrom(msg)); err != nil {
+	if err := putStored(tx, key, storedRec(msg, blobbed)); err != nil {
 		return Message{}, nil, err
 	}
 	return msg, key, nil
@@ -279,21 +321,26 @@ func (s *bboltStore) Get(owner, id string) (Message, error) {
 // blob (or, for a legacy record, the inline raw it already carries).
 func (s *bboltStore) withRaw(rec stored) (Message, error) {
 	msg := rec.Message
-	if rec.Blobbed {
+	switch {
+	case msg.Pending:
+		// Content not fetched yet — Raw stays nil; the caller fetches on demand.
+	case rec.Blobbed:
 		raw, err := s.blobs.Get(msg.ID)
 		if err != nil {
 			return Message{}, fmt.Errorf("inbound: load content %s: %w", msg.ID, err)
 		}
 		msg.Raw = raw
+	default:
+		// Legacy inline record — Raw is already inline on rec.Message.
 	}
 	return msg, nil
 }
 
-// storedFrom builds a blobbed metadata record from a full message: the raw bytes
-// are dropped (they live in the blob).
-func storedFrom(m Message) stored {
+// storedRec builds the on-disk record from a message: the raw bytes are dropped
+// (they live in a blob when blobbed; a pending record has none yet).
+func storedRec(m Message, blobbed bool) stored {
 	m.Raw = nil
-	return stored{Message: m, Blobbed: true}
+	return stored{Message: m, Blobbed: blobbed}
 }
 
 func loadStored(tx *bbolt.Tx, id string) (stored, []byte, error) {
