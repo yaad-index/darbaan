@@ -28,7 +28,10 @@ action**. Top-down, **first match wins** (ADR 0008); no match → the configured
 **default action** (default `allow`, ADR 0008 amendment).
 
 - **Match fields:** `from`, `to`/`cc`, `subject`, `header` (name + value), `label`
-  (a synced or agent keyword, ADR 0020), `age` (message age, e.g. `> 30d`).
+  (a synced or agent keyword, ADR 0020), `age` (message age, e.g. `> 30d`). In v1
+  `header` matches **envelope headers only** (from/to/cc/subject/date/message-id/
+  reply-to — the stored set); matching an arbitrary non-envelope header would force
+  a content fetch, so it's deferred with body-match.
 - **Operators:** `equals`, `contains`, `regex`, plus `domain` for addresses
   (match the address domain). A rule's conditions are **AND**ed; `or` is expressed
   as separate rules (first-match-wins covers it).
@@ -50,13 +53,17 @@ action**. Top-down, **first match wins** (ADR 0008); no match → the configured
   the sluice's pending state), so a restart doesn't re-ask and the decision is
   stable.
 
-### Evaluation point + caching
+### Evaluation point + state
 
-Rules are evaluated when the read face first needs a message's filter-state (at
-LIST / first serve), and the **resolved state is cached on the record** so
-re-listing is cheap and a `hold-for-human` decision stays put. Filtering needs
-only **metadata** (from/to/subject/header/label/age — all stored eagerly,
-ADR 0019/0020), so it never forces a body fetch.
+Rules are evaluated **fresh each serve** against the current ruleset — the
+rule-derived states (`allow`/`hide`) are **not cached**, so an edited ruleset
+takes effect immediately and there is no stale-cache-on-rule-change problem
+(evaluation is cheap: metadata-only, no body fetch). Only the **human
+`hold-for-human` decision** (approve/reject) is **persisted** on the record,
+because it is a human action not re-derivable from rules — a held message stays
+held across restarts and is never re-asked. Filtering needs only **metadata**
+(from/to/subject/envelope-header/label/age — all stored eagerly, ADR 0019/0020),
+so it never forces a body fetch.
 
 ### Configuration
 
@@ -84,7 +91,8 @@ deferred.
   decisions persisted.
 - `hold-for-human` completes the symmetry: outbound traps **sends** for approval;
   inbound holds **reads** for approval — both over the same admin-API / Telegram
-  surface.
+  surface, which gains a **second queue**: the operator sees two decision types
+  (outbound "send this?" and inbound "expose this?"), tagged by direction.
 - Labels (ADR 0020) are first-class match input, so agent/rule labeling and
   filtering compose (e.g. hide anything the agent labeled `useless`).
 - The recency cutoff (shipped) is the cheap pre-filter; the rule engine handles the
