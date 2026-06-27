@@ -39,11 +39,12 @@ type IMAPServerConfig struct {
 // (lazy, ADR 0019). It is called per-FETCH, never at SELECT.
 type ContentFetch func(owner, id string) (inbound.Message, error)
 
-// KeywordWriter replicates a message's keyword set to the upstream backend (the
-// label write-through, ADR 0020). The local store is canonical; a returned error
-// means the upstream replicate failed and is reconciled later. nil disables
-// write-through (local-only labels — e.g. sync disabled).
-type KeywordWriter func(owner, id string, want []string) error
+// KeywordWriter replicates a keyword change to the upstream backend as an
+// add/remove delta (the label write-through, ADR 0020). The local store is
+// canonical; a returned error means the upstream replicate failed and is
+// reconciled later. nil disables write-through (local-only labels — e.g. sync
+// disabled).
+type KeywordWriter func(owner, id string, add, remove []string) error
 
 // IMAPServer serves the agent's mailbox (the InboundStore) over IMAP as a
 // translation adapter (ADR 0016): the store is canonical. SELECT snapshots
@@ -289,7 +290,7 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 				// Skip records with no upstream (locally-generated, e.g. bounces) —
 				// their labels are local-only, nothing to replicate.
 				if s.writeKeywords != nil && m.UpstreamUID != 0 {
-					if err := s.writeKeywords(s.owner, m.ID, next); err != nil {
+					if err := s.writeKeywords(s.owner, m.ID, added, removed); err != nil {
 						log.Printf("darbaan: imap keyword write-through for %s deferred: %v", m.ID, err)
 					} else {
 						_ = s.store.ClearKeywordsDirty(s.owner, m.ID)

@@ -322,8 +322,8 @@ func TestIMAPStoreKeywordWritesThrough(t *testing.T) {
 	require.NoError(t, err)
 
 	var wroteID string
-	var wrote []string
-	wk := func(owner, id string, want []string) error { wroteID, wrote = id, want; return nil }
+	var wroteAdd []string
+	wk := func(owner, id string, add, remove []string) error { wroteID, wroteAdd = id, add; return nil }
 
 	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk), nil)
 	require.NoError(t, err)
@@ -339,7 +339,7 @@ func TestIMAPStoreKeywordWritesThrough(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"useless"}, got.Keywords) // local store is canonical
 	assert.Equal(t, m.ID, wroteID)
-	assert.Equal(t, []string{"useless"}, wrote) // replicated the new set upstream
+	assert.Equal(t, []string{"useless"}, wroteAdd) // replicated the add delta upstream
 	dirty, err := store.DirtyKeywords("agent")
 	require.NoError(t, err)
 	assert.Empty(t, dirty) // cleared on successful replicate
@@ -354,7 +354,7 @@ func TestIMAPStoreKeywordWriteFailureStaysDirty(t *testing.T) {
 	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1})
 	require.NoError(t, err)
 
-	wk := func(owner, id string, want []string) error { return errors.New("upstream down") }
+	wk := func(owner, id string, add, remove []string) error { return errors.New("upstream down") }
 
 	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk), nil)
 	require.NoError(t, err)
@@ -381,7 +381,7 @@ func TestIMAPStoreKeywordWriteFailureStaysDirty(t *testing.T) {
 func TestIMAPStoreKeywordLocalOnlyNoUpstream(t *testing.T) {
 	store := seedInbound(t) // a bounce: Add → no UpstreamUID, seq 1
 	called := false
-	wk := func(owner, id string, want []string) error { called = true; return nil }
+	wk := func(owner, id string, add, remove []string) error { called = true; return nil }
 
 	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk), nil)
 	require.NoError(t, err)

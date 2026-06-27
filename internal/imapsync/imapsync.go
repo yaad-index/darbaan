@@ -2,6 +2,7 @@ package imapsync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -21,13 +22,19 @@ type DialFunc func() (*imapclient.Client, error)
 
 // Syncer pulls new messages from one upstream mailbox into the inbound store.
 type Syncer struct {
-	dial    DialFunc
-	mailbox string
-	owner   string // the agent whose mailbox this is
-	store   inbound.InboundStore
-	state   StateStore
-	maxAge  time.Duration // recency cutoff; 0 = no cutoff (ADR 0008)
+	dial       DialFunc
+	mailbox    string
+	owner      string // the agent whose mailbox this is
+	store      inbound.InboundStore
+	state      StateStore
+	maxAge     time.Duration  // recency cutoff; 0 = no cutoff (ADR 0008)
+	labelStore LabelStoreFunc // Gmail X-GM-LABELS writer; nil = plain keywords only (ADR 0020)
 }
+
+// SetLabelStore installs the Gmail X-GM-LABELS label writer (ADR 0020 20c). When
+// set, WriteKeywords replicates label changes via X-GM-LABELS on a Gmail backend
+// (capability-gated) and falls back to plain keywords elsewhere.
+func (s *Syncer) SetLabelStore(fn LabelStoreFunc) { s.labelStore = fn }
 
 // New builds a Syncer. owner is the agent the synced mail belongs to. maxAge is
 // the recency cutoff for the initial/full sync (0 = pull everything).
@@ -303,7 +310,10 @@ func (s *Syncer) FetchContent(owner, id string) (inbound.Message, error) {
 // current keywords and applying the +/- delta, so it is idempotent and handles
 // both additions and removals (content + delete stay read-only). The local store
 // is canonical; a failure here is returned so the caller logs + reconciles later.
-func (s *Syncer) WriteKeywords(owner, id string, want []string) error {
+func (s *Syncer) WriteKeywords(owner, id string, add, remove []string) error {
+	if len(add) == 0 && len(remove) == 0 {
+		return nil
+	}
 	m, err := s.store.Get(owner, id)
 	if err != nil {
 		return err
@@ -312,6 +322,16 @@ func (s *Syncer) WriteKeywords(owner, id string, want []string) error {
 		return fmt.Errorf("imapsync: keyword write for %s: no upstream uid", id)
 	}
 
+	// Gmail: replicate as real labels via X-GM-LABELS (capability-gated, ADR 0020
+	// 20c). On any other backend the writer reports ErrNotXGM and we fall through
+	// to plain keywords.
+	if s.labelStore != nil {
+		if err := s.labelStore(m.UpstreamUID, m.UIDValidity, add, remove); !errors.Is(err, ErrNotXGM) {
+			return err // success, or a real Gmail error
+		}
+	}
+
+	// Plain IMAP keywords (RFC 3501) — the universal path.
 	c, err := s.dial()
 	if err != nil {
 		return fmt.Errorf("imapsync: connect: %w", err)
@@ -325,18 +345,8 @@ func (s *Syncer) WriteKeywords(owner, id string, want []string) error {
 	if sel.UIDValidity != m.UIDValidity {
 		return fmt.Errorf("imapsync: keyword write for %s: mailbox reset (uidvalidity %d != %d)", id, sel.UIDValidity, m.UIDValidity)
 	}
-
 	var set imap.UIDSet
 	set.AddNum(imap.UID(m.UpstreamUID))
-	fetched, err := c.Fetch(set, &imap.FetchOptions{UID: true, Flags: true}).Collect()
-	if err != nil {
-		return fmt.Errorf("imapsync: keyword write fetch: %w", err)
-	}
-	var current []string
-	if len(fetched) > 0 {
-		current = keywordsOf(fetched[0].Flags)
-	}
-	add, remove := diffKeywords(current, want)
 	if len(add) > 0 {
 		if err := c.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: toFlags(add)}, nil).Close(); err != nil {
 			return fmt.Errorf("imapsync: keyword add: %w", err)
@@ -360,7 +370,8 @@ func (s *Syncer) reconcileKeywords() {
 		return
 	}
 	for _, m := range dirty {
-		if err := s.WriteKeywords(s.owner, m.ID, m.Keywords); err != nil {
+		// Additive re-apply (reconcile has the wanted set, not a delta).
+		if err := s.WriteKeywords(s.owner, m.ID, m.Keywords, nil); err != nil {
 			log.Printf("darbaan: keyword reconcile %s deferred: %v", m.ID, err)
 			continue
 		}
@@ -368,32 +379,6 @@ func (s *Syncer) reconcileKeywords() {
 			log.Printf("darbaan: keyword reconcile clear %s: %v", m.ID, err)
 		}
 	}
-}
-
-// diffKeywords returns the keywords to add and to remove to converge current to
-// want.
-func diffKeywords(current, want []string) (add, remove []string) {
-	cur := map[string]bool{}
-	for _, k := range current {
-		cur[k] = true
-	}
-	wnt := map[string]bool{}
-	for _, k := range want {
-		wnt[k] = true
-	}
-	for k := range wnt {
-		if !cur[k] {
-			add = append(add, k)
-		}
-	}
-	for k := range cur {
-		if !wnt[k] {
-			remove = append(remove, k)
-		}
-	}
-	sort.Strings(add)
-	sort.Strings(remove)
-	return add, remove
 }
 
 func toFlags(kw []string) []imap.Flag {
