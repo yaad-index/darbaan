@@ -1,76 +1,65 @@
 # Darbaan
 
-Darbaan is a **mail-gate proxy**. An agent talks to it over standard **IMAP
-(read)** and **SMTP (send)**, and Darbaan enforces policy mechanically in front
-of the real mailbox. It holds the upstream mailbox credentials and the
-bounce-signing key, so a compromised agent only ever holds *Darbaan* credentials
-— never the real mailbox (credential isolation, [ADR 0002](adr/0002-policy-in-a-separate-box-credential-isolation.md)).
+**Darbaan is a mail-gate proxy.** An agent (or any client) talks to it over
+standard **IMAP** to read mail and **SMTP** to send mail, and Darbaan enforces
+policy in front of the real mailbox. Darbaan holds the upstream mailbox
+credentials and the bounce-signing key, so a compromised client only ever holds
+*Darbaan* credentials — never the real mailbox.
 
-The design is recorded as Architecture Decision Records in [`adr/`](adr/) — start
-with [ADR 0001](adr/0001-mail-proxy-not-http-api.md).
+Two properties define it:
 
-## Outbound — default-deny send
+- **Outbound is default-deny.** Nothing a client submits is sent until a human
+  approves it.
+- **Inbound is gated.** The client reads a synced, recency-bounded view of the
+  real mailbox, never the live account directly.
 
-An agent submits over SMTP; nothing leaves until it's approved.
+## Outbound — nothing leaves without approval
 
-1. **Sluice trap.** Every submission is trapped in a default-deny sluice
-   ([ADR 0003](adr/0003-outbound-sluice-trap-default-deny.md)) — held, not sent.
-2. **Approval.** A pluggable approval chain ([ADR 0004](adr/0004-pluggable-approval-pipeline.md))
-   decides each held message. Approval is operator-driven (see the clients below).
-3. **Release or reject.** On approval Darbaan sends via the upstream; on rejection
-   it returns a **DKIM-signed DSN bounce** ([ADR 0006](adr/0006-rejection-as-async-dsn-bounce.md),
-   [ADR 0007](adr/0007-signed-bounce-trust.md)) that the agent reads back over IMAP.
+A client submits a message over SMTP, and:
 
-> The upstream sender is **stub by default** — it sends *nothing*. Real delivery is
-> a deliberate opt-in (`sender-type=smtp` + an app password); until then the
-> default-deny holds structurally.
+1. **It is held.** Every submission is trapped in a default-deny sluice — queued,
+   not sent.
+2. **A human decides.** An operator approves or rejects each held message through
+   one of the approval clients (below). The client never approves its own mail.
+3. **Release or bounce.** On approval Darbaan delivers via the upstream provider
+   and signs the message; on rejection it returns a **DKIM-signed bounce** that
+   the client reads back over IMAP and can cryptographically trust.
+
+The upstream sender is **stub by default** — it delivers *nothing*. Real delivery
+is a deliberate opt-in, so the default-deny holds even before any policy is
+configured.
 
 ## Inbound — read the real mailbox, gated
 
-The agent reads its real mail *through* Darbaan ([ADR 0019](adr/0019-inbound-sync-store-canonical-lazy-no-filter.md)):
+- **Synced into Darbaan's own store.** Darbaan pulls from the upstream mailbox
+  incrementally (idempotent re-sync); the upstream is read-only except for label
+  writes.
+- **Lazy content.** Envelopes and headers sync eagerly; a message body is fetched
+  on first read and then cached, so listing the inbox downloads no bodies.
+- **Recency cutoff.** A configurable max age bounds the sync to recent mail, so a
+  deep mailbox doesn't pull years of history.
+- **Served over IMAP** as a single `INBOX`.
+- **Labeling.** A client labels mail with standard IMAP keywords; on a Gmail
+  backend these map to real Gmail labels (searchable as `label:...`), with
+  Darbaan's store canonical and the backend an eventually-consistent replica.
 
-- **Store-canonical incremental sync.** Darbaan pulls from the upstream mailbox
-  into its own store (UIDVALIDITY + cursor, idempotent re-sync). The upstream is
-  read-only except for label writes (below).
-- **Lazy content.** Headers/envelopes are synced eagerly; a message **body is
-  fetched on demand** the first time it's read, then cached. Listing the inbox
-  fetches zero bodies.
-- **Recency cutoff.** `inbound-max-age` (e.g. `1y`) bounds the sync to recent mail
-  ([ADR 0008](adr/0008-inbound-filter-yaml-rules.md), recency dimension), so a
-  deep mailbox doesn't pull decades of history.
-- **IMAP read face.** The synced mail is served back over IMAP.
-- **Agent labeling.** The agent labels mail via standard IMAP keywords
-  ([ADR 0020](adr/0020-agent-labeling-gmail-x-gm-labels.md)); on a Gmail backend
-  those map to real **X-GM-LABELS** (searchable as `label:...`), with the local
-  store canonical and the backend an eventually-consistent label replica.
+## Approval clients
 
-> The structured allow/hide/hold **inbound filter rules** (the rest of ADR 0008)
-> are still upcoming; v1 syncs the (recency-bounded) mailbox without per-message
-> rule evaluation.
+Darbaan's core runs the SMTP + IMAP faces and a **localhost-only admin API**. The
+operator-facing tools are separate processes that talk to that API, not compiled
+into the core:
 
-## Interfaces — clients over a local admin API
+- **CLI** — `darbaan queue …` lists and decides held messages.
+- **Telegram** — approve or reject from your phone.
 
-`serve` runs the SMTP + IMAP faces and a **localhost-only admin API**. The
-operator-facing interfaces are **separate processes** that talk to that API
-([ADR 0017](adr/0017-interfaces-as-clients-over-local-api.md)), not compiled into
-the core:
+## Install / run
 
-- **CLI** — `darbaan queue …` inspects and decides held messages.
-- **Telegram** — `darbaan telegram` notifies + approves/rejects from a phone.
+Darbaan is a single Go binary; the easiest deployment is Docker Compose. See
+**[INSTALL.md](INSTALL.md)** for a complete, from-scratch walkthrough (secrets,
+configuration, switching on delivery and inbound sync, approving mail, and an
+end-to-end smoke test).
 
-## Storage
-
-Tiered ([ADR 0018](adr/0018-tiered-storage-metadata-kv-content-filesystem.md)):
-message metadata lives in bbolt; raw content lives as filesystem blobs, written
-blob-first then metadata so a crash can only orphan a blob (swept at startup).
-The store is the canonical source; the IMAP/SMTP faces are translation adapters
-([ADR 0016](adr/0016-store-canonical-translation-faces.md)). An append-only audit
-log ([ADR 0011](adr/0011-append-only-audit-log.md)) records decisions.
-
-## Running it
-
-Darbaan is a single Go binary; the easiest deploy is Docker Compose. See
-[`docker-compose.yml`](docker-compose.yml) and [`.env.example`](.env.example).
+The short version:
 
 ```sh
 cp .env.example .env        # fill DARBAAN_AGENT_PASS, DARBAAN_ADMIN_TOKEN
@@ -78,20 +67,14 @@ cp .env.example .env        # fill DARBAAN_AGENT_PASS, DARBAAN_ADMIN_TOKEN
 docker compose up -d
 ```
 
-Key configuration (file `<` env `<` flag; full list via `darbaan --help`):
+The agent faces bind to `127.0.0.1` by default (set `DARBAAN_FACE_BIND=0.0.0.0`
+to reach them from a trusted LAN); the admin API is always localhost-only.
 
-| Setting | Env | Purpose |
-|---|---|---|
-| agent credential | `DARBAAN_AGENT_USERNAME` / `DARBAAN_AGENT_PASS` | the agent's IMAP/SMTP login to Darbaan |
-| admin token | `DARBAAN_ADMIN_TOKEN` | bearer token for the localhost admin API |
-| sender | `sender-type` (`stub`/`smtp`) + `DARBAAN_SMTP_PASSWORD` | upstream delivery; **stub by default** |
-| DKIM | `DARBAAN_DKIM_KEY_FILE` / `dkim-selector` / `dkim-domain` | bounce signing |
-| inbound sync | `DARBAAN_INBOUND_IMAP_HOST` / `…_USERNAME` / `DARBAAN_INBOUND_IMAP_PASSWORD` | upstream mailbox to sync (empty = sync off) |
-| recency cutoff | `inbound-max-age` (e.g. `1y`) | bound the initial sync to recent mail |
+## Design notes
 
-Ports bind to `127.0.0.1` only — Darbaan is a local-trusted-host service, not
-internet-facing. Secrets come from env/mounts, never the image
-([ADR 0012](adr/0012-deployment-and-secrets-at-rest.md)).
+The architecture and the reasoning behind each decision are recorded as
+Architecture Decision Records in [`adr/`](adr/), for those who want the detail.
+They are reference material — you do not need them to run or use Darbaan.
 
 ## License
 
