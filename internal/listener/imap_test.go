@@ -205,6 +205,82 @@ func TestIMAPSearch(t *testing.T) {
 	assert.Equal(t, []imap.UID{1}, uids.AllUIDs())
 }
 
+// A record with a stored envelope serves FETCH ENVELOPE + RFC822Size and SUBJECT
+// SEARCH from metadata, touching no body; only a body FETCH resolves content.
+// (Fully-lazy listing + the #92 SUBJECT-search [SERVERBUG] regression fix, #93.)
+func TestIMAPEnvelopeAndHeaderSearchFromMetadata(t *testing.T) {
+	// A fresh store holding ONLY an envelope-carrying synced record (seq 1) — so
+	// no envelope-less record forces a raw fallback and muddies the fetch count.
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	_, _, err = store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "Quarterly report", UpstreamUID: 5, UIDValidity: 1,
+		Size: 4096,
+		Envelope: &inbound.Envelope{
+			Subject: "Quarterly report",
+			From:    []inbound.Address{{Name: "Alice", Mailbox: "alice", Host: "x.test"}},
+		},
+	})
+	require.NoError(t, err)
+
+	var fetchCalls int
+	fetch := func(owner, id string) (inbound.Message, error) {
+		fetchCalls++
+		return store.Get(owner, id)
+	}
+	c, err := imapclient.DialInsecure(startIMAPWithFetch(t, store, fetch), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	_, err = c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+
+	// FETCH ENVELOPE + RFC822Size → served from metadata.
+	msgs, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{
+		UID: true, Envelope: true, RFC822Size: true,
+	}).Collect()
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	require.NotNil(t, msgs[0].Envelope)
+	assert.Equal(t, "Quarterly report", msgs[0].Envelope.Subject)
+	assert.Equal(t, int64(4096), msgs[0].RFC822Size)
+	assert.Equal(t, 0, fetchCalls, "ENVELOPE/size served from metadata, no body fetch")
+
+	// SUBJECT SEARCH → matches from metadata, no body fetch (was [SERVERBUG]).
+	res, err := c.Search(&imap.SearchCriteria{
+		Header: []imap.SearchCriteriaHeaderField{{Key: "Subject", Value: "quarterly"}},
+	}, nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, []uint32{1}, res.AllSeqNums())
+	assert.Equal(t, 0, fetchCalls, "SUBJECT search served from metadata, no body fetch")
+
+	// A body FETCH does resolve content.
+	_, err = c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{
+		BodySection: []*imap.FetchItemBodySection{{}},
+	}).Collect()
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, fetchCalls, 1)
+}
+
+// A SUBJECT search over an envelope-less record (legacy/bounce) falls back to the
+// raw header block — still works (and the bounce's subject is matchable).
+func TestIMAPHeaderSearchFallsBackToRaw(t *testing.T) {
+	store := seedInbound(t) // present bounce, no stored envelope, subject "Undelivered..."
+	c, err := imapclient.DialInsecure(startIMAP(t, store), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	_, err = c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+
+	res, err := c.Search(&imap.SearchCriteria{
+		Header: []imap.SearchCriteriaHeaderField{{Key: "Subject", Value: "Undelivered"}},
+	}, nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, []uint32{1}, res.AllSeqNums())
+}
+
 func TestIMAPBadAuthRejected(t *testing.T) {
 	c, err := imapclient.DialInsecure(startIMAP(t, seedInbound(t)), nil)
 	require.NoError(t, err)

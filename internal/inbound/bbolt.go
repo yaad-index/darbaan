@@ -222,6 +222,8 @@ func (s *bboltStore) put(tx *bbolt.Tx, d Delivery, pending bool) (Message, []byt
 		UpstreamUID: d.UpstreamUID,
 		UIDValidity: d.UIDValidity,
 		Pending:     pending,
+		Envelope:    d.Envelope,
+		Size:        d.Size,
 	}
 	key := seqkey.Encode(seq)
 	blobbed := false
