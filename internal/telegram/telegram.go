@@ -102,9 +102,7 @@ func New(token string, operatorID int64, pollInterval time.Duration, adminClient
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbApprove, bot.MatchTypePrefix, c.handleApprove)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbRejectPerm, bot.MatchTypePrefix, c.handleRejectPermanent)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbRejectRetry, bot.MatchTypePrefix, c.handleRejectRetryable)
-	// Inbound hold-for-human (ADR 0021). Drop is registered before Expose: the
-	// prefix matcher would let "drop:" be shadowed otherwise — distinct prefixes
-	// here, but keep them explicit.
+	// Inbound hold-for-human decisions (ADR 0021).
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbExpose, bot.MatchTypePrefix, c.handleExpose)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbDrop, bot.MatchTypePrefix, c.handleDrop)
 	// The reason force-reply arrives as a normal reply message, not a callback.
