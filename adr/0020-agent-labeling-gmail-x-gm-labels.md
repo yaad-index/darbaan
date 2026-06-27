@@ -33,11 +33,16 @@ first-class Gmail labels.
 - **Read.** The sync pulls each message's keywords (and, on Gmail, its labels) into
   the inbound record metadata; the read face serves them so the agent sees existing
   labels.
-- **Write-through.** A keyword change updates the stored metadata **and** applies to
-  the upstream mailbox. This is a deliberate, **narrow exception** to read-only-upstream
-  (ADR 0019): the sync stays read-only for message content and for deletes/expunge,
-  but agent **label** changes write through, precisely because labels are
-  non-destructive and reversible.
+- **Write-through (local-canonical, best-effort upstream).** A label action takes
+  effect on Darbaan's **local store as the canonical result**, and is **best-effort
+  replicated to the backend**: Darbaan applies the keyword change to the upstream
+  mailbox, but a failed upstream write is logged and reconciled on the next sync,
+  never surfaced as an error to the agent. The local store is the source of truth;
+  the backend is an eventually-consistent replica for labels. This is the general
+  shape for Darbaan write-actions (cf. the sync's at-least-once model, ADR 0019).
+  Write-through is a deliberate, **narrow exception** to read-only-upstream: the sync
+  stays read-only for message content and for deletes/expunge, but agent **label**
+  changes write through, precisely because labels are non-destructive and reversible.
 - **Gmail mapping (enhancement, capability-negotiated).** When the backend advertises
   `X-GM-EXT-1`, Darbaan maps keywords ↔ `X-GM-LABELS` so the agent's keyword `useless`
   becomes a real Gmail label `useless`, visible in Gmail's UI, and existing Gmail
