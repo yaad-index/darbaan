@@ -275,7 +275,8 @@ func upstreamKeywords(t *testing.T, addr string, uid uint32) []string {
 }
 
 // WriteKeywords replicates a keyword set to the upstream over a separate session,
-// converging by add/remove delta (ADR 0020 write-through).
+// applies an add/remove keyword delta to the upstream (plain-keyword path, no
+// X-GM-EXT-1 on the memserver; ADR 0020 write-through).
 func TestWriteKeywordsToUpstream(t *testing.T) {
 	addr, user := startUpstream(t)
 	appendMsg(t, user, "Subject: x\r\n\r\ny") // upstream UID 1
@@ -287,12 +288,40 @@ func TestWriteKeywordsToUpstream(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
 
-	require.NoError(t, syncer.WriteKeywords("agent", msgs[0].ID, []string{"useless", "handled"}))
+	require.NoError(t, syncer.WriteKeywords("agent", msgs[0].ID, []string{"useless", "handled"}, nil))
 	assert.ElementsMatch(t, []string{"useless", "handled"}, upstreamKeywords(t, addr, 1))
 
-	// Converges: removing one upstream.
-	require.NoError(t, syncer.WriteKeywords("agent", msgs[0].ID, []string{"handled"}))
+	// Removing one via the delta.
+	require.NoError(t, syncer.WriteKeywords("agent", msgs[0].ID, nil, []string{"useless"}))
 	assert.ElementsMatch(t, []string{"handled"}, upstreamKeywords(t, addr, 1))
+}
+
+// WriteKeywords routes to the label store when set, and falls back to plain
+// keywords when the label store reports the backend isn't Gmail (ErrNotXGM).
+func TestWriteKeywordsRoutesToLabelStore(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "Subject: x\r\n\r\ny")
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
+	_, err := syncer.Sync(context.Background())
+	require.NoError(t, err)
+	msgs, err := store.List("agent")
+	require.NoError(t, err)
+	id := msgs[0].ID
+
+	// Label store handles it → no plain-keyword STORE to upstream.
+	var gotUID uint32
+	var gotAdd []string
+	syncer.SetLabelStore(func(uid, _ uint32, add, remove []string) error { gotUID, gotAdd = uid, add; return nil })
+	require.NoError(t, syncer.WriteKeywords("agent", id, []string{"useless"}, nil))
+	assert.Equal(t, uint32(1), gotUID)
+	assert.Equal(t, []string{"useless"}, gotAdd)
+	assert.Empty(t, upstreamKeywords(t, addr, 1)) // went the label path, not keywords
+
+	// ErrNotXGM → fall back to a plain keyword STORE.
+	syncer.SetLabelStore(func(uid, _ uint32, add, remove []string) error { return imapsync.ErrNotXGM })
+	require.NoError(t, syncer.WriteKeywords("agent", id, []string{"plainkw"}, nil))
+	assert.ElementsMatch(t, []string{"plainkw"}, upstreamKeywords(t, addr, 1))
 }
 
 // A dirty keyword set (a failed immediate write) is reconciled to upstream on the

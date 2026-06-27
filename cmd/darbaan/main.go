@@ -166,8 +166,12 @@ func (cli *CLI) newSyncer(inbox inbound.InboundStore) (*imapsync.Syncer, func(),
 	if err != nil {
 		return nil, nil, err
 	}
-	dial := imapsync.Dialer(cli.InboundIMAPHost, cli.InboundIMAPUsername, os.Getenv("DARBAAN_INBOUND_IMAP_PASSWORD"))
+	pass := os.Getenv("DARBAAN_INBOUND_IMAP_PASSWORD")
+	dial := imapsync.Dialer(cli.InboundIMAPHost, cli.InboundIMAPUsername, pass)
 	syncer := imapsync.New(dial, cli.InboundIMAPMailbox, cli.AgentUsername, inbox, state, maxAge)
+	// Gmail label write-through (ADR 0020 20c): capability-gated, so harmless on a
+	// non-Gmail backend (reports not-supported → WriteKeywords uses plain keywords).
+	syncer.SetLabelStore(imapsync.RawGmailLabelStore(cli.InboundIMAPHost, cli.InboundIMAPUsername, pass, cli.InboundIMAPMailbox))
 	return syncer, func() { _ = state.Close() }, nil
 }
 
