@@ -116,6 +116,13 @@ DARBAAN_INBOUND_MAX_AGE: "1y"          # only sync mail newer than this
 
 `inbound-max-age` is **forward-only**: widening it later requires a re-sync.
 
+**Optional inbound filter.** You can gate what the client sees: mount a YAML
+rules file and point at it with `DARBAAN_INBOUND_FILTER`. Rules match on message
+fields and **allow**, **hide**, or **hold-for-review** each message, with a
+configurable default. Left unset, the client sees the full synced mailbox. Note
+that a configured filter means the client's inbox may intentionally show fewer
+messages than the real mailbox.
+
 ### Bounce identity
 
 ```yaml

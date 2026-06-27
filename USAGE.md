@@ -38,6 +38,11 @@ mailbox credentials):
 
 - Darbaan serves the mailbox as a single **`INBOX`** — a synced, recency-bounded
   view of received mail. Select it and use plain IMAP (`SEARCH`, `FETCH`).
+- **It can be a filtered view.** The operator may configure rules that hide some
+  messages, or hold them back pending review, before they ever reach you. So your
+  `INBOX` can intentionally contain *fewer* messages than the underlying mailbox —
+  that is by design (gated), not lost mail. Don't treat a smaller-than-expected
+  inbox as an error.
 - **Standard IMAP only.** Do not rely on provider-specific extensions (Gmail raw
   search, All-Mail folders, etc.); they are not available through the gate.
 - **Listing is cheap.** Envelopes and headers are synced eagerly; a message
