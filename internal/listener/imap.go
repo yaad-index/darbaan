@@ -110,6 +110,8 @@ func (s *imapSession) Select(mailbox string, _ *imap.SelectOptions) (*imap.Selec
 	s.selected = msgs
 
 	firstUnseen, uidNext := uint32(0), uint32(1) // UID 0 is invalid (RFC 3501)
+	seen := map[imap.Flag]bool{}
+	keywords := []imap.Flag{}
 	for i, m := range msgs {
 		uid := uint32(uidOf(m))
 		if uid >= uidNext {
@@ -118,10 +120,16 @@ func (s *imapSession) Select(mailbox string, _ *imap.SelectOptions) (*imap.Selec
 		if !m.Seen && firstUnseen == 0 {
 			firstUnseen = uint32(i) + 1
 		}
+		for _, k := range m.Keywords { // advertise the keywords in use (ADR 0020)
+			if f := imap.Flag(k); !seen[f] {
+				seen[f] = true
+				keywords = append(keywords, f)
+			}
+		}
 	}
 	return &imap.SelectData{
-		Flags:             []imap.Flag{imap.FlagSeen},
-		PermanentFlags:    []imap.Flag{imap.FlagSeen},
+		Flags:             append([]imap.Flag{imap.FlagSeen}, keywords...),
+		PermanentFlags:    append([]imap.Flag{imap.FlagSeen}, keywords...),
 		NumMessages:       uint32(len(msgs)),
 		FirstUnseenSeqNum: firstUnseen,
 		UIDNext:           imap.UID(uidNext),
@@ -658,10 +666,14 @@ func toIMAPAddrs(as []inbound.Address) []imap.Address {
 }
 
 func flagList(m inbound.Message) []imap.Flag {
+	flags := make([]imap.Flag, 0, len(m.Keywords)+1)
 	if m.Seen {
-		return []imap.Flag{imap.FlagSeen}
+		flags = append(flags, imap.FlagSeen)
 	}
-	return []imap.Flag{}
+	for _, k := range m.Keywords { // custom keywords/labels (ADR 0020)
+		flags = append(flags, imap.Flag(k))
+	}
+	return flags
 }
 
 func seenFromStoreFlags(sf *imap.StoreFlags) (seen, touches bool) {

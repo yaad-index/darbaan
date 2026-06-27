@@ -63,6 +63,10 @@ type Delivery struct {
 	// to the raw for those.
 	Envelope *Envelope
 	Size     int64
+
+	// Keywords are the message's custom IMAP keywords/labels (ADR 0020), pulled
+	// from upstream by the sync; nil for locally-generated deliveries.
+	Keywords []string
 }
 
 // Message is a stored inbound message.
@@ -93,6 +97,10 @@ type Message struct {
 	// from the raw.
 	Envelope *Envelope `json:"envelope,omitempty"`
 	Size     int64     `json:"size,omitempty"`
+
+	// Keywords are the message's custom IMAP keywords/labels (ADR 0020), served
+	// on FETCH FLAGS. The agent sets them via STORE (write-through to upstream).
+	Keywords []string `json:"keywords,omitempty"`
 }
 
 // InboundStore is the agent's served mailbox. Implementations are selected by

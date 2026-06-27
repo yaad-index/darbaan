@@ -115,6 +115,7 @@ func (s *Syncer) pull(c *imapclient.Client, uidValidity, uidNext, last uint32) (
 	// BODY[] — the body is fetched on demand when first read (lazy, ADR 0019).
 	cmd := c.Fetch(set, &imap.FetchOptions{
 		UID:        true,
+		Flags:      true, // custom keywords/labels (ADR 0020)
 		Envelope:   true,
 		RFC822Size: true,
 	})
@@ -292,7 +293,7 @@ func (s *Syncer) FetchContent(owner, id string) (inbound.Message, error) {
 }
 
 func deliveryOf(owner string, m *imapclient.FetchMessageBuffer) inbound.Delivery {
-	d := inbound.Delivery{Owner: owner, Raw: rawBody(m), Size: m.RFC822Size}
+	d := inbound.Delivery{Owner: owner, Raw: rawBody(m), Size: m.RFC822Size, Keywords: keywordsOf(m.Flags)}
 	if m.Envelope != nil {
 		d.Subject = m.Envelope.Subject
 		d.From = firstAddr(m.Envelope.From)
@@ -300,6 +301,19 @@ func deliveryOf(owner string, m *imapclient.FetchMessageBuffer) inbound.Delivery
 		d.Envelope = mapEnvelope(m.Envelope)
 	}
 	return d
+}
+
+// keywordsOf returns the custom keywords from a message's flags — the atoms that
+// are not backslash-prefixed system flags (\Seen, \Flagged, …). \Seen is tracked
+// separately as the Seen field, so it (and the other system flags) are dropped.
+func keywordsOf(flags []imap.Flag) []string {
+	var kw []string
+	for _, f := range flags {
+		if !strings.HasPrefix(string(f), "\\") {
+			kw = append(kw, string(f))
+		}
+	}
+	return kw
 }
 
 // mapEnvelope mirrors an IMAP envelope into the store's IMAP-free Envelope so the

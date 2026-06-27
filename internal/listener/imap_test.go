@@ -281,6 +281,32 @@ func TestIMAPHeaderSearchFallsBackToRaw(t *testing.T) {
 	assert.Equal(t, []uint32{1}, res.AllSeqNums())
 }
 
+// FETCH FLAGS serves a message's custom keywords (ADR 0020), and SELECT
+// advertises them in FLAGS/PERMANENTFLAGS.
+func TestIMAPFetchServesKeywords(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	_, _, err = store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", UpstreamUID: 1, UIDValidity: 1, Keywords: []string{"useless", "$Important"},
+	})
+	require.NoError(t, err)
+
+	c, err := imapclient.DialInsecure(startIMAP(t, store), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	sel, err := c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Contains(t, sel.Flags, imap.Flag("useless"))
+
+	msgs, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{Flags: true}).Collect()
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	assert.Contains(t, msgs[0].Flags, imap.Flag("useless"))
+	assert.Contains(t, msgs[0].Flags, imap.Flag("$Important"))
+}
+
 func TestIMAPBadAuthRejected(t *testing.T) {
 	c, err := imapclient.DialInsecure(startIMAP(t, seedInbound(t)), nil)
 	require.NoError(t, err)
