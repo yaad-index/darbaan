@@ -50,7 +50,7 @@ operator-facing tools are separate processes that talk to that API, not compiled
 into the core:
 
 - **CLI** — `darbaan queue …` lists and decides held messages.
-- **Telegram** — approve or reject from your phone.
+- **Telegram** — approve or reject from your phone (setup in [INSTALL.md](INSTALL.md)).
 
 ## Install / run
 
