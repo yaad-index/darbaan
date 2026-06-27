@@ -28,3 +28,4 @@ through 2026-06-26 (maintainer review).
 | [0016](0016-store-canonical-translation-faces.md) | Store-canonical architecture; protocol faces are translation adapters |
 | [0017](0017-interfaces-as-clients-over-local-api.md) | Admin and approval interfaces are separate host processes over the local API |
 | [0018](0018-tiered-storage-metadata-kv-content-filesystem.md) | Tiered storage: metadata in the KV store, message content on the filesystem |
+| [0019](0019-inbound-sync-store-canonical-lazy-no-filter.md) | Inbound mailbox sync: store-canonical incremental pull, lazy content, no filter (v1) |
