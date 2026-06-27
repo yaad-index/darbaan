@@ -48,6 +48,15 @@ services:
       DARBAAN_SMTP_HOST: "smtp.gmail.com:587"
       DARBAAN_SMTP_USERNAME: "" # e.g. you@gmail.com (when sender-type=smtp)
       DARBAAN_SMTP_PASSWORD: "${DARBAAN_SMTP_PASSWORD:-}"
+
+      # Inbound mailbox sync (ADR 0019) — OFF by default (no host = disabled).
+      # WARNING (v1, no filter): everything synced is fully readable by the agent
+      # — point it at a non-sensitive / test mailbox until the filter lands.
+      # Uncomment + set the host/username to enable; password from .env.
+      # DARBAAN_INBOUND_IMAP_HOST: "imap.gmail.com:993"
+      # DARBAAN_INBOUND_IMAP_USERNAME: "" # e.g. you@gmail.com
+      # DARBAAN_INBOUND_IMAP_MAILBOX: "INBOX"
+      DARBAAN_INBOUND_IMAP_PASSWORD: "${DARBAAN_INBOUND_IMAP_PASSWORD:-}"
     volumes:
       - darbaan-data:/data # the three bbolt DBs (sluice / audit / inbound)
       - ./secrets/tls:/run/secrets/tls:ro # you provide cert.pem + key.pem
