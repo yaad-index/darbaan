@@ -7,6 +7,7 @@ import (
 	"net"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -48,6 +49,13 @@ func appendMsg(t *testing.T, user *imapmemserver.User, raw string) {
 	require.NoError(t, err)
 }
 
+// appendMsgAt appends a message with a specific INTERNALDATE (for SEARCH SINCE).
+func appendMsgAt(t *testing.T, user *imapmemserver.User, raw string, when time.Time) {
+	t.Helper()
+	_, err := user.Append("INBOX", bytes.NewReader([]byte(raw)), &imap.AppendOptions{Time: when})
+	require.NoError(t, err)
+}
+
 func dialFor(addr string) imapsync.DialFunc {
 	return func() (*imapclient.Client, error) {
 		c, err := imapclient.DialInsecure(addr, nil)
@@ -84,7 +92,7 @@ func TestSyncPullsIncrementally(t *testing.T) {
 	appendMsg(t, user, "From: bob@x.test\r\nTo: agent@d.test\r\nSubject: two\r\n\r\nbody two")
 
 	store := newInbound(t)
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t))
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
 
 	n, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
@@ -134,7 +142,7 @@ func TestSyncStreamsManyMessages(t *testing.T) {
 		appendMsg(t, user, fmt.Sprintf("Subject: m%d\r\n\r\nbody %d", i, i))
 	}
 	store := newInbound(t)
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t))
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
 
 	got, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
@@ -158,7 +166,7 @@ func TestFetchContentFillsPending(t *testing.T) {
 	appendMsg(t, user, "Subject: real\r\n\r\nreal body") // upstream UID 1, UIDVALIDITY 1
 
 	store := newInbound(t)
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t))
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
 
 	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", Subject: "real", UpstreamUID: 1, UIDValidity: 1})
 	require.NoError(t, err)
@@ -187,7 +195,7 @@ func TestFetchContentStaleUIDValidity(t *testing.T) {
 	appendMsg(t, user, "Subject: x\r\n\r\ny")
 
 	store := newInbound(t)
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t))
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
 	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 999})
 	require.NoError(t, err)
 
@@ -204,18 +212,42 @@ func TestSyncDedupsOnCursorReset(t *testing.T) {
 
 	store := newInbound(t) // shared across both syncers
 
-	n, err := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t)).Sync(context.Background())
+	n, err := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0).Sync(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 2, n)
 
 	// A second syncer with a FRESH cursor re-fetches both, but dedups: 0 new.
-	n, err = imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t)).Sync(context.Background())
+	n, err = imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0).Sync(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, n)
 
 	msgs, err := store.List("agent")
 	require.NoError(t, err)
 	assert.Len(t, msgs, 2) // no duplicates
+}
+
+// A recency cutoff (inbound-max-age) pulls only messages newer than the cutoff
+// date; old mail is skipped and the cursor advances past it (no re-pull).
+func TestSyncRecencyCutoff(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsgAt(t, user, "Subject: ancient\r\n\r\nx", time.Now().AddDate(-2, 0, 0)) // 2y old
+	appendMsgAt(t, user, "Subject: fresh\r\n\r\ny", time.Now())
+
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 365*24*time.Hour) // 1y
+
+	n, err := syncer.Sync(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, n) // only the fresh message, ancient one skipped
+	msgs, err := store.List("agent")
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "fresh", msgs[0].Subject)
+
+	// The cursor advanced past the skipped-old message → next sync is a no-op.
+	n, err = syncer.Sync(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
 }
 
 // A recorded cursor for a different UIDVALIDITY (mailbox reset) is discarded and
@@ -228,7 +260,7 @@ func TestSyncResetsOnUIDValidityMismatch(t *testing.T) {
 	state := newState(t)
 	require.NoError(t, state.Save("INBOX", imapsync.State{UIDValidity: 424242, LastUID: 99}))
 
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, state)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, state, 0)
 	n, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, n) // mismatch → cursor reset to 0 → message re-pulled despite LastUID=99

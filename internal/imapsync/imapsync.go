@@ -3,7 +3,9 @@ package imapsync
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -23,11 +25,13 @@ type Syncer struct {
 	owner   string // the agent whose mailbox this is
 	store   inbound.InboundStore
 	state   StateStore
+	maxAge  time.Duration // recency cutoff; 0 = no cutoff (ADR 0008)
 }
 
-// New builds a Syncer. owner is the agent the synced mail belongs to.
-func New(dial DialFunc, mailbox, owner string, store inbound.InboundStore, state StateStore) *Syncer {
-	return &Syncer{dial: dial, mailbox: mailbox, owner: owner, store: store, state: state}
+// New builds a Syncer. owner is the agent the synced mail belongs to. maxAge is
+// the recency cutoff for the initial/full sync (0 = pull everything).
+func New(dial DialFunc, mailbox, owner string, store inbound.InboundStore, state StateStore, maxAge time.Duration) *Syncer {
+	return &Syncer{dial: dial, mailbox: mailbox, owner: owner, store: store, state: state, maxAge: maxAge}
 }
 
 // Dialer is the production DialFunc: TLS-connect to addr and log in with the
@@ -89,27 +93,21 @@ func (s *Syncer) Sync(ctx context.Context) (int, error) {
 }
 
 // pull fetches new messages and stores them, returning the count stored and the
-// new cursor (the highest UID stored, or the prior cursor if nothing was new).
+// new cursor.
 //
-// It uses a CONCRETE upper bound from the mailbox's UIDNEXT — go-imap's dynamic
-// "*" range (Stop 0) is mis-encoded on the wire against strict servers (e.g.
-// Gmail) and silently matches nothing; only when a server reports no UIDNEXT do
-// we fall back to the dynamic range, guarded against the "N:*" past-the-end
-// re-return.
-//
-// The fetch is STREAMED (one message buffered at a time via cmd.Next), so a
-// large mailbox never loads into memory at once. On a mid-stream error the
-// cursor is not advanced, so the next run re-syncs — at-least-once, no gaps.
+// The set to fetch comes from pullSet: a CONCRETE (last+1):(uidNext-1) range
+// normally, or — with a recency cutoff (ADR 0008) — exactly the messages newer
+// than the cutoff date AND the cursor. The fetch is STREAMED (one message
+// buffered at a time via cmd.Next), so a large mailbox never loads into memory at
+// once. On a mid-stream error the cursor is not advanced, so the next run
+// re-syncs — at-least-once, no gaps.
 func (s *Syncer) pull(c *imapclient.Client, uidValidity, uidNext, last uint32) (int, uint32, error) {
-	var set imap.UIDSet
-	if uidNext > 0 {
-		hi := uidNext - 1 // highest possible existing UID
-		if last+1 > hi {
-			return 0, last, nil // no new messages
-		}
-		set.AddRange(imap.UID(last+1), imap.UID(hi))
-	} else {
-		set.AddRange(imap.UID(last+1), 0) // fallback: dynamic "*"
+	set, ceiling, skip, err := s.pullSet(c, uidNext, last)
+	if err != nil {
+		return 0, last, err
+	}
+	if skip {
+		return 0, ceiling, nil // nothing to fetch; advance the cursor to the ceiling
 	}
 
 	// Headers-only: ENVELOPE + RFC822.SIZE (stored as metadata so the read face
@@ -157,7 +155,80 @@ func (s *Syncer) pull(c *imapclient.Client, uidValidity, uidNext, last uint32) (
 	if err := cmd.Close(); err != nil {
 		return stored, highest, fmt.Errorf("imapsync: fetch: %w", err)
 	}
+	// On the recency-cutoff path, advance the cursor to the covered ceiling
+	// (uidNext-1) so we step past skipped-old mail — including a high-UID /
+	// old-INTERNALDATE message SEARCH SINCE excludes — and never re-evaluate it.
+	if ceiling > highest {
+		highest = ceiling
+	}
 	return stored, highest, nil
+}
+
+// pullSet builds the UID set to fetch plus the cursor ceiling. Normally that is
+// the concrete (last+1):(uidNext-1) range (UIDNEXT gives a strict upper bound —
+// go-imap's dynamic "*" is mis-encoded against Gmail; fall back to it only when a
+// server reports no UIDNEXT). With a recency cutoff it is the exact intersection
+// of "newer than the cutoff date" (UID SEARCH SINCE) and "newer than the cursor"
+// — an exact set, not a UID floor, so a high-UID/old-date message is excluded.
+//
+// Note (forward-only, v1): on the cutoff path the cursor advances to uidNext-1
+// regardless, so WIDENING the window later (e.g. 1y→2y) does NOT retroactively
+// pull the now-in-range older mail — those UIDs are already behind the cursor.
+// Widening requires a cursor reset / re-sync.
+func (s *Syncer) pullSet(c *imapclient.Client, uidNext, last uint32) (set imap.UIDSet, ceiling uint32, skip bool, err error) {
+	ceiling = last
+	if s.maxAge > 0 {
+		cutoff := time.Now().Add(-s.maxAge)
+		res, e := c.UIDSearch(&imap.SearchCriteria{Since: cutoff}, nil).Wait()
+		if e != nil {
+			return set, last, false, fmt.Errorf("imapsync: search since %s: %w", cutoff.Format("2006-01-02"), e)
+		}
+		uids := filterAbove(res.AllUIDs(), last)
+		if uidNext > 0 {
+			ceiling = uidNext - 1 // the whole range is covered; old mail is skipped
+		}
+		if len(uids) == 0 {
+			return set, ceiling, true, nil
+		}
+		return uidSetOf(uids), ceiling, false, nil
+	}
+	if uidNext > 0 {
+		hi := uidNext - 1 // highest possible existing UID
+		if last+1 > hi {
+			return set, last, true, nil // no new messages
+		}
+		set.AddRange(imap.UID(last+1), imap.UID(hi))
+		return set, hi, false, nil
+	}
+	set.AddRange(imap.UID(last+1), 0) // fallback: dynamic "*"
+	return set, last, false, nil
+}
+
+// filterAbove returns the UIDs strictly greater than last.
+func filterAbove(uids []imap.UID, last uint32) []imap.UID {
+	out := uids[:0:0]
+	for _, u := range uids {
+		if uint32(u) > last {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// uidSetOf builds a UID set from a list, coalescing consecutive UIDs into ranges
+// so the FETCH command stays compact even for a large recent window.
+func uidSetOf(uids []imap.UID) imap.UIDSet {
+	sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
+	var set imap.UIDSet
+	for i := 0; i < len(uids); {
+		j := i
+		for j+1 < len(uids) && uids[j+1] == uids[j]+1 {
+			j++
+		}
+		set.AddRange(uids[i], uids[j])
+		i = j + 1
+	}
+	return set
 }
 
 // FetchContent fills a pending message's body on demand (ADR 0019, the read-time
