@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/yaad-index/darbaan/compare/v0.2.0...v0.3.0) (2026-06-27)
+
+
+### Features
+
+* **imapsync:** inbound mailbox sync engine (ADR 0019, Inc 1) ([#87](https://github.com/yaad-index/darbaan/issues/87)) ([c73f609](https://github.com/yaad-index/darbaan/commit/c73f609acf3e854cc0cb89d3f6ebc9827a6ec82f))
+* **imapsync:** wire inbound sync into serve, config-gated (ADR 0019, Inc 2) ([#88](https://github.com/yaad-index/darbaan/issues/88)) ([7abef76](https://github.com/yaad-index/darbaan/commit/7abef763e6c0815f30e112ca9f9fe8a769699b43))
+* **inbound:** headers-only sync + per-FETCH lazy read face (ADR 0019 Inc 3b-ii) ([#92](https://github.com/yaad-index/darbaan/issues/92)) ([c857248](https://github.com/yaad-index/darbaan/commit/c857248979017b0f8e9891d988bbfd6763c2bc14))
+* **inbound:** idempotent sync via upstream-UID dedup (ADR 0019 Inc 3a) ([#90](https://github.com/yaad-index/darbaan/issues/90)) ([77df436](https://github.com/yaad-index/darbaan/commit/77df4361188fa7e75c8222c05930cd175cf21523))
+* **inbound:** pending content state + on-demand FetchContent (ADR 0019 Inc 3b-i) ([#91](https://github.com/yaad-index/darbaan/issues/91)) ([5fb162d](https://github.com/yaad-index/darbaan/commit/5fb162d2719456697362967f8e6274f44e5fbf98))
+* **storage:** reclaim orphan blobs at store-open ([#83](https://github.com/yaad-index/darbaan/issues/83)) ([#84](https://github.com/yaad-index/darbaan/issues/84)) ([8fb84d7](https://github.com/yaad-index/darbaan/commit/8fb84d7a87143f6a3757de57b58c9a03882df77d))
+
+
+### Bug Fixes
+
+* **imapsync:** concrete UIDNEXT bound + streamed fetch (live-test bug) ([#89](https://github.com/yaad-index/darbaan/issues/89)) ([c9c2def](https://github.com/yaad-index/darbaan/commit/c9c2defd4b192a0a4f2bec78b29d6ad02b897b7d))
+
 ## [0.2.0](https://github.com/yaad-index/darbaan/compare/v0.1.0...v0.2.0) (2026-06-26)
 
 
