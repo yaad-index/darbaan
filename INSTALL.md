@@ -198,7 +198,8 @@ inherits):
 ```sh
 docker exec darbaan-darbaan-1 darbaan queue ls          # list held + decided
 docker exec darbaan-darbaan-1 darbaan queue approve <id>
-docker exec darbaan-darbaan-1 darbaan queue reject <id>
+docker exec darbaan-darbaan-1 darbaan queue reject <id> --reason "not allowed"
+# reject requires --reason; add --retryable to mark it a transient failure
 ```
 
 **Telegram**: once `DARBAAN_TELEGRAM_TOKEN` + `DARBAAN_TELEGRAM_OPERATOR_ID` are
