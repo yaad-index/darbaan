@@ -370,7 +370,10 @@ func (s *Syncer) reconcileKeywords() {
 		return
 	}
 	for _, m := range dirty {
-		// Additive re-apply (reconcile has the wanted set, not a delta).
+		// Additive re-apply: reconcile has the wanted set, not a delta, so a
+		// failed immediate label REMOVE is NOT reconciled (the label lingers
+		// upstream). Deliberate — acceptable for the add-dominated labeling flow;
+		// the deferred convergent read-side / go-imap upstream swap cleans it up.
 		if err := s.WriteKeywords(s.owner, m.ID, m.Keywords, nil); err != nil {
 			log.Printf("darbaan: keyword reconcile %s deferred: %v", m.ID, err)
 			continue
