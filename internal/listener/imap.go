@@ -286,7 +286,9 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 				m.Keywords = next // local store is canonical; update the snapshot
 				// Best-effort upstream replicate; a failure leaves the record dirty
 				// for the sync to reconcile, never an error to the agent (ADR 0020).
-				if s.writeKeywords != nil {
+				// Skip records with no upstream (locally-generated, e.g. bounces) —
+				// their labels are local-only, nothing to replicate.
+				if s.writeKeywords != nil && m.UpstreamUID != 0 {
 					if err := s.writeKeywords(s.owner, m.ID, next); err != nil {
 						log.Printf("darbaan: imap keyword write-through for %s deferred: %v", m.ID, err)
 					} else {
