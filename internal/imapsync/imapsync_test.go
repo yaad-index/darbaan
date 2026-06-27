@@ -136,6 +136,29 @@ func TestSyncStreamsManyMessages(t *testing.T) {
 	assert.Equal(t, 0, got) // concrete bound: last+1 > UIDNEXT-1, no fetch
 }
 
+// A lost/reset sync cursor re-fetches everything, but the upstream-UID dedup
+// (AddSynced) keeps the store free of duplicates — the crash-mid-sync window.
+func TestSyncDedupsOnCursorReset(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "Subject: a\r\n\r\nx")
+	appendMsg(t, user, "Subject: b\r\n\r\ny")
+
+	store := newInbound(t) // shared across both syncers
+
+	n, err := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t)).Sync(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+
+	// A second syncer with a FRESH cursor re-fetches both, but dedups: 0 new.
+	n, err = imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t)).Sync(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+
+	msgs, err := store.List("agent")
+	require.NoError(t, err)
+	assert.Len(t, msgs, 2) // no duplicates
+}
+
 // A recorded cursor for a different UIDVALIDITY (mailbox reset) is discarded and
 // the mailbox re-synced from scratch, despite a high recorded LastUID.
 func TestSyncResetsOnUIDValidityMismatch(t *testing.T) {

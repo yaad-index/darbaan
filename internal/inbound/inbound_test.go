@@ -18,6 +18,42 @@ func newStore(t *testing.T) inbound.InboundStore {
 	return s
 }
 
+func TestAddSyncedDedup(t *testing.T) {
+	s := newStore(t)
+	d := inbound.Delivery{Owner: "agent", Subject: "hi", Raw: []byte("Subject: hi\r\n\r\nx"), UpstreamUID: 5, UIDValidity: 1}
+
+	added, m1, err := s.AddSynced(d)
+	require.NoError(t, err)
+	assert.True(t, added)
+
+	// Same upstream coordinates → idempotent no-op, returns the existing record.
+	added, m2, err := s.AddSynced(d)
+	require.NoError(t, err)
+	assert.False(t, added)
+	assert.Equal(t, m1.ID, m2.ID)
+	msgs, _ := s.List("agent")
+	assert.Len(t, msgs, 1)
+
+	// A different UID is a new message.
+	d.UpstreamUID = 6
+	added, _, err = s.AddSynced(d)
+	require.NoError(t, err)
+	assert.True(t, added)
+
+	// Same UID under a different UIDVALIDITY is also new (UIDs unique per validity).
+	d.UpstreamUID, d.UIDValidity = 5, 2
+	added, _, err = s.AddSynced(d)
+	require.NoError(t, err)
+	assert.True(t, added)
+
+	msgs, _ = s.List("agent")
+	assert.Len(t, msgs, 3)
+
+	// AddSynced requires upstream coordinates.
+	_, _, err = s.AddSynced(inbound.Delivery{Owner: "agent"})
+	assert.Error(t, err)
+}
+
 func TestAddListGet(t *testing.T) {
 	s := newStore(t)
 	m, err := s.Add(inbound.Delivery{

@@ -73,7 +73,7 @@ func (s *Syncer) Sync(ctx context.Context) (int, error) {
 		last = 0 // new or reset mailbox — full re-sync
 	}
 
-	stored, highest, err := s.pull(c, uint32(sel.UIDNext), last)
+	stored, highest, err := s.pull(c, sel.UIDValidity, uint32(sel.UIDNext), last)
 	if err != nil {
 		return stored, err
 	}
@@ -99,7 +99,7 @@ func (s *Syncer) Sync(ctx context.Context) (int, error) {
 // The fetch is STREAMED (one message buffered at a time via cmd.Next), so a
 // large mailbox never loads into memory at once. On a mid-stream error the
 // cursor is not advanced, so the next run re-syncs — at-least-once, no gaps.
-func (s *Syncer) pull(c *imapclient.Client, uidNext, last uint32) (int, uint32, error) {
+func (s *Syncer) pull(c *imapclient.Client, uidValidity, uidNext, last uint32) (int, uint32, error) {
 	var set imap.UIDSet
 	if uidNext > 0 {
 		hi := uidNext - 1 // highest possible existing UID
@@ -132,11 +132,20 @@ func (s *Syncer) pull(c *imapclient.Client, uidNext, last uint32) (int, uint32, 
 		if uid <= last {
 			continue // dynamic "N:*" past-the-end guard
 		}
-		if _, err := s.store.Add(deliveryOf(s.owner, m)); err != nil {
+		d := deliveryOf(s.owner, m)
+		d.UpstreamUID = uid
+		d.UIDValidity = uidValidity
+		// AddSynced is idempotent on (owner, UIDVALIDITY, UID): a re-fetched
+		// message (e.g. after a crash) is a no-op (added=false).
+		added, _, err := s.store.AddSynced(d)
+		if err != nil {
 			_ = cmd.Close()
 			return stored, highest, fmt.Errorf("imapsync: store uid %d: %w", uid, err)
 		}
-		stored++
+		if added {
+			stored++
+		}
+		// Advance the cursor past every fetched UID, new or already-stored.
 		if uid > highest {
 			highest = uid
 		}
