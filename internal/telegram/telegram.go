@@ -30,8 +30,8 @@ import (
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
-// Callback-data prefixes for the decision buttons. The message id is appended;
-// the handlers that parse these land in later increments.
+// Callback-data prefixes for the decision buttons; the message id is appended
+// and the matching handler parses it back off.
 const (
 	cbApprove     = "approve:"
 	cbRejectPerm  = "reject_perm:"
@@ -350,8 +350,8 @@ func attachmentsLine(atts []attachment) string {
 	return "attachments: " + strings.Join(parts, ", ")
 }
 
-// decisionKeyboard lays in all three decision buttons. The callbacks are wired
-// in later increments; the callback data carries the action + message id.
+// decisionKeyboard lays in all three decision buttons; the callback data carries
+// the action + message id (handled by handleApprove / handleReject*).
 func decisionKeyboard(id string) models.InlineKeyboardMarkup {
 	return models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{
