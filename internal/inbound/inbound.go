@@ -23,6 +23,12 @@ type Delivery struct {
 	To      string // the original submitter
 	Subject string
 	Raw     []byte // full message/rfc822 (the DSN bounce)
+
+	// Upstream coordinates for messages pulled by the inbound sync (ADR 0019);
+	// zero for locally-generated deliveries like bounces. AddSynced uses them to
+	// dedup an idempotent re-sync and (later) to fetch content on demand.
+	UpstreamUID uint32
+	UIDValidity uint32
 }
 
 // Message is a stored inbound message.
@@ -35,6 +41,10 @@ type Message struct {
 	Raw        []byte    `json:"raw"`
 	Seen       bool      `json:"seen"` // IMAP \Seen; bounces land unseen
 	ReceivedAt time.Time `json:"received_at"`
+
+	// Upstream coordinates (ADR 0019); zero for locally-generated messages.
+	UpstreamUID uint32 `json:"upstream_uid,omitempty"`
+	UIDValidity uint32 `json:"uid_validity,omitempty"`
 }
 
 // InboundStore is the agent's served mailbox. Implementations are selected by
@@ -42,6 +52,11 @@ type Message struct {
 type InboundStore interface {
 	// Add stores a delivery and returns the stored message.
 	Add(Delivery) (Message, error)
+	// AddSynced stores a message pulled from upstream, keyed for idempotency by
+	// its upstream (UIDValidity, UpstreamUID). If that upstream message is
+	// already stored it is a no-op returning added=false; otherwise it is stored
+	// and added=true. The Delivery must carry non-zero upstream coordinates.
+	AddSynced(Delivery) (added bool, m Message, err error)
 	// List returns the owner's messages in receive order.
 	List(owner string) ([]Message, error)
 	// Get returns one of the owner's messages, or ErrNotFound.

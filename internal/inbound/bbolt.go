@@ -1,6 +1,7 @@
 package inbound
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,7 +16,12 @@ import (
 	"github.com/yaad-index/darbaan/internal/seqkey"
 )
 
-var bucketInbound = []byte("inbound")
+var (
+	bucketInbound = []byte("inbound")
+	// bucketSynced indexes upstream-pulled messages by (owner, UIDVALIDITY, UID)
+	// for idempotent re-sync (ADR 0019); value is the message's bucketInbound key.
+	bucketSynced = []byte("synced")
+)
 
 func init() {
 	Register("bbolt", newBbolt)
@@ -52,7 +58,10 @@ func newBbolt(path string) (InboundStore, error) {
 		return nil, fmt.Errorf("inbound: open db: %w", err)
 	}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		_, e := tx.CreateBucketIfNotExists(bucketInbound)
+		if _, e := tx.CreateBucketIfNotExists(bucketInbound); e != nil {
+			return e
+		}
+		_, e := tx.CreateBucketIfNotExists(bucketSynced)
 		return e
 	}); err != nil {
 		_ = db.Close()
@@ -107,32 +116,97 @@ func (s *bboltStore) Close() error { return s.db.Close() }
 func (s *bboltStore) Add(d Delivery) (Message, error) {
 	var msg Message
 	err := s.db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketInbound)
-		seq, err := b.NextSequence()
-		if err != nil {
-			return err
-		}
-		msg = Message{
-			ID:         strconv.FormatUint(seq, 10),
-			Owner:      d.Owner,
-			From:       d.From,
-			To:         d.To,
-			Subject:    d.Subject,
-			Raw:        d.Raw,
-			Seen:       false,
-			ReceivedAt: time.Now().UTC(),
-		}
-		// Content tier first: the durable blob is on disk before the referencing
-		// metadata commits (ADR 0018), so a crash can only orphan a blob.
-		if err := s.blobs.Put(msg.ID, d.Raw); err != nil {
-			return fmt.Errorf("write content: %w", err)
-		}
-		return putStored(tx, seqkey.Encode(seq), storedFrom(msg))
+		var e error
+		msg, _, e = s.put(tx, d)
+		return e
 	})
 	if err != nil {
 		return Message{}, fmt.Errorf("inbound: add: %w", err)
 	}
 	return msg, nil
+}
+
+// AddSynced stores an upstream-pulled message idempotently: if its upstream
+// (owner, UIDValidity, UpstreamUID) is already indexed, it's a no-op returning
+// added=false, so a crash-mid-sync re-fetch never duplicates (#87). Otherwise it
+// stores the message and indexes it.
+func (s *bboltStore) AddSynced(d Delivery) (bool, Message, error) {
+	if d.UpstreamUID == 0 {
+		return false, Message{}, fmt.Errorf("inbound: AddSynced requires a non-zero upstream UID")
+	}
+	idxKey := syncedKey(d.Owner, d.UIDValidity, d.UpstreamUID)
+	var (
+		added bool
+		msg   Message
+	)
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		idx := tx.Bucket(bucketSynced)
+		if ref := idx.Get(idxKey); ref != nil {
+			// Already stored — idempotent no-op; return the existing metadata.
+			if v := tx.Bucket(bucketInbound).Get(ref); v != nil {
+				var rec stored
+				if err := json.Unmarshal(v, &rec); err != nil {
+					return err
+				}
+				msg = rec.Message
+			}
+			return nil
+		}
+		m, key, err := s.put(tx, d)
+		if err != nil {
+			return err
+		}
+		added, msg = true, m
+		return idx.Put(idxKey, key)
+	})
+	if err != nil {
+		return false, Message{}, fmt.Errorf("inbound: add synced: %w", err)
+	}
+	return added, msg, nil
+}
+
+// put builds and persists a new message from a delivery (blob first, then
+// metadata) and returns it with its bbolt key. The caller is inside a write txn.
+func (s *bboltStore) put(tx *bbolt.Tx, d Delivery) (Message, []byte, error) {
+	b := tx.Bucket(bucketInbound)
+	seq, err := b.NextSequence()
+	if err != nil {
+		return Message{}, nil, err
+	}
+	msg := Message{
+		ID:          strconv.FormatUint(seq, 10),
+		Owner:       d.Owner,
+		From:        d.From,
+		To:          d.To,
+		Subject:     d.Subject,
+		Raw:         d.Raw,
+		Seen:        false,
+		ReceivedAt:  time.Now().UTC(),
+		UpstreamUID: d.UpstreamUID,
+		UIDValidity: d.UIDValidity,
+	}
+	key := seqkey.Encode(seq)
+	// Content tier first: the durable blob is on disk before the referencing
+	// metadata commits (ADR 0018), so a crash can only orphan a blob.
+	if err := s.blobs.Put(msg.ID, d.Raw); err != nil {
+		return Message{}, nil, fmt.Errorf("write content: %w", err)
+	}
+	if err := putStored(tx, key, storedFrom(msg)); err != nil {
+		return Message{}, nil, err
+	}
+	return msg, key, nil
+}
+
+// syncedKey is the dedup index key for an upstream message: owner + UIDVALIDITY
+// + UID. UIDVALIDITY is included because UIDs are only unique within it.
+func syncedKey(owner string, uidValidity, uid uint32) []byte {
+	k := make([]byte, 0, len(owner)+1+8)
+	k = append(k, owner...)
+	k = append(k, 0) // separator (an owner name has no NUL)
+	var n [8]byte
+	binary.BigEndian.PutUint32(n[0:4], uidValidity)
+	binary.BigEndian.PutUint32(n[4:8], uid)
+	return append(k, n[:]...)
 }
 
 func (s *bboltStore) List(owner string) ([]Message, error) {
