@@ -72,8 +72,8 @@ func (c *Client) handleExpose(ctx context.Context, b *bot.Bot, update *models.Up
 	if !c.guardHeld(ctx, b, cq, id) {
 		return
 	}
-	m, err := c.admin.Expose(ctx, id)
-	c.finishHold(ctx, b, cq, "Exposed", id, m, err)
+	_, err := c.admin.Expose(ctx, id)
+	c.finishHold(ctx, b, cq, "Exposed", id, err)
 }
 
 // handleDrop is the [Drop] button: keep the message hidden from the agent.
@@ -87,8 +87,8 @@ func (c *Client) handleDrop(ctx context.Context, b *bot.Bot, update *models.Upda
 	if !c.guardHeld(ctx, b, cq, id) {
 		return
 	}
-	m, err := c.admin.Drop(ctx, id)
-	c.finishHold(ctx, b, cq, "Dropped", id, m, err)
+	_, err := c.admin.Drop(ctx, id)
+	c.finishHold(ctx, b, cq, "Dropped", id, err)
 }
 
 // guardHeld pre-checks that a tapped message is still awaiting a decision, so a
@@ -118,12 +118,11 @@ func (c *Client) guardHeld(ctx context.Context, b *bot.Bot, cq *models.CallbackQ
 
 // finishHold dismisses the spinner and rewrites the notification to the outcome,
 // clearing the keyboard so the decided hold can't be tapped again.
-func (c *Client) finishHold(ctx context.Context, b *bot.Bot, cq *models.CallbackQuery, verb, id string, m inbound.Message, err error) {
+func (c *Client) finishHold(ctx context.Context, b *bot.Bot, cq *models.CallbackQuery, verb, id string, err error) {
 	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cq.ID, Text: verb})
 	if msg := cq.Message.Message; msg != nil {
 		c.editResult(ctx, b, msg.Chat.ID, msg.ID, holdResult(verb, id, err))
 	}
-	_ = m
 }
 
 func holdResult(verb, id string, err error) string {
