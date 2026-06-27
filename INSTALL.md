@@ -123,6 +123,31 @@ DARBAAN_DKIM_SELECTOR: "darbaan"
 DARBAAN_DKIM_DOMAIN: "<your-bounce-domain>"
 ```
 
+### Telegram approval (optional)
+
+The Telegram client lets you approve or reject held mail from your phone. To set
+it up:
+
+1. **Create a bot.** In Telegram, open a chat with **@BotFather**, send
+   `/newbot`, and follow the prompts. BotFather replies with a **bot token** —
+   put it in `.env` as `DARBAAN_TELEGRAM_TOKEN`.
+2. **Find your user ID.** Message a bot such as **@userinfobot**; it replies with
+   your numeric Telegram user ID. Put it in `.env` as
+   `DARBAAN_TELEGRAM_OPERATOR_ID`. **Only this user ID can approve or reject** —
+   any other person who messages the bot is ignored.
+3. **Start the chat.** Send `/start` to your new bot once, so Telegram allows the
+   bot to message you.
+
+With both values set, the `darbaan-telegram` container polls the admin API and
+sends you a message for each held outbound item, with **Approve** / **Reject**
+buttons; tapping one decides that message and the buttons clear. It holds no mail
+credentials and only talks to the localhost admin API — it is purely a remote
+control for the approval queue.
+
+If you do not want phone approval, leave these two values unset and remove the
+`darbaan-telegram` service from `docker-compose.yml`; the CLI (section 8) approves
+mail on its own.
+
 ## 6. Start it
 
 ```sh
