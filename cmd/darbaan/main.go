@@ -16,6 +16,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -29,6 +30,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/admin"
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
+	"github.com/yaad-index/darbaan/internal/imapsync"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/listener"
 	"github.com/yaad-index/darbaan/internal/policy"
@@ -71,6 +73,12 @@ type CLI struct {
 	IMAPAddr string `name:"imap-addr" default:":1143" help:"IMAP read-face listen address (serves the agent's bounces); reuses the agent credential and listener TLS."`
 
 	AdminAddr string `name:"admin-addr" default:"127.0.0.1:1144" help:"Operator admin API address. Loopback-only / container-internal; the queue subcommands connect here. Token from DARBAAN_ADMIN_TOKEN."`
+
+	InboundIMAPHost         string        `name:"inbound-imap-host" help:"Upstream IMAP host:port to sync the agent's mailbox FROM (ADR 0019). Empty disables sync. App password via DARBAAN_INBOUND_IMAP_PASSWORD."`
+	InboundIMAPUsername     string        `name:"inbound-imap-username" help:"Upstream IMAP username for the sync."`
+	InboundIMAPMailbox      string        `name:"inbound-imap-mailbox" default:"INBOX" help:"Upstream mailbox to sync."`
+	InboundIMAPPollInterval time.Duration `name:"inbound-imap-poll-interval" default:"60s" help:"How often to poll the upstream mailbox for new mail."`
+	InboundSyncDB           string        `name:"inbound-sync-db" default:"darbaan-sync.db" help:"Path to the inbound sync-state (UIDVALIDITY + last UID) database." type:"path"`
 
 	AgentUsername string `name:"agent-username" help:"The agent's Darbaan SMTP username. The password is supplied out-of-band via DARBAAN_AGENT_PASS, never inlined in config (ADR 0012)."`
 
@@ -138,6 +146,52 @@ func (c *CLI) openSender() (backend.Sender, error) {
 		Username: c.SMTPUsername,
 		Password: os.Getenv("DARBAAN_SMTP_PASSWORD"),
 	})
+}
+
+// startInboundSync starts the upstream IMAP poll-sync loop (ADR 0019) if an
+// upstream is configured; otherwise it is a no-op, gated off by default like the
+// stub sender. It returns a stop func that closes the sync-state store. Sync
+// errors are logged, never fatal — a flaky or unreachable upstream must not take
+// down serve.
+func (cli *CLI) startInboundSync(ctx context.Context, inbox inbound.InboundStore) (func(), error) {
+	if cli.InboundIMAPHost == "" {
+		fmt.Fprintln(os.Stderr, "darbaan: inbound sync disabled (no inbound-imap-host configured)")
+		return func() {}, nil
+	}
+	state, err := imapsync.NewStateStore(cli.InboundSyncDB)
+	if err != nil {
+		return nil, err
+	}
+	dial := imapsync.Dialer(cli.InboundIMAPHost, cli.InboundIMAPUsername, os.Getenv("DARBAAN_INBOUND_IMAP_PASSWORD"))
+	syncer := imapsync.New(dial, cli.InboundIMAPMailbox, cli.AgentUsername, inbox, state)
+
+	go func() {
+		t := time.NewTicker(cli.InboundIMAPPollInterval)
+		defer t.Stop()
+		runSync(ctx, syncer) // initial pull at startup
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				runSync(ctx, syncer)
+			}
+		}
+	}()
+	fmt.Fprintf(os.Stderr, "darbaan: inbound sync on %s (%s as %s) every %s\n",
+		cli.InboundIMAPHost, cli.InboundIMAPMailbox, cli.InboundIMAPUsername, cli.InboundIMAPPollInterval)
+	return func() { _ = state.Close() }, nil
+}
+
+func runSync(ctx context.Context, s *imapsync.Syncer) {
+	n, err := s.Sync(ctx)
+	if err != nil {
+		log.Printf("darbaan: inbound sync: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("darbaan: inbound sync pulled %d new message(s)", n)
+	}
 }
 
 // adminClient builds a thin client for the running serve's admin API. The token
@@ -263,15 +317,24 @@ func (*ServeCmd) Run(cli *CLI) error {
 		return err
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Inbound mailbox sync (ADR 0019) — a no-op unless an upstream is configured.
+	// It shares the shutdown ctx; sync errors are logged, never fatal.
+	stopSync, err := cli.startInboundSync(ctx, inbox)
+	if err != nil {
+		return err
+	}
+	defer stopSync()
+
 	closeAll := func() {
 		_ = smtpSrv.Close()
 		_ = imapSrv.Close()
 		_ = adminSrv.Close()
 	}
 	go func() {
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-		<-sig
+		<-ctx.Done()
 		closeAll()
 	}()
 

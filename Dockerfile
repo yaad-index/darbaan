@@ -34,6 +34,7 @@ COPY --from=builder --chown=65532:65532 /data /data
 ENV DARBAAN_SLUICE_DB=/data/sluice.db \
     DARBAAN_AUDIT_DB=/data/audit.db \
     DARBAAN_INBOUND_DB=/data/inbound.db \
+    DARBAAN_INBOUND_SYNC_DB=/data/sync.db \
     DARBAAN_SENDER_TYPE=stub
 
 # SMTP submission face + IMAP read face.
