@@ -1,0 +1,71 @@
+name: publish-image
+
+# Publish the container image to GHCR on every version tag. Tag-only by
+# design: the release artifact is built from exactly the commit that was
+# tagged, nothing else.
+#
+# NOTE: a tag created by the built-in GITHUB_TOKEN (e.g. release-please cutting
+# a release) does NOT trigger the tag path — GitHub's anti-recursion rule. So
+# there are two ways in: push a v* tag from a real account, OR run the workflow
+# manually (workflow_dispatch). For a manual run, either pick the tag in the
+# "Run workflow" ref dropdown, or pass the `tag` input to stamp the version;
+# with neither, only `latest` is published.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version to stamp/tag the image (e.g. v0.4.0). Leave empty to publish only :latest.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # Built-in token; no extra secret needed thanks to packages: write.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/yaad-index/darbaan
+          # On a tag push the version comes from the ref; on a manual run the
+          # `tag` input overrides it (empty input falls back to the ref).
+          tags: |
+            type=semver,pattern={{version}},value=${{ inputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
+            # Don't move :latest onto a pre-release (e.g. v0.5.0-rc.1).
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') && !contains(inputs.tag, '-') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Stamp the binary's `version`: prefer the manual `tag` input, else
+          # fall back to the ref (the tag on a tag push). Mirrors the image-tag
+          # logic so the binary version and the image tag never disagree.
+          build-args: |
+            VERSION=${{ inputs.tag || github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
