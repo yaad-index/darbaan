@@ -5,12 +5,20 @@ name: publish-image
 # tagged, nothing else.
 #
 # NOTE: a tag created by the built-in GITHUB_TOKEN (e.g. release-please cutting
-# a release) does NOT trigger this workflow — GitHub's anti-recursion rule. To
-# have the release-please tag auto-publish, give release-please a PAT, or push
-# the version tag from a real account. A tag pushed by a person always fires.
+# a release) does NOT trigger the tag path — GitHub's anti-recursion rule. So
+# there are two ways in: push a v* tag from a real account, OR run the workflow
+# manually (workflow_dispatch). For a manual run, either pick the tag in the
+# "Run workflow" ref dropdown, or pass the `tag` input to stamp the version;
+# with neither, only `latest` is published.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version to stamp/tag the image (e.g. v0.4.0). Leave empty to publish only :latest.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -39,11 +47,13 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/yaad-index/darbaan
-          # The tag drives the version; metadata-action reads it from the ref.
+          # On a tag push the version comes from the ref; on a manual run the
+          # `tag` input overrides it (empty input falls back to the ref).
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=semver,pattern={{version}},value=${{ inputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
+            # Don't move :latest onto a pre-release (e.g. v0.5.0-rc.1).
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') && !contains(inputs.tag, '-') }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
