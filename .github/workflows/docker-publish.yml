@@ -62,8 +62,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Stamp the binary's `version` with the git tag (e.g. v0.4.0).
+          # Stamp the binary's `version`: prefer the manual `tag` input, else
+          # fall back to the ref (the tag on a tag push). Mirrors the image-tag
+          # logic so the binary version and the image tag never disagree.
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ inputs.tag || github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
