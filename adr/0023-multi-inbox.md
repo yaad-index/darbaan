@@ -59,12 +59,15 @@ view (ADR 0021/0022) is evaluated against the SELECTed inbox's ruleset.
 
 On SMTP submit, the message's **From** selects which inbox the mail is sent
 **as/through**: it must match a configured inbox `identity`, and the mail routes out
-via **that inbox's backend**. A reply defaults to the identity of the inbox that
-**received** the original (Darbaan knows which mailbox a held/synced message belongs
-to), so "reply" stays on the right account without the agent having to restate it.
-A From that matches no configured identity is **rejected at submit** (fail-closed,
-ADR 0003 spirit) rather than silently sent from a default — sending as the wrong
-account is the failure mode to prevent.
+via **that inbox's backend**. The match is on the **RFC 5321 address-portion**
+(`local@domain`), **case-insensitive** — not full-header string-equality, so a
+display name or address casing never changes which inbox is selected. A reply
+defaults to the identity of the inbox that **received** the original
+(Darbaan knows which mailbox a held/synced message belongs to), so "reply" stays on
+the right account without the agent having to restate it. A From that matches no
+configured identity is **rejected at submit** (fail-closed, ADR 0003 spirit) rather
+than silently sent from a default — sending as the wrong account is the failure mode
+to prevent.
 
 ### Sender override at the approval gate (Change)
 
@@ -86,6 +89,13 @@ what turns on multi-inbox.
 
 ## Boundaries / non-goals
 
+- **The bounce-signing key stays global, not per-inbox.** What is per-inbox is the
+  **backend, identity, filters/visibility, sync, labels** — not
+  the DKIM **bounce-signing** trust anchor. Darbaan signs bounces (ADR 0007) with a
+  **single internal key/selector/domain**, and the bounce-spoof guard (ADR 0024)
+  verifies against that one key. Per-inbox bounce-signing selectors would break the
+  guard's verify, so inbox config carries no signing key — it is Darbaan-internal and
+  shared across all inboxes.
 - **Single-agent only (ADR 0010).** N inboxes, one agent principal seeing all of
   them. Multi-*agent* tenancy (per-agent logins, `(agent, inbox, direction)`
   permission matrix) stays deferred — this ADR must not foreclose it, so audit rows
