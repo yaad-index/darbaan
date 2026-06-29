@@ -43,26 +43,30 @@ default_visibility: visible | hidden    # single canonical key, no alias
 `visible` is the default when the key is **absent**, so every existing ADR 0021
 config keeps working unchanged.
 
-**One key, no alias.** `whitelist`/`blacklist` are kept only as the *conceptual*
-framing in this prose (whitelist = visible / default-allow; blacklist = hidden /
-default-deny); they are **not** config surface. A `mode: whitelist|blacklist` alias
-was considered and rejected: it adds parsing complexity, and "a *blacklisted* inbox
-*shows* on match" is exactly the inversion that misleads a future reader.
-`visible|hidden` says what it does.
+**One key, no alias.** The plain-language reading of `visible`/`hidden` is
+**default-allow** / **default-deny** — that is what the no-match default does. A
+`mode: whitelist|blacklist` alias was **considered and rejected**: it adds parsing
+complexity and is consistently backwards from common meaning — under a "blacklist"
+inbox a *matching* rule gets **shown** (opposite of "blacklisted items are
+blocked"), and under "whitelist" a match gets **hidden**. `visible|hidden` already
+names the exact thing being configured, so no alias is carried. (Historical note
+only: the disposition was discussed in whitelist/blacklist terms; if an alias is
+ever wanted for familiarity, `mode: default-allow|default-deny` is the unambiguous
+spelling — never `whitelist|blacklist`.)
 
 ### Semantics
 
 ```
-default_visibility: visible  (whitelist) — no match -> SHOW ; bare-rule match -> HIDE
-default_visibility: hidden   (blacklist) — no match -> HIDE ; bare-rule match -> SHOW
+default_visibility: visible  (default-allow) — no match -> SHOW ; bare-rule match -> HIDE
+default_visibility: hidden   (default-deny)  — no match -> HIDE ; bare-rule match -> SHOW
 ```
 
 A **bare rule** (no `action:`) takes the **inverse of the default disposition** — a
 match flips visibility. The filter syntax (match fields, operators) is **identical
 in both modes**; only the inbox-level disposition changes what a match means and
-what the default is. The two dispositions map directly to the
-two motivating inboxes: *one blacklisted showing only label `x`; another
-whitelisted hiding only `a@b.com`* (see Examples).
+what the default is. The two dispositions map directly to the two motivating
+inboxes: *one default-deny showing only label `x`; another default-allow hiding
+only `a@b.com`* (see Examples).
 
 ### `hold-for-human` stays explicit
 
@@ -82,31 +86,47 @@ action always wins over the mode-implied one. So:
 at **compile/load** (`internal/filter/load.go`):
 
 1. Parse `default_visibility` → set `Filter.def` to `Allow` (visible) or `Hide`
-   (hidden). Reject specifying both `default_visibility` and the legacy `default:`
-   with conflicting values; if only legacy `default:` is present, honor it
-   (back-compat).
+   (hidden).
 2. Allow `ruleConfig.Action` to be **empty**; when empty, fill it with the inverse
    of the resolved default (`visible`→`Hide`, `hidden`→`Allow`). A non-empty action
    is parsed and used as today.
 
+**Legacy `default:` coexistence (back-compat, precise).** `default_visibility` and
+the legacy `default:` action (ADR 0008/0021) name the same no-match default, so:
+- only **legacy `default:`** present → honor it (existing configs unchanged);
+- **both present and agreeing** (`default: allow` + `default_visibility: visible`,
+  or `default: hide` + `... hidden`) → **accepted** (synonyms; not an error);
+- **both present and contradicting** (`default: allow` + `default_visibility:
+  hidden`, etc.) → **rejected** at load, fail-fast. Only a genuine contradiction is
+  an error — agreement is fine.
+
 No change to match evaluation, the store, or the read face.
+
+### Resolved-rule visibility (`filter explain`) — in scope
+
+A bare rule is opaque to a reader who doesn't know the inbox disposition, so the
+safety net ships **with** this change, not as a follow-up: at load time each rule
+records its **resolved** action and whether that action was **explicit** or
+**implied** by `default_visibility`, and a `filter explain` dry-run prints the
+default disposition plus a per-rule table (`#`, match, resolved action, source).
+This makes the bare-rule flip auditable without starting `serve` or reading mail.
 
 ## Examples
 
-**Inbox 1 — personal, blacklist (default-deny), surface only label `x`:**
+**Inbox 1 — personal, default-deny, surface only label `x`:**
 
 ```yaml
-default_visibility: hidden        # default-deny (the "blacklist" disposition)
+default_visibility: hidden        # default-deny
 rules:
   - match:
       - {field: label, op: equals, value: x}
     # no action -> SHOW (the flip): only label-x mail reaches the agent
 ```
 
-**Inbox 2 — assistant, whitelist (default-allow), hide one sender:**
+**Inbox 2 — assistant, default-allow, hide one sender:**
 
 ```yaml
-default_visibility: visible       # default-allow (the "whitelist" disposition; also the implicit default)
+default_visibility: visible       # default-allow (also the implicit default)
 rules:
   - match:
       - {field: from, op: equals, value: a@b.com}
@@ -120,8 +140,8 @@ rules:
   for **N inboxes in one Darbaan** is ADR 0023 (multi-inbox), which realizes ADR
   0010; this ADR is its prerequisite.
 - **No new match capability.** Label matching already exists (ADR 0020/0021); the
-  blacklist-by-label example relies on it and needs nothing new. Body/text matching
-  and redaction remain deferred (ADR 0008/0021).
+  default-deny-by-label example relies on it and needs nothing new. Body/text
+  matching and redaction remain deferred (ADR 0008/0021).
 - **Not containment.** Inbound visibility is privacy/noise control, not injection
   defense — the outbound trap (ADR 0003) remains the containment boundary.
 
@@ -140,7 +160,5 @@ rules:
 
 - ADR 0023 multi-inbox: scope `{default_visibility, rules}` per inbox + per-inbox
   backend; collapse the two current single-mailbox deployments into one.
-- Config validation message quality: a bare rule under each mode should be
-  explainable in `--explain`/dry-run output (which action it resolved to and why).
 
 Relates to ADR 0003, 0008, 0010, 0020, 0021.
