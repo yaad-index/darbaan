@@ -25,10 +25,15 @@ type Inbox struct {
 	Identity string  `yaml:"identity"` // the From/envelope identity Darbaan sends as for this inbox
 	Backend  Backend `yaml:"backend"`
 
-	// The per-inbox filter policy unit (ADR 0021/0022). Captured as raw YAML so it
-	// compiles through the existing filter engine without re-exporting its config.
+	// The per-inbox filter policy unit (ADR 0021/0022): EITHER inline
+	// default_visibility + rules (captured as raw YAML so it compiles through the
+	// existing filter engine without re-exporting its config), OR a filter_file
+	// path to a YAML rules file. The two are mutually exclusive (a fail-fast config
+	// error if both are set). filter_file eases collapsing an existing path-based
+	// deployment into an inboxes: entry (ADR 0023).
 	DefaultVisibility string    `yaml:"default_visibility"`
 	Rules             yaml.Node `yaml:"rules"`
+	FilterFile        string    `yaml:"filter_file"`
 }
 
 // Backend is an inbox's upstream account coordinates (ADR 0009). Secrets
@@ -94,8 +99,9 @@ func Validate(inboxes []Inbox) error {
 	return nil
 }
 
-// Filter compiles the inbox's {default_visibility, rules} policy unit (ADR
-// 0021/0022) via the shared filter engine. An inbox with neither key yields a
+// Filter compiles the inbox's filter (ADR 0021/0022): from the filter_file path
+// if set, else from the inline {default_visibility, rules}. The two are mutually
+// exclusive — both set is a config error. An inbox with neither yields a
 // pass-through (default-allow) filter.
 func (in Inbox) Filter() (*filter.Filter, error) {
 	doc := map[string]any{}
@@ -104,6 +110,12 @@ func (in Inbox) Filter() (*filter.Filter, error) {
 	}
 	if !in.Rules.IsZero() {
 		doc["rules"] = &in.Rules
+	}
+	if in.FilterFile != "" {
+		if len(doc) > 0 {
+			return nil, fmt.Errorf("filter_file and inline default_visibility/rules are mutually exclusive")
+		}
+		return filter.Load(in.FilterFile)
 	}
 	if len(doc) == 0 {
 		return filter.Compile(nil)
