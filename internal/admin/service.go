@@ -16,6 +16,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/approver"
 	"github.com/yaad-index/darbaan/internal/backend"
 	"github.com/yaad-index/darbaan/internal/bounce"
+	"github.com/yaad-index/darbaan/internal/bounceguard"
 	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/policy"
@@ -29,14 +30,16 @@ type Signer interface {
 
 // Service runs the approval orchestration against the stores serve owns.
 type Service struct {
-	store  sluice.MessageStore
-	inbox  inbound.InboundStore
-	sender backend.Sender
-	signer Signer
-	router *policy.Router
-	domain string
-	filter *filter.Filter // inbound filter, for the hold-for-human queue (ADR 0021)
-	owner  string         // the agent whose inbound mailbox the holds belong to
+	store     sluice.MessageStore
+	inbox     inbound.InboundStore
+	sender    backend.Sender
+	signer    Signer
+	router    *policy.Router
+	domain    string
+	filter    *filter.Filter     // inbound filter, for the hold-for-human queue (ADR 0021)
+	owner     string             // the agent whose inbound mailbox the holds belong to
+	guard     *bounceguard.Guard // inbound bounce-spoof guard (ADR 0024; nil = off)
+	holdSpoof bool               // on_spoof=hold-for-human → spoofs join the held queue
 }
 
 // NewService wires the approval service. inbox and signer may be nil only when
@@ -47,15 +50,16 @@ func NewService(store sluice.MessageStore, inbox inbound.InboundStore, sender ba
 }
 
 // SetInboundHolds wires the inbound hold-for-human queue (ADR 0021): the filter
-// that decides which synced messages are held, and the agent (owner) they belong
-// to. Without it, HeldList is empty.
-func (s *Service) SetInboundHolds(flt *filter.Filter, owner string) {
-	s.filter, s.owner = flt, owner
+// that decides which synced messages are held, the agent (owner) they belong to,
+// and the bounce-spoof guard (ADR 0024). When the guard is set with holdSpoof,
+// spoof candidates also join the held queue. Without it, HeldList is empty.
+func (s *Service) SetInboundHolds(flt *filter.Filter, owner string, guard *bounceguard.Guard, holdSpoof bool) {
+	s.filter, s.owner, s.guard, s.holdSpoof = flt, owner, guard, holdSpoof
 }
 
-// HeldList returns the inbound messages held for a human decision (a hold-rule
-// match with no decision yet, ADR 0021) — the inbound mirror of the outbound
-// List.
+// HeldList returns the inbound messages held for a human decision with no
+// decision yet — a hold-rule match (ADR 0021) or, under on_spoof=hold-for-human,
+// a bounce-spoof candidate (ADR 0024). The inbound mirror of the outbound List.
 func (s *Service) HeldList() ([]inbound.Message, error) {
 	if s.inbox == nil {
 		return nil, nil
@@ -67,11 +71,46 @@ func (s *Service) HeldList() ([]inbound.Message, error) {
 	now := time.Now()
 	var held []inbound.Message
 	for _, m := range msgs {
-		if s.filter.Decide(m, now) == filter.Hold && m.HoldDecision == "" {
+		if m.HoldDecision != "" {
+			continue // already decided
+		}
+		if s.filter.Decide(m, now) == filter.Hold || s.guardHoldsSpoof(m) {
 			held = append(held, m)
 		}
 	}
 	return held, nil
+}
+
+// guardHoldsSpoof reports whether m is a bounce-spoof candidate routed to the
+// held queue (on_spoof=hold-for-human, ADR 0024). False when the guard is off or
+// on_spoof=hide (hidden spoofs aren't a human-decision queue item).
+func (s *Service) guardHoldsSpoof(m inbound.Message) bool {
+	if s.guard == nil || !s.holdSpoof {
+		return false
+	}
+	spoof, err := s.guard.Verdict(envelopeFromLocals(m), m.Raw, func() ([]byte, error) {
+		fm, e := s.inbox.Get(s.owner, m.ID)
+		return fm.Raw, e
+	})
+	if err != nil {
+		// fail-open: a transient fetch error must not surface non-bounces; logged
+		// at the read face where the same verdict runs.
+		return false
+	}
+	return spoof
+}
+
+// envelopeFromLocals returns the local-parts of a message's envelope From
+// addresses — the metadata-cheap input to the guard's From-precheck (ADR 0024).
+func envelopeFromLocals(m inbound.Message) []string {
+	if m.Envelope == nil {
+		return nil
+	}
+	out := make([]string, 0, len(m.Envelope.From))
+	for _, a := range m.Envelope.From {
+		out = append(out, a.Mailbox)
+	}
+	return out
 }
 
 // ExposeHeld approves a held message for the agent to see (ADR 0021).

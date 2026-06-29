@@ -18,6 +18,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/admin"
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
+	"github.com/yaad-index/darbaan/internal/bounceguard"
 	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/policy"
@@ -223,7 +224,7 @@ func TestInboundHoldQueue(t *testing.T) {
 	svc := admin.NewService(q, inbox, backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
 	flt, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]"))
 	require.NoError(t, err)
-	svc.SetInboundHolds(flt, "agent")
+	svc.SetInboundHolds(flt, "agent", nil, false)
 
 	_, _, err = inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1}) // allowed
 	require.NoError(t, err)
@@ -246,6 +247,47 @@ func TestInboundHoldQueue(t *testing.T) {
 	_, held2, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 3, UIDValidity: 1, Keywords: []string{"review"}})
 	require.NoError(t, err)
 	_, err = svc.DropHeld(held2.ID)
+	require.NoError(t, err)
+	list, err = svc.HeldList()
+	require.NoError(t, err)
+	assert.Empty(t, list)
+}
+
+// Under on_spoof=hold-for-human, a bounce-spoof candidate joins the held queue
+// (ADR 0024) alongside filter holds; ordinary mail does not.
+func TestInboundBounceGuardHold(t *testing.T) {
+	q, _ := seedStore(t)
+	inbox := newInbound(t)
+	svc := admin.NewService(q, inbox, backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	passthrough, err := filter.Compile([]byte("")) // default-allow, no rules: only the guard holds
+	require.NoError(t, err)
+	// Verifier says "no valid Darbaan signature" → a bounce-shaped message is a spoof.
+	guard := bounceguard.New(func([]byte) (bool, error) { return false, nil })
+	svc.SetInboundHolds(passthrough, "agent", guard, true /* hold-for-human */)
+
+	// A bounce-shaped message from MAILER-DAEMON (envelope From hits the precheck;
+	// the stored raw is bounce-shaped) → spoof → held.
+	_, spoof, err := inbox.AddSynced(inbound.Delivery{
+		Owner: "agent", UpstreamUID: 1, UIDValidity: 1,
+		Envelope: &inbound.Envelope{From: []inbound.Address{{Mailbox: "MAILER-DAEMON", Host: "mail.example"}}},
+		Raw:      []byte("From: MAILER-DAEMON@mail.example\r\nSubject: Returned mail\r\n\r\nbounced\r\n"),
+	})
+	require.NoError(t, err)
+	// Ordinary mail (non-candidate From) → no fetch, not a spoof, not held.
+	_, _, err = inbox.AddSynced(inbound.Delivery{
+		Owner: "agent", UpstreamUID: 2, UIDValidity: 1,
+		Envelope: &inbound.Envelope{From: []inbound.Address{{Mailbox: "alice", Host: "example.com"}}},
+		Raw:      []byte("From: alice@example.com\r\nSubject: lunch?\r\n\r\nhey\r\n"),
+	})
+	require.NoError(t, err)
+
+	list, err := svc.HeldList()
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, spoof.ID, list[0].ID)
+
+	// Dropping decides it → off the held list.
+	_, err = svc.DropHeld(spoof.ID)
 	require.NoError(t, err)
 	list, err = svc.HeldList()
 	require.NoError(t, err)

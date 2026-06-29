@@ -17,6 +17,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/emersion/go-message/textproto"
 
+	"github.com/yaad-index/darbaan/internal/bounceguard"
 	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/inbound"
 )
@@ -59,7 +60,7 @@ type IMAPServer struct {
 // content on demand; if nil it defaults to reading straight from the store
 // (no upstream — bounce-only / sync-disabled deployments have no pending
 // records).
-func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter, flt *filter.Filter) (*IMAPServer, error) {
+func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter, flt *filter.Filter, guard *bounceguard.Guard, holdSpoof bool) (*IMAPServer, error) {
 	if cfg.TLSConfig == nil && !cfg.AllowInsecure {
 		return nil, errors.New("listener: IMAP TLS required (set TLSConfig, or AllowInsecure for local testing)")
 	}
@@ -68,7 +69,7 @@ func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundS
 	}
 	srv := imapserver.New(&imapserver.Options{
 		NewSession: func(_ *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return &imapSession{cred: cred, store: store, fetch: fetch, writeKeywords: writeKeywords, filter: flt}, nil, nil
+			return &imapSession{cred: cred, store: store, fetch: fetch, writeKeywords: writeKeywords, filter: flt, guard: guard, holdSpoof: holdSpoof}, nil, nil
 		},
 		TLSConfig:    cfg.TLSConfig,
 		InsecureAuth: cfg.AllowInsecure,
@@ -91,9 +92,11 @@ func (s *IMAPServer) Close() error { return s.imap.Close() }
 type imapSession struct {
 	cred          Credential
 	store         inbound.InboundStore
-	fetch         ContentFetch   // resolves message content on demand (per-FETCH)
-	writeKeywords KeywordWriter  // replicates a keyword change upstream (nil = local-only)
-	filter        *filter.Filter // serve-time inbound filter (nil = allow all; ADR 0021)
+	fetch         ContentFetch       // resolves message content on demand (per-FETCH)
+	writeKeywords KeywordWriter      // replicates a keyword change upstream (nil = local-only)
+	filter        *filter.Filter     // serve-time inbound filter (nil = allow all; ADR 0021)
+	guard         *bounceguard.Guard // inbound bounce-spoof guard, ahead of the filter (nil = off; ADR 0024)
+	holdSpoof     bool               // on_spoof=hold-for-human → held-semantics; false = hide
 	owner         string
 	authed        bool
 	selected      []inbound.Message // metadata snapshot taken at Select (no content)
@@ -110,11 +113,20 @@ func (s *imapSession) listAndFilter() (full, visible []inbound.Message, err erro
 	if err != nil {
 		return nil, nil, err
 	}
-	if s.filter == nil {
-		return full, full, nil
-	}
 	now := time.Now()
 	for _, m := range full { // new backing slice — leave full intact for UIDNEXT
+		// The bounce-spoof guard runs AHEAD of the user filter (ADR 0024): it is a
+		// security floor, so a spoof can't be surfaced by a permissive default or a
+		// broad allow rule.
+		if s.guard != nil {
+			if s.guardHides(m) {
+				continue
+			}
+		}
+		if s.filter == nil {
+			visible = append(visible, m)
+			continue
+		}
 		switch s.filter.Decide(m, now) {
 		case filter.Allow:
 			visible = append(visible, m)
@@ -127,6 +139,42 @@ func (s *imapSession) listAndFilter() (full, visible []inbound.Message, err erro
 		}
 	}
 	return full, visible, nil
+}
+
+// guardHides reports whether the bounce-spoof guard omits m from the read face.
+// A spoof under on_spoof=hide is always omitted; under on_spoof=hold-for-human it
+// is omitted until an operator exposes it (held-semantics, like a filter Hold),
+// and surfaced for decision via the admin held-list. A non-spoof returns false
+// (the user filter then applies). A guard error is logged and treated as
+// not-hiding (fail-open at the read face — the verify inside stays fail-closed).
+func (s *imapSession) guardHides(m inbound.Message) bool {
+	spoof, err := s.guard.Verdict(envelopeFromLocals(m), m.Raw, func() ([]byte, error) {
+		fm, e := s.fetch(s.owner, m.ID)
+		return fm.Raw, e
+	})
+	if err != nil {
+		log.Printf("darbaan imap: bounce-guard %s: %v", m.ID, err)
+	}
+	if !spoof {
+		return false
+	}
+	if s.holdSpoof && m.HoldDecision == inbound.HoldApproved {
+		return false // operator exposed it
+	}
+	return true
+}
+
+// envelopeFromLocals returns the local-parts of a message's envelope From
+// addresses (the metadata-cheap input to the guard's From-precheck, ADR 0024).
+func envelopeFromLocals(m inbound.Message) []string {
+	if m.Envelope == nil {
+		return nil
+	}
+	out := make([]string, 0, len(m.Envelope.From))
+	for _, a := range m.Envelope.From {
+		out = append(out, a.Mailbox)
+	}
+	return out
 }
 
 // uidNext returns the next UID, derived from the highest UID across ALL stored
