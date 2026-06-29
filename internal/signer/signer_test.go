@@ -73,6 +73,44 @@ func TestVerifyFailsOnTamper(t *testing.T) {
 	assert.Error(t, vs[0].Err) // body changed → signature no longer verifies
 }
 
+func TestVerifyOwnSignature(t *testing.T) {
+	s, err := signer.New(writeEd25519(t), "darbaan", "darbaan.test")
+	require.NoError(t, err)
+	signed, err := s.Sign([]byte("From: MAILER-DAEMON@darbaan.test\r\nSubject: x\r\n\r\nbody\r\n"))
+	require.NoError(t, err)
+
+	ok, err := s.Verify(signed)
+	require.NoError(t, err)
+	assert.True(t, ok) // our own signature verifies against our pinned key
+}
+
+func TestVerifyRejectsUnsignedTamperedAndForeign(t *testing.T) {
+	s, err := signer.New(writeEd25519(t), "darbaan", "darbaan.test")
+	require.NoError(t, err)
+
+	// unsigned: no DKIM-Signature → not trusted
+	ok, err := s.Verify([]byte("From: spoof@evil.test\r\nSubject: Returned mail\r\n\r\nfake bounce\r\n"))
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	// tampered after signing → signature no longer verifies
+	signed, err := s.Sign([]byte("From: m@darbaan.test\r\nSubject: x\r\n\r\nbody\r\n"))
+	require.NoError(t, err)
+	tampered := bytes.Replace(signed, []byte("body"), []byte("evil"), 1)
+	ok, err = s.Verify(tampered)
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	// signed by a DIFFERENT domain's key (d= not ours) → no key to check, not trusted
+	other, err := signer.New(writeEd25519(t), "darbaan", "other.test")
+	require.NoError(t, err)
+	foreign, err := other.Sign([]byte("From: m@other.test\r\nSubject: x\r\n\r\nbody\r\n"))
+	require.NoError(t, err)
+	ok, err = s.Verify(foreign)
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
 func TestPublicKeyTXTFormat(t *testing.T) {
 	s, err := signer.New(writeEd25519(t), "sel", "dom")
 	require.NoError(t, err)

@@ -78,3 +78,36 @@ func (s *Signer) Sign(raw []byte) ([]byte, error) {
 func (s *Signer) PublicKeyTXT() string {
 	return "v=DKIM1; k=ed25519; p=" + base64.StdEncoding.EncodeToString(s.pubKey)
 }
+
+// Verify reports whether raw carries a valid DKIM signature from Darbaan's own
+// bounce selector/domain — the trust check for the inbound bounce-spoof guard
+// (ADR 0024, realizing ADR 0007's quarantine). Darbaan signs its own bounces, so
+// it can verify them: the key may be pinned out-of-band rather than published in
+// DNS, so the lookup is injected and resolves ONLY Darbaan's own
+// `<selector>._domainkey.<domain>` against the in-memory public key. A signature
+// from any other domain/selector has no key to check against and does not count,
+// and a forged `d=<our domain>` signature fails because it wasn't made with our
+// key. Returns true only if some signature with d=<our domain> verifies; an
+// unsigned message returns false. err is non-nil only on malformed input, never
+// for an unverified message (that is a clean false).
+func (s *Signer) Verify(raw []byte) (bool, error) {
+	want := s.opts.Selector + "._domainkey." + s.opts.Domain
+	record := s.PublicKeyTXT()
+	vs, err := dkim.VerifyWithOptions(bytes.NewReader(raw), &dkim.VerifyOptions{
+		LookupTXT: func(domain string) ([]string, error) {
+			if domain == want {
+				return []string{record}, nil
+			}
+			return nil, nil // foreign selector/domain: no key, so its signature can't verify
+		},
+	})
+	if err != nil {
+		return false, fmt.Errorf("signer: dkim verify: %w", err)
+	}
+	for _, v := range vs {
+		if v.Err == nil && v.Domain == s.opts.Domain {
+			return true, nil
+		}
+	}
+	return false, nil
+}
