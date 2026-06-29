@@ -42,7 +42,18 @@ func startServer(t *testing.T, cfg listener.ServerConfig, q listener.Enqueuer) s
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	srv, err := listener.NewServer(cfg, testCred, q)
+	srv, err := listener.NewServer(cfg, testCred, q, nil)
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return l.Addr().String()
+}
+
+func startServerRoute(t *testing.T, cfg listener.ServerConfig, q listener.Enqueuer, route listener.Router) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv, err := listener.NewServer(cfg, testCred, q, route)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -100,6 +111,43 @@ func TestSubmitOverTLSEnqueuesOnePending(t *testing.T) {
 	assert.Equal(t, []string{"dest@example.test"}, full.Rcpt)
 }
 
+// ADR 0023: the submission face routes From to an inbox — a matched From stamps
+// the inbox on the queued message; an unmatched From with no default is refused
+// at MAIL FROM.
+func TestSubmitRoutesFromToInbox(t *testing.T) {
+	q := newSluice(t)
+	route := func(from string) (string, bool) {
+		if from == "work@company.test" {
+			return "work", true
+		}
+		return "", false // unmatched, no default → refuse
+	}
+	addr := startServerRoute(t, listener.ServerConfig{
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{selfSigned(t)}},
+	}, q, route)
+
+	c, err := smtp.DialStartTLS(addr, &tls.Config{InsecureSkipVerify: true})
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Auth(sasl.NewPlainClient("", testCred.Username, testCred.Password)))
+
+	// Matched From → the routed inbox is stamped on the queued message.
+	const raw = "From: work@company.test\r\nTo: d@x.test\r\nSubject: s\r\n\r\nbody\r\n"
+	require.NoError(t, c.SendMail("work@company.test", []string{"d@x.test"}, strings.NewReader(raw)))
+	metas, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, metas, 1)
+	full, err := q.Get(metas[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, "work", full.Inbox)
+
+	// Unmatched From with no default → refused at MAIL FROM (nothing else queued).
+	require.Error(t, c.Mail("stranger@elsewhere.test", nil))
+	metas, err = q.List()
+	require.NoError(t, err)
+	assert.Len(t, metas, 1)
+}
+
 func TestPlaintextRequiresAuth(t *testing.T) {
 	q := newSluice(t)
 	addr := startServer(t, listener.ServerConfig{AllowInsecure: true}, q)
@@ -129,9 +177,9 @@ func TestBadCredentialRejected(t *testing.T) {
 
 func TestNewServerRequiresTLS(t *testing.T) {
 	q := newSluice(t)
-	_, err := listener.NewServer(listener.ServerConfig{}, testCred, q)
+	_, err := listener.NewServer(listener.ServerConfig{}, testCred, q, nil)
 	require.Error(t, err)
 
-	_, err = listener.NewServer(listener.ServerConfig{AllowInsecure: true}, testCred, q)
+	_, err = listener.NewServer(listener.ServerConfig{AllowInsecure: true}, testCred, q, nil)
 	require.NoError(t, err)
 }

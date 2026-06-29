@@ -128,6 +128,29 @@ func EnvPrefix(name string) string {
 	return b.String()
 }
 
+// Route resolves which inbox an outbound submission's From belongs to (ADR 0023):
+// the inbox whose Identity equals from (exact RFC5321 address match, case-
+// insensitive); else the inbox named defaultName if one is configured (catch-all,
+// From not rewritten — preserves N=1/legacy behavior); else ("", false), which the
+// caller rejects at submit. So N=1 (an implicit default) accepts any From, and a
+// multi-inbox config with no default rejects an unmatched From.
+func Route(inboxes []Inbox, from, defaultName string) (string, bool) {
+	want := strings.ToLower(strings.TrimSpace(from))
+	hasDefault := false
+	for _, in := range inboxes {
+		if in.Name == defaultName {
+			hasDefault = true
+		}
+		if id := strings.ToLower(strings.TrimSpace(in.Identity)); id != "" && id == want {
+			return in.Name, true
+		}
+	}
+	if hasDefault {
+		return defaultName, true
+	}
+	return "", false
+}
+
 // Filter compiles the inbox's filter (ADR 0021/0022): from the filter_file path
 // if set, else from the inline {default_visibility, rules}. The two are mutually
 // exclusive — both set is a config error. An inbox with neither yields a

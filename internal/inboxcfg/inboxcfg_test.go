@@ -38,6 +38,32 @@ func TestValidateEnvPrefixCollision(t *testing.T) {
 	require.NoError(t, inboxcfg.Validate([]inboxcfg.Inbox{{Name: "work"}, {Name: "personal"}}))
 }
 
+func TestRoute(t *testing.T) {
+	inboxes := []inboxcfg.Inbox{
+		{Name: "work", Identity: "agent@company.example"},
+		{Name: "personal", Identity: "me@personal.example"},
+		{Name: "default", Identity: "agent@darbaan.example"},
+	}
+	mustRoute := func(from, want string) {
+		t.Helper()
+		got, ok := inboxcfg.Route(inboxes, from, "default")
+		require.True(t, ok, from)
+		assert.Equal(t, want, got, from)
+	}
+	mustRoute("agent@company.example", "work")     // exact identity match
+	mustRoute("ME@Personal.Example", "personal")   // case-insensitive
+	mustRoute("agent@darbaan.example", "default")  // matches the default's own identity
+	mustRoute("random@nowhere.example", "default") // unmatched → default catch-all
+
+	// No "default" inbox configured → an unmatched From is rejected.
+	noDefault := []inboxcfg.Inbox{{Name: "work", Identity: "agent@company.example"}}
+	_, ok := inboxcfg.Route(noDefault, "random@nowhere.example", "default")
+	assert.False(t, ok)
+	got, ok := inboxcfg.Route(noDefault, "agent@company.example", "default") // matched still routes
+	require.True(t, ok)
+	assert.Equal(t, "work", got)
+}
+
 func TestInboxFilterFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "f.yaml")
 	require.NoError(t, os.WriteFile(path,

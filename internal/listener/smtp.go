@@ -29,16 +29,32 @@ type Enqueuer interface {
 	Enqueue(sluice.Submission) (sluice.Message, error)
 }
 
+// Router resolves which inbox an authenticated submission's From routes to (ADR
+// 0023), reporting false when the From matches no inbox and there is no default —
+// the submission is then refused at MAIL FROM. nil routes every From to the
+// default inbox (single-inbox / back-compat).
+type Router func(from string) (inbox string, ok bool)
+
 // Backend is the go-smtp backend for the submission face.
 type Backend struct {
 	cred  Credential
 	queue Enqueuer
+	route Router
 }
 
-// NewBackend builds a Backend that authenticates against cred and traps every
-// accepted submission into queue.
-func NewBackend(cred Credential, queue Enqueuer) *Backend {
-	return &Backend{cred: cred, queue: queue}
+// NewBackend builds a Backend that authenticates against cred, routes each
+// submission's From to an inbox via route (nil = always the default inbox), and
+// traps every accepted submission into queue.
+func NewBackend(cred Credential, queue Enqueuer, route Router) *Backend {
+	return &Backend{cred: cred, queue: queue, route: route}
+}
+
+// resolveInbox routes a From to its inbox (ADR 0023); ok=false means refuse.
+func (b *Backend) resolveInbox(from string) (string, bool) {
+	if b.route == nil {
+		return "", true // back-compat: any From → default inbox
+	}
+	return b.route(from)
 }
 
 // NewSession starts a new SMTP session.
@@ -51,6 +67,7 @@ type session struct {
 	backend *Backend
 	authed  bool
 	from    string
+	inbox   string // the inbox From routed to (ADR 0023)
 	rcpt    []string
 }
 
@@ -74,7 +91,18 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 	if !s.authed {
 		return smtp.ErrAuthRequired
 	}
+	// Route the From to an inbox (ADR 0023); refuse a From that matches no inbox
+	// and has no default catch-all, fail-fast at MAIL FROM.
+	inbox, ok := s.backend.resolveInbox(from)
+	if !ok {
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+			Message:      "sender address is not configured for any inbox",
+		}
+	}
 	s.from = from
+	s.inbox = inbox
 	return nil
 }
 
@@ -99,6 +127,7 @@ func (s *session) Data(r io.Reader) error {
 	}
 	if _, err := s.backend.queue.Enqueue(sluice.Submission{
 		Agent: s.backend.cred.Username,
+		Inbox: s.inbox,
 		From:  s.from,
 		Rcpt:  s.rcpt,
 		Raw:   raw,
@@ -110,6 +139,7 @@ func (s *session) Data(r io.Reader) error {
 
 func (s *session) Reset() {
 	s.from = ""
+	s.inbox = ""
 	s.rcpt = nil
 }
 
@@ -136,12 +166,13 @@ type Server struct {
 
 // NewServer wires the submission face. TLS is required: NewServer refuses to
 // start a plaintext listener that would carry credentials in the clear unless
-// AllowInsecure is explicitly set (local/testing).
-func NewServer(cfg ServerConfig, cred Credential, queue Enqueuer) (*Server, error) {
+// AllowInsecure is explicitly set (local/testing). route maps each submission's
+// From to an inbox (ADR 0023; nil = always the default inbox).
+func NewServer(cfg ServerConfig, cred Credential, queue Enqueuer, route Router) (*Server, error) {
 	if cfg.TLSConfig == nil && !cfg.AllowInsecure {
 		return nil, errors.New("listener: TLS required (set TLSConfig, or AllowInsecure for local testing)")
 	}
-	srv := smtp.NewServer(NewBackend(cred, queue))
+	srv := smtp.NewServer(NewBackend(cred, queue, route))
 	srv.Addr = cfg.Addr
 	srv.Domain = cfg.Domain
 	srv.TLSConfig = cfg.TLSConfig
