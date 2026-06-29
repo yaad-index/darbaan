@@ -14,6 +14,30 @@ import (
 	"github.com/yaad-index/darbaan/internal/inboxcfg"
 )
 
+func TestEnvPrefix(t *testing.T) {
+	cases := map[string]string{
+		"work":     "WORK",
+		"Work":     "WORK", // case-folded
+		"personal": "PERSONAL",
+		"team-1":   "TEAM_1", // hyphen → _
+		"team.1":   "TEAM_1", // dot → _ (collides with team-1; Validate rejects)
+		"a b":      "A_B",    // space → _
+		"café":     "CAF_",   // non-ASCII rune → _
+		"default":  "DEFAULT",
+		"":         "",
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, inboxcfg.EnvPrefix(in), in)
+	}
+}
+
+func TestValidateEnvPrefixCollision(t *testing.T) {
+	// Distinct names that mangle to the same env prefix are rejected (get-it-right-once).
+	require.Error(t, inboxcfg.Validate([]inboxcfg.Inbox{{Name: "work-1"}, {Name: "work.1"}}))
+	// Distinct prefixes are fine.
+	require.NoError(t, inboxcfg.Validate([]inboxcfg.Inbox{{Name: "work"}, {Name: "personal"}}))
+}
+
 func TestInboxFilterFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "f.yaml")
 	require.NoError(t, os.WriteFile(path,

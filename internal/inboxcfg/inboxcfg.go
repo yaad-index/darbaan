@@ -83,6 +83,7 @@ func Validate(inboxes []Inbox) error {
 		return fmt.Errorf("inboxcfg: no inboxes configured")
 	}
 	seen := make(map[string]bool, len(inboxes))
+	envSeen := make(map[string]string, len(inboxes)) // EnvPrefix → first inbox name
 	for i, in := range inboxes {
 		name := strings.TrimSpace(in.Name)
 		if name == "" {
@@ -92,11 +93,39 @@ func Validate(inboxes []Inbox) error {
 			return fmt.Errorf("inboxcfg: duplicate inbox name %q", name)
 		}
 		seen[name] = true
+		// The per-inbox secret env binding is many-to-one (e.g. "work-1" and
+		// "work.1" both mangle to WORK_1), so a collision would silently share
+		// secrets — reject it at load (ADR 0023).
+		ep := EnvPrefix(name)
+		if other, dup := envSeen[ep]; dup {
+			return fmt.Errorf("inboxcfg: inboxes %q and %q map to the same secret env prefix %q", other, name, ep)
+		}
+		envSeen[ep] = name
 		if _, err := in.Filter(); err != nil {
 			return fmt.Errorf("inboxcfg: inbox %q: %w", name, err)
 		}
 	}
 	return nil
+}
+
+// EnvPrefix mangles an inbox name into the infix of its per-inbox secret env vars
+// (ADR 0012/0023): uppercased, with every rune outside [A-Z0-9] replaced by '_'
+// (e.g. "work" → "WORK", "team-1" → "TEAM_1"). It is the SINGLE source of truth
+// for the mangle — both the runtime secret lookup
+// (DARBAAN_INBOX_<EnvPrefix>_IMAP_PASSWORD / _SMTP_PASSWORD) and Validate's
+// collision guard call it, so they can never diverge. The mangle is many-to-one,
+// which is why Validate rejects names that collide on it.
+func EnvPrefix(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range strings.ToUpper(name) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 // Filter compiles the inbox's filter (ADR 0021/0022): from the filter_file path
