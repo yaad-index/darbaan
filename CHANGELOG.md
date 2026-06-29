@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.5.0](https://github.com/yaad-index/darbaan/compare/v0.4.0...v0.5.0) (2026-06-29)
+
+
+### Features
+
+* **admin:** aggregate held-list across inboxes (ADR 0023 3c-iii) ([#136](https://github.com/yaad-index/darbaan/issues/136)) ([388dfb9](https://github.com/yaad-index/darbaan/commit/388dfb9b0afa70f404a6b894b4e4b3cf5c873fdc))
+* **bounceguard:** bounce-shape detection + spoof verdict (ADR 0024) ([#124](https://github.com/yaad-index/darbaan/issues/124)) ([bce92ce](https://github.com/yaad-index/darbaan/commit/bce92ce3eb411353af784e9ad7520f8f1dc9e923))
+* **filter:** per-inbox default_visibility (ADR 0022) ([#116](https://github.com/yaad-index/darbaan/issues/116)) ([4d52109](https://github.com/yaad-index/darbaan/commit/4d5210944fffc05e40720d60c41331ad230d8cb8))
+* **guard:** wire bounce-spoof guard into read face + held-list + config (ADR 0024) ([#126](https://github.com/yaad-index/darbaan/issues/126)) ([03c2fa9](https://github.com/yaad-index/darbaan/commit/03c2fa9f2a8f74c6c67c2f4d7b97f251b00fbb11))
+* **imapsync:** sync writes per-inbox (ADR 0023 2b) ([#131](https://github.com/yaad-index/darbaan/issues/131)) ([ca3810d](https://github.com/yaad-index/darbaan/commit/ca3810db98edeae835d661d40f7a596fce1fb035))
+* **inbound:** thread (owner,inbox) through the store + synced-index (ADR 0023 2a) ([#129](https://github.com/yaad-index/darbaan/issues/129)) ([3dca26d](https://github.com/yaad-index/darbaan/commit/3dca26d59d1c00073fafcd4fb3eb06c62cd00eeb))
+* **inboxcfg:** EnvPrefix mangle + per-inbox secret-env collision guard (ADR 0023 3c-i) ([#134](https://github.com/yaad-index/darbaan/issues/134)) ([d4d7190](https://github.com/yaad-index/darbaan/commit/d4d719058102ee86da844eee161549471f4da6cc))
+* **inboxcfg:** inbox config schema + implicit-default resolve (ADR 0023) ([#128](https://github.com/yaad-index/darbaan/issues/128)) ([d490723](https://github.com/yaad-index/darbaan/commit/d490723ad9ae4e54eaf1e1f2b9bec1856c518983))
+* **listener:** read face serves N mailboxes per inbox (ADR 0023 3b) ([#133](https://github.com/yaad-index/darbaan/issues/133)) ([e08d07d](https://github.com/yaad-index/darbaan/commit/e08d07d3a243e0e187081f24cbd9581d7e2973b3))
+* **outbound:** per-inbox senders + send dispatch by inbox (ADR 0023 4b) ([#138](https://github.com/yaad-index/darbaan/issues/138)) ([e14678a](https://github.com/yaad-index/darbaan/commit/e14678a0366550843f8fcaefe7b35ac2f6d0fc8a))
+* **outbound:** route submission From→inbox, reject unmatched (ADR 0023 4a) ([#137](https://github.com/yaad-index/darbaan/issues/137)) ([7c752f7](https://github.com/yaad-index/darbaan/commit/7c752f7b64ac934b8f23984ab9a75f37547b22fb))
+* **serve:** consume inboxcfg → per-inbox filter map + filter_file (ADR 0023 3a) ([#132](https://github.com/yaad-index/darbaan/issues/132)) ([9244237](https://github.com/yaad-index/darbaan/commit/9244237591953f6b33e6a24a8a94ddd9e723b1ca))
+* **serve:** N syncers per inbox + per-inbox secret/fetch dispatch (ADR 0023 3c-ii) ([#135](https://github.com/yaad-index/darbaan/issues/135)) ([19a2c00](https://github.com/yaad-index/darbaan/commit/19a2c00094f7e27c29846552f4374357d1a4f845))
+* **signer:** add Verify for the inbound bounce-spoof trust check (ADR 0024) ([#122](https://github.com/yaad-index/darbaan/issues/122)) ([8e60eb2](https://github.com/yaad-index/darbaan/commit/8e60eb2b9cfddc006d41c353269180e52ee12453))
+* **telegram:** attach full message body when it overflows the inline cap (ADR 0025) ([#118](https://github.com/yaad-index/darbaan/issues/118)) ([9881aad](https://github.com/yaad-index/darbaan/commit/9881aad496e215b4143a28b4692b1ed13ae97821))
+
 ## [0.4.0](https://github.com/yaad-index/darbaan/compare/v0.3.0...v0.4.0) (2026-06-27)
 
 
