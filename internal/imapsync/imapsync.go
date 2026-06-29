@@ -253,8 +253,8 @@ func uidSetOf(uids []imap.UID) imap.UIDSet {
 // errors cleanly when the mailbox UIDVALIDITY has changed (the stored UID is
 // stale) or the message is gone upstream, so the read face can surface a
 // transient error rather than empty content.
-func (s *Syncer) FetchContent(owner, id string) (inbound.Message, error) {
-	m, err := s.store.Get(owner, s.inbox, id)
+func (s *Syncer) FetchContent(owner, inbox, id string) (inbound.Message, error) {
+	m, err := s.store.Get(owner, inbox, id)
 	if err != nil {
 		return inbound.Message{}, err
 	}
@@ -303,7 +303,7 @@ func (s *Syncer) FetchContent(owner, id string) (inbound.Message, error) {
 	if raw == nil {
 		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: upstream uid %d not found", id, m.UpstreamUID)
 	}
-	return s.store.SetContent(owner, s.inbox, id, raw)
+	return s.store.SetContent(owner, inbox, id, raw)
 }
 
 // WriteKeywords replicates a message's keyword set to the upstream backend over a
@@ -312,11 +312,11 @@ func (s *Syncer) FetchContent(owner, id string) (inbound.Message, error) {
 // current keywords and applying the +/- delta, so it is idempotent and handles
 // both additions and removals (content + delete stay read-only). The local store
 // is canonical; a failure here is returned so the caller logs + reconciles later.
-func (s *Syncer) WriteKeywords(owner, id string, add, remove []string) error {
+func (s *Syncer) WriteKeywords(owner, inbox, id string, add, remove []string) error {
 	if len(add) == 0 && len(remove) == 0 {
 		return nil
 	}
-	m, err := s.store.Get(owner, s.inbox, id)
+	m, err := s.store.Get(owner, inbox, id)
 	if err != nil {
 		return err
 	}
@@ -376,7 +376,7 @@ func (s *Syncer) reconcileKeywords() {
 		// failed immediate label REMOVE is NOT reconciled (the label lingers
 		// upstream). Deliberate — acceptable for the add-dominated labeling flow;
 		// the deferred convergent read-side / go-imap upstream swap cleans it up.
-		if err := s.WriteKeywords(s.owner, m.ID, m.Keywords, nil); err != nil {
+		if err := s.WriteKeywords(s.owner, s.inbox, m.ID, m.Keywords, nil); err != nil {
 			log.Printf("darbaan: keyword reconcile %s deferred: %v", m.ID, err)
 			continue
 		}
