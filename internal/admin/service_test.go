@@ -224,7 +224,7 @@ func TestInboundHoldQueue(t *testing.T) {
 	svc := admin.NewService(q, inbox, backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
 	flt, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]"))
 	require.NoError(t, err)
-	svc.SetInboundHolds(flt, "agent", nil, false)
+	svc.SetInboundHolds(map[string]*filter.Filter{inbound.DefaultInbox: flt}, "agent", nil, false)
 
 	_, _, err = inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1}) // allowed
 	require.NoError(t, err)
@@ -253,6 +253,44 @@ func TestInboundHoldQueue(t *testing.T) {
 	assert.Empty(t, list)
 }
 
+// The held queue aggregates across inboxes (ADR 0023), each evaluated by its own
+// filter; expose/drop resolves the inbox from the store-wide-unique id.
+func TestInboundHoldQueueMultiInbox(t *testing.T) {
+	q, _ := seedStore(t)
+	inbox := newInbound(t)
+	svc := admin.NewService(q, inbox, backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	hold, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]"))
+	require.NoError(t, err)
+	svc.SetInboundHolds(map[string]*filter.Filter{"work": hold, "personal": hold}, "agent", nil, false)
+
+	_, workHeld, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", Inbox: "work", UpstreamUID: 1, UIDValidity: 1, Keywords: []string{"review"}})
+	require.NoError(t, err)
+	_, persHeld, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", Inbox: "personal", UpstreamUID: 1, UIDValidity: 1, Keywords: []string{"review"}})
+	require.NoError(t, err)
+	// Same upstream coords but different inbox → distinct records (ADR 0023).
+	require.NotEqual(t, workHeld.ID, persHeld.ID)
+	// An allowed message in work (no hold label) is not held.
+	_, _, err = inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", Inbox: "work", UpstreamUID: 2, UIDValidity: 1})
+	require.NoError(t, err)
+
+	list, err := svc.HeldList()
+	require.NoError(t, err)
+	require.Len(t, list, 2) // aggregated across both inboxes
+
+	// ExposeHeld resolves the personal inbox from the id; work's hold remains.
+	_, err = svc.ExposeHeld(persHeld.ID)
+	require.NoError(t, err)
+	list, err = svc.HeldList()
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, workHeld.ID, list[0].ID)
+	assert.Equal(t, "work", list[0].Inbox)
+
+	// An unknown id resolves to no inbox.
+	_, err = svc.ExposeHeld("99999")
+	require.ErrorIs(t, err, inbound.ErrNotFound)
+}
+
 // Under on_spoof=hold-for-human, a bounce-spoof candidate joins the held queue
 // (ADR 0024) alongside filter holds; ordinary mail does not.
 func TestInboundBounceGuardHold(t *testing.T) {
@@ -263,7 +301,7 @@ func TestInboundBounceGuardHold(t *testing.T) {
 	require.NoError(t, err)
 	// Verifier says "no valid Darbaan signature" → a bounce-shaped message is a spoof.
 	guard := bounceguard.New(func([]byte) (bool, error) { return false, nil })
-	svc.SetInboundHolds(passthrough, "agent", guard, true /* hold-for-human */)
+	svc.SetInboundHolds(map[string]*filter.Filter{inbound.DefaultInbox: passthrough}, "agent", guard, true /* hold-for-human */)
 
 	// A bounce-shaped message from MAILER-DAEMON (envelope From hits the precheck;
 	// the stored raw is bounce-shaped) → spoof → held.

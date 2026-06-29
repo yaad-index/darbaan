@@ -549,7 +549,6 @@ func (*ServeCmd) Run(cli *CLI) error {
 		}
 		filters[in.Name] = f
 	}
-	flt := filters[inbound.DefaultInbox]
 
 	// One inbound syncer per inbox with an upstream (ADR 0019/0023), built before
 	// the read face so per-inbox FetchContent serves pending bodies on demand. An
@@ -573,7 +572,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 	// The admin hold-for-human queue and the read face share one filter + owner +
 	// guard (ADR 0021/0024): the read face hides held/spoof mail, the admin surface
 	// decides it.
-	svc.SetInboundHolds(flt, cli.AgentUsername, guard, holdSpoof)
+	svc.SetInboundHolds(filters, cli.AgentUsername, guard, holdSpoof)
 	imapSrv, err := listener.NewIMAPServer(listener.IMAPServerConfig{
 		Addr:          cli.IMAPAddr,
 		TLSConfig:     tlsConfig,
