@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/yaad-index/darbaan/internal/approver"
@@ -36,10 +37,10 @@ type Service struct {
 	signer    Signer
 	router    *policy.Router
 	domain    string
-	filter    *filter.Filter     // inbound filter, for the hold-for-human queue (ADR 0021)
-	owner     string             // the agent whose inbound mailbox the holds belong to
-	guard     *bounceguard.Guard // inbound bounce-spoof guard (ADR 0024; nil = off)
-	holdSpoof bool               // on_spoof=hold-for-human → spoofs join the held queue
+	filters   map[string]*filter.Filter // per-inbox filter for the hold-for-human queue (ADR 0021/0023)
+	owner     string                    // the agent whose inbound mailbox the holds belong to
+	guard     *bounceguard.Guard        // inbound bounce-spoof guard (ADR 0024; nil = off)
+	holdSpoof bool                      // on_spoof=hold-for-human → spoofs join the held queue
 }
 
 // NewService wires the approval service. inbox and signer may be nil only when
@@ -49,42 +50,59 @@ func NewService(store sluice.MessageStore, inbox inbound.InboundStore, sender ba
 	return &Service{store: store, inbox: inbox, sender: sender, signer: signer, router: router, domain: domain}
 }
 
-// SetInboundHolds wires the inbound hold-for-human queue (ADR 0021): the filter
-// that decides which synced messages are held, the agent (owner) they belong to,
-// and the bounce-spoof guard (ADR 0024). When the guard is set with holdSpoof,
-// spoof candidates also join the held queue. Without it, HeldList is empty.
-func (s *Service) SetInboundHolds(flt *filter.Filter, owner string, guard *bounceguard.Guard, holdSpoof bool) {
-	s.filter, s.owner, s.guard, s.holdSpoof = flt, owner, guard, holdSpoof
+// SetInboundHolds wires the inbound hold-for-human queue (ADR 0021/0023): the
+// per-inbox filters that decide which synced messages are held, the agent (owner)
+// they belong to, and the bounce-spoof guard (ADR 0024). When the guard is set
+// with holdSpoof, spoof candidates also join the held queue. Without filters,
+// HeldList is empty.
+func (s *Service) SetInboundHolds(filters map[string]*filter.Filter, owner string, guard *bounceguard.Guard, holdSpoof bool) {
+	s.filters, s.owner, s.guard, s.holdSpoof = filters, owner, guard, holdSpoof
 }
 
 // HeldList returns the inbound messages held for a human decision with no
 // decision yet — a hold-rule match (ADR 0021) or, under on_spoof=hold-for-human,
-// a bounce-spoof candidate (ADR 0024). The inbound mirror of the outbound List.
+// a bounce-spoof candidate (ADR 0024) — aggregated across every inbox (ADR 0023),
+// each evaluated by its own filter. The inbound mirror of the outbound List.
 func (s *Service) HeldList() ([]inbound.Message, error) {
 	if s.inbox == nil {
 		return nil, nil
 	}
-	msgs, err := s.inbox.List(s.owner, inbound.DefaultInbox)
-	if err != nil {
-		return nil, err
-	}
 	now := time.Now()
 	var held []inbound.Message
-	for _, m := range msgs {
-		if m.HoldDecision != "" {
-			continue // already decided
+	for _, inbox := range s.inboxNames() {
+		msgs, err := s.inbox.List(s.owner, inbox)
+		if err != nil {
+			return nil, err
 		}
-		if s.filter.Decide(m, now) == filter.Hold || s.guardHoldsSpoof(m) {
-			held = append(held, m)
+		flt := s.filters[inbox]
+		for _, m := range msgs {
+			if m.HoldDecision != "" {
+				continue // already decided
+			}
+			if (flt != nil && flt.Decide(m, now) == filter.Hold) || s.guardHoldsSpoof(m, inbox) {
+				held = append(held, m)
+			}
 		}
 	}
 	return held, nil
 }
 
-// guardHoldsSpoof reports whether m is a bounce-spoof candidate routed to the
-// held queue (on_spoof=hold-for-human, ADR 0024). False when the guard is off or
-// on_spoof=hide (hidden spoofs aren't a human-decision queue item).
-func (s *Service) guardHoldsSpoof(m inbound.Message) bool {
+// inboxNames returns the configured inbox names in stable order (the held queue is
+// aggregated deterministically across inboxes).
+func (s *Service) inboxNames() []string {
+	names := make([]string, 0, len(s.filters))
+	for inbox := range s.filters {
+		names = append(names, inbox)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// guardHoldsSpoof reports whether m (in the given inbox) is a bounce-spoof
+// candidate routed to the held queue (on_spoof=hold-for-human, ADR 0024). False
+// when the guard is off or on_spoof=hide (hidden spoofs aren't a human-decision
+// queue item).
+func (s *Service) guardHoldsSpoof(m inbound.Message, inbox string) bool {
 	if s.guard == nil || !s.holdSpoof {
 		return false
 	}
@@ -93,7 +111,7 @@ func (s *Service) guardHoldsSpoof(m inbound.Message) bool {
 	// the two stay consistent. The error rides along with spoof=true; the read
 	// face logs it.
 	spoof, _ := s.guard.Verdict(envelopeFromLocals(m), m.Raw, func() ([]byte, error) {
-		fm, e := s.inbox.Get(s.owner, inbound.DefaultInbox, m.ID)
+		fm, e := s.inbox.Get(s.owner, inbox, m.ID)
 		return fm.Raw, e
 	})
 	return spoof
@@ -114,12 +132,29 @@ func envelopeFromLocals(m inbound.Message) []string {
 
 // ExposeHeld approves a held message for the agent to see (ADR 0021).
 func (s *Service) ExposeHeld(id string) (inbound.Message, error) {
-	return s.inbox.SetHoldDecision(s.owner, inbound.DefaultInbox, id, inbound.HoldApproved)
+	return s.setHold(id, inbound.HoldApproved)
 }
 
 // DropHeld rejects a held message — it stays hidden from the agent (ADR 0021).
 func (s *Service) DropHeld(id string) (inbound.Message, error) {
-	return s.inbox.SetHoldDecision(s.owner, inbound.DefaultInbox, id, inbound.HoldRejected)
+	return s.setHold(id, inbound.HoldRejected)
+}
+
+// setHold applies a hold decision to the message with this (store-wide unique) id,
+// resolving which inbox holds it (ADR 0023): the id is unique across the store, so
+// at most one inbox's (owner,inbox)-scoped record matches and the rest return
+// ErrNotFound. Returns ErrNotFound if no inbox holds it.
+func (s *Service) setHold(id, decision string) (inbound.Message, error) {
+	for _, inbox := range s.inboxNames() {
+		m, err := s.inbox.SetHoldDecision(s.owner, inbox, id, decision)
+		if err == nil {
+			return m, nil
+		}
+		if !errors.Is(err, inbound.ErrNotFound) {
+			return inbound.Message{}, err
+		}
+	}
+	return inbound.Message{}, inbound.ErrNotFound
 }
 
 // Outcome is the result of an approve/reject action. Status is the committed
