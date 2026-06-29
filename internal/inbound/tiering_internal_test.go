@@ -39,12 +39,12 @@ func TestAddTiersContent(t *testing.T) {
 	assert.Nil(t, rec.Raw, "raw must not be stored in bbolt")
 	assert.Equal(t, "bounce", rec.Subject) // subject is already metadata
 
-	got, err := s.Get("agent", m.ID)
+	got, err := s.Get("agent", DefaultInbox, m.ID)
 	require.NoError(t, err)
 	assert.Equal(t, m.Raw, got.Raw) // reassembled from the blob
 
 	// List is metadata-only (no blob reads): content comes per-FETCH via Get.
-	list, err := s.List("agent")
+	list, err := s.List("agent", DefaultInbox)
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	assert.Equal(t, "bounce", list[0].Subject)
@@ -60,7 +60,7 @@ func TestSweepOrphans(t *testing.T) {
 
 	require.NoError(t, s.sweepOrphans())
 
-	got, err := s.Get("agent", m.ID) // referenced blob survived
+	got, err := s.Get("agent", DefaultInbox, m.ID) // referenced blob survived
 	require.NoError(t, err)
 	assert.NotEmpty(t, got.Raw)
 	_, err = s.blobs.Get("9999") // orphan reclaimed
@@ -81,26 +81,26 @@ func TestLegacyInlineFallback(t *testing.T) {
 		return tx.Bucket(bucketInbound).Put(seqkey.Encode(1), enc)
 	}))
 
-	got, err := s.Get("agent", "1")
+	got, err := s.Get("agent", DefaultInbox, "1")
 	require.NoError(t, err)
 	assert.Equal(t, legacy.Raw, got.Raw) // inline raw, no blob read
 
 	// List is metadata-only now (content fetched per-FETCH): metadata present,
 	// Raw empty even for a legacy inline record.
-	list, err := s.List("agent")
+	list, err := s.List("agent", DefaultInbox)
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	assert.Equal(t, "old", list[0].Subject)
 	assert.Empty(t, list[0].Raw)
 
 	// SetSeen mutates metadata and keeps the inline raw readable.
-	require.NoError(t, s.SetSeen("agent", "1", true))
-	got, err = s.Get("agent", "1")
+	require.NoError(t, s.SetSeen("agent", DefaultInbox, "1", true))
+	got, err = s.Get("agent", DefaultInbox, "1")
 	require.NoError(t, err)
 	assert.True(t, got.Seen)
 	assert.Equal(t, legacy.Raw, got.Raw)
 
 	// Owner isolation is preserved.
-	_, err = s.Get("other", "1")
+	_, err = s.Get("other", DefaultInbox, "1")
 	assert.ErrorIs(t, err, ErrNotFound)
 }

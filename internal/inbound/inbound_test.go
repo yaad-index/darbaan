@@ -18,6 +18,49 @@ func newStore(t *testing.T) inbound.InboundStore {
 	return s
 }
 
+func TestInboxIsolation(t *testing.T) {
+	s := newStore(t)
+
+	// The SAME upstream (UIDVALIDITY, UID) in two different inboxes must NOT
+	// collide in the dedup index — each inbox is an independent UID space (ADR 0023).
+	_, work, err := s.AddSynced(inbound.Delivery{Owner: "agent", Inbox: "work", UpstreamUID: 5, UIDValidity: 1, Raw: []byte("From: a@x\r\n\r\nw")})
+	require.NoError(t, err)
+	added, personal, err := s.AddSynced(inbound.Delivery{Owner: "agent", Inbox: "personal", UpstreamUID: 5, UIDValidity: 1, Raw: []byte("From: b@y\r\n\r\np")})
+	require.NoError(t, err)
+	assert.True(t, added, "same (uid,uidvalidity) in a different inbox is not a duplicate")
+	assert.NotEqual(t, work.ID, personal.ID)
+
+	// List is per-inbox.
+	w, err := s.List("agent", "work")
+	require.NoError(t, err)
+	require.Len(t, w, 1)
+	assert.Equal(t, work.ID, w[0].ID)
+	assert.Equal(t, "work", w[0].Inbox)
+	p, err := s.List("agent", "personal")
+	require.NoError(t, err)
+	require.Len(t, p, 1)
+	assert.Equal(t, personal.ID, p[0].ID)
+
+	// Get is inbox-scoped: work's id is not reachable under personal.
+	_, err = s.Get("agent", "personal", work.ID)
+	require.ErrorIs(t, err, inbound.ErrNotFound)
+	_, err = s.Get("agent", "work", work.ID)
+	require.NoError(t, err)
+
+	// Re-adding the same (work, uid 5) is still an idempotent no-op.
+	again, _, err := s.AddSynced(inbound.Delivery{Owner: "agent", Inbox: "work", UpstreamUID: 5, UIDValidity: 1, Raw: []byte("x")})
+	require.NoError(t, err)
+	assert.False(t, again)
+
+	// A record stored with no Inbox reads as DefaultInbox (back-compat).
+	def, err := s.Add(inbound.Delivery{Owner: "agent", Raw: []byte("From: c@z\r\n\r\nd")})
+	require.NoError(t, err)
+	d, err := s.List("agent", inbound.DefaultInbox)
+	require.NoError(t, err)
+	require.Len(t, d, 1)
+	assert.Equal(t, def.ID, d[0].ID)
+}
+
 func TestAddSyncedDedup(t *testing.T) {
 	s := newStore(t)
 	d := inbound.Delivery{Owner: "agent", Subject: "hi", Raw: []byte("Subject: hi\r\n\r\nx"), UpstreamUID: 5, UIDValidity: 1}
@@ -31,7 +74,7 @@ func TestAddSyncedDedup(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, added)
 	assert.Equal(t, m1.ID, m2.ID)
-	msgs, _ := s.List("agent")
+	msgs, _ := s.List("agent", inbound.DefaultInbox)
 	assert.Len(t, msgs, 1)
 
 	// A different UID is a new message.
@@ -46,7 +89,7 @@ func TestAddSyncedDedup(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, added)
 
-	msgs, _ = s.List("agent")
+	msgs, _ = s.List("agent", inbound.DefaultInbox)
 	assert.Len(t, msgs, 3)
 
 	// AddSynced requires upstream coordinates.
@@ -63,21 +106,21 @@ func TestSetKeywordsDirtyOnlyWithUpstream(t *testing.T) {
 	// Local-only record (Add → no UpstreamUID): keywords set, not dirty.
 	local, err := s.Add(inbound.Delivery{Owner: "agent", Subject: "bounce"})
 	require.NoError(t, err)
-	_, err = s.SetKeywords("agent", local.ID, []string{"x"})
+	_, err = s.SetKeywords("agent", inbound.DefaultInbox, local.ID, []string{"x"})
 	require.NoError(t, err)
-	got, err := s.Get("agent", local.ID)
+	got, err := s.Get("agent", inbound.DefaultInbox, local.ID)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"x"}, got.Keywords)
-	dirty, err := s.DirtyKeywords("agent")
+	dirty, err := s.DirtyKeywords("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	assert.Empty(t, dirty)
 
 	// Synced record (has UpstreamUID): keyword change IS dirty.
 	_, synced, err := s.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 5, UIDValidity: 1})
 	require.NoError(t, err)
-	_, err = s.SetKeywords("agent", synced.ID, []string{"y"})
+	_, err = s.SetKeywords("agent", inbound.DefaultInbox, synced.ID, []string{"y"})
 	require.NoError(t, err)
-	dirty, err = s.DirtyKeywords("agent")
+	dirty, err = s.DirtyKeywords("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	require.Len(t, dirty, 1)
 	assert.Equal(t, synced.ID, dirty[0].ID)
@@ -91,12 +134,12 @@ func TestPendingThenSetContent(t *testing.T) {
 	assert.True(t, m.Pending)
 
 	// A pending record exposes its metadata but no content yet.
-	got, err := s.Get("agent", m.ID)
+	got, err := s.Get("agent", inbound.DefaultInbox, m.ID)
 	require.NoError(t, err)
 	assert.True(t, got.Pending)
 	assert.Empty(t, got.Raw)
 	assert.Equal(t, "hi", got.Subject)
-	list, err := s.List("agent")
+	list, err := s.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	assert.True(t, list[0].Pending)
@@ -104,12 +147,12 @@ func TestPendingThenSetContent(t *testing.T) {
 
 	// SetContent fills the body and marks it present.
 	raw := []byte("Subject: hi\r\n\r\nbody")
-	filled, err := s.SetContent("agent", m.ID, raw)
+	filled, err := s.SetContent("agent", inbound.DefaultInbox, m.ID, raw)
 	require.NoError(t, err)
 	assert.False(t, filled.Pending)
 	assert.Equal(t, raw, filled.Raw)
 
-	got, err = s.Get("agent", m.ID)
+	got, err = s.Get("agent", inbound.DefaultInbox, m.ID)
 	require.NoError(t, err)
 	assert.False(t, got.Pending)
 	assert.Equal(t, raw, got.Raw)
@@ -123,12 +166,12 @@ func TestAddListGet(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, m.Seen) // lands unseen
 
-	list, err := s.List("agent")
+	list, err := s.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	assert.Equal(t, "Bounce", list[0].Subject)
 
-	got, err := s.Get("agent", m.ID)
+	got, err := s.Get("agent", inbound.DefaultInbox, m.ID)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("raw"), got.Raw)
 }
@@ -138,19 +181,19 @@ func TestOwnerIsolation(t *testing.T) {
 	m, err := s.Add(inbound.Delivery{Owner: "alice", Raw: []byte("x")})
 	require.NoError(t, err)
 
-	list, err := s.List("bob")
+	list, err := s.List("bob", inbound.DefaultInbox)
 	require.NoError(t, err)
 	assert.Empty(t, list)
 
-	_, err = s.Get("bob", m.ID) // must not leak another owner's message
+	_, err = s.Get("bob", inbound.DefaultInbox, m.ID) // must not leak another owner's message
 	require.ErrorIs(t, err, inbound.ErrNotFound)
 }
 
 func TestGetNotFound(t *testing.T) {
 	s := newStore(t)
-	_, err := s.Get("agent", "999")
+	_, err := s.Get("agent", inbound.DefaultInbox, "999")
 	require.ErrorIs(t, err, inbound.ErrNotFound)
-	_, err = s.Get("agent", "not-a-number")
+	_, err = s.Get("agent", inbound.DefaultInbox, "not-a-number")
 	require.ErrorIs(t, err, inbound.ErrNotFound)
 }
 
@@ -165,17 +208,17 @@ func TestSetSeen(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, m.Seen)
 
-	require.NoError(t, s.SetSeen("agent", m.ID, true))
-	got, err := s.Get("agent", m.ID)
+	require.NoError(t, s.SetSeen("agent", inbound.DefaultInbox, m.ID, true))
+	got, err := s.Get("agent", inbound.DefaultInbox, m.ID)
 	require.NoError(t, err)
 	assert.True(t, got.Seen)
 
-	require.NoError(t, s.SetSeen("agent", m.ID, false))
-	got, err = s.Get("agent", m.ID)
+	require.NoError(t, s.SetSeen("agent", inbound.DefaultInbox, m.ID, false))
+	got, err = s.Get("agent", inbound.DefaultInbox, m.ID)
 	require.NoError(t, err)
 	assert.False(t, got.Seen)
 
 	// owner-scoped + not-found
-	require.ErrorIs(t, s.SetSeen("other", m.ID, true), inbound.ErrNotFound)
-	require.ErrorIs(t, s.SetSeen("agent", "999", true), inbound.ErrNotFound)
+	require.ErrorIs(t, s.SetSeen("other", inbound.DefaultInbox, m.ID, true), inbound.ErrNotFound)
+	require.ErrorIs(t, s.SetSeen("agent", inbound.DefaultInbox, "999", true), inbound.ErrNotFound)
 }

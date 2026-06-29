@@ -65,9 +65,9 @@ func TestIMAPFetchResolvesPendingOnDemand(t *testing.T) {
 	fetch := func(owner, id string) (inbound.Message, error) {
 		fetchCalls++
 		if id == m.ID { // simulate the on-demand upstream fill
-			return store.SetContent(owner, id, []byte("Subject: lazy\r\n\r\nlazy-body"))
+			return store.SetContent(owner, inbound.DefaultInbox, id, []byte("Subject: lazy\r\n\r\nlazy-body"))
 		}
-		return store.Get(owner, id)
+		return store.Get(owner, inbound.DefaultInbox, id)
 	}
 
 	c, err := imapclient.DialInsecure(startIMAPWithFetch(t, store, fetch), nil)
@@ -92,7 +92,7 @@ func TestIMAPFetchResolvesPendingOnDemand(t *testing.T) {
 	assert.Contains(t, string(msgs[0].FindBodySection(&imap.FetchItemBodySection{})), "lazy-body")
 	assert.GreaterOrEqual(t, fetchCalls, 1)
 
-	got, err := store.Get("agent", m.ID)
+	got, err := store.Get("agent", inbound.DefaultInbox, m.ID)
 	require.NoError(t, err)
 	assert.False(t, got.Pending) // cached present after the on-demand fetch
 }
@@ -119,14 +119,14 @@ func TestIMAPFetchMarksSeenAndPersists(t *testing.T) {
 	require.Len(t, msgs, 1)
 	assert.Contains(t, string(msgs[0].FindBodySection(&imap.FetchItemBodySection{})), "refused-marker")
 
-	got, err := store.Get("agent", "1")
+	got, err := store.Get("agent", inbound.DefaultInbox, "1")
 	require.NoError(t, err)
 	assert.True(t, got.Seen) // \Seen persisted across the fetch
 }
 
 func TestIMAPStoreUnsetSeenPersists(t *testing.T) {
 	store := seedInbound(t)
-	require.NoError(t, store.SetSeen("agent", "1", true))
+	require.NoError(t, store.SetSeen("agent", inbound.DefaultInbox, "1", true))
 
 	c, err := imapclient.DialInsecure(startIMAP(t, store), nil)
 	require.NoError(t, err)
@@ -139,7 +139,7 @@ func TestIMAPStoreUnsetSeenPersists(t *testing.T) {
 		&imap.StoreFlags{Op: imap.StoreFlagsDel, Flags: []imap.Flag{imap.FlagSeen}}, nil).Collect()
 	require.NoError(t, err)
 
-	got, err := store.Get("agent", "1")
+	got, err := store.Get("agent", inbound.DefaultInbox, "1")
 	require.NoError(t, err)
 	assert.False(t, got.Seen) // \Seen cleared and persisted
 }
@@ -233,7 +233,7 @@ func TestIMAPEnvelopeAndHeaderSearchFromMetadata(t *testing.T) {
 	var fetchCalls int
 	fetch := func(owner, id string) (inbound.Message, error) {
 		fetchCalls++
-		return store.Get(owner, id)
+		return store.Get(owner, inbound.DefaultInbox, id)
 	}
 	c, err := imapclient.DialInsecure(startIMAPWithFetch(t, store, fetch), nil)
 	require.NoError(t, err)
@@ -336,12 +336,12 @@ func TestIMAPStoreKeywordWritesThrough(t *testing.T) {
 	require.NoError(t, c.Store(imap.SeqSetNum(1),
 		&imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{"useless"}}, nil).Close())
 
-	got, err := store.Get("agent", m.ID)
+	got, err := store.Get("agent", inbound.DefaultInbox, m.ID)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"useless"}, got.Keywords) // local store is canonical
 	assert.Equal(t, m.ID, wroteID)
 	assert.Equal(t, []string{"useless"}, wroteAdd) // replicated the add delta upstream
-	dirty, err := store.DirtyKeywords("agent")
+	dirty, err := store.DirtyKeywords("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	assert.Empty(t, dirty) // cleared on successful replicate
 }
@@ -368,10 +368,10 @@ func TestIMAPStoreKeywordWriteFailureStaysDirty(t *testing.T) {
 	require.NoError(t, c.Store(imap.SeqSetNum(1),
 		&imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{"useless"}}, nil).Close())
 
-	got, err := store.Get("agent", m.ID)
+	got, err := store.Get("agent", inbound.DefaultInbox, m.ID)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"useless"}, got.Keywords) // committed locally
-	dirty, err := store.DirtyKeywords("agent")
+	dirty, err := store.DirtyKeywords("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	assert.Len(t, dirty, 1) // stays dirty for reconcile
 }
@@ -394,11 +394,11 @@ func TestIMAPStoreKeywordLocalOnlyNoUpstream(t *testing.T) {
 	require.NoError(t, c.Store(imap.SeqSetNum(1),
 		&imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{"useless"}}, nil).Close())
 
-	got, err := store.Get("agent", "1")
+	got, err := store.Get("agent", inbound.DefaultInbox, "1")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"useless"}, got.Keywords) // local label still set
 	assert.False(t, called, "no upstream write for a local-only record")
-	dirty, err := store.DirtyKeywords("agent")
+	dirty, err := store.DirtyKeywords("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	assert.Empty(t, dirty) // not dirty → never enters reconcile
 }
@@ -469,7 +469,7 @@ func TestIMAPHoldForHuman(t *testing.T) {
 	assert.Equal(t, uint32(1), sel.NumMessages) // held one hidden pending decision
 
 	// A human approves exposure → it becomes visible on the next select.
-	_, err = store.SetHoldDecision("agent", held.ID, inbound.HoldApproved)
+	_, err = store.SetHoldDecision("agent", inbound.DefaultInbox, held.ID, inbound.HoldApproved)
 	require.NoError(t, err)
 	c2, err := imapclient.DialInsecure(addr, nil)
 	require.NoError(t, err)

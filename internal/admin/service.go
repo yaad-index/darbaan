@@ -64,7 +64,7 @@ func (s *Service) HeldList() ([]inbound.Message, error) {
 	if s.inbox == nil {
 		return nil, nil
 	}
-	msgs, err := s.inbox.List(s.owner)
+	msgs, err := s.inbox.List(s.owner, inbound.DefaultInbox)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func (s *Service) guardHoldsSpoof(m inbound.Message) bool {
 	// the two stay consistent. The error rides along with spoof=true; the read
 	// face logs it.
 	spoof, _ := s.guard.Verdict(envelopeFromLocals(m), m.Raw, func() ([]byte, error) {
-		fm, e := s.inbox.Get(s.owner, m.ID)
+		fm, e := s.inbox.Get(s.owner, inbound.DefaultInbox, m.ID)
 		return fm.Raw, e
 	})
 	return spoof
@@ -114,12 +114,12 @@ func envelopeFromLocals(m inbound.Message) []string {
 
 // ExposeHeld approves a held message for the agent to see (ADR 0021).
 func (s *Service) ExposeHeld(id string) (inbound.Message, error) {
-	return s.inbox.SetHoldDecision(s.owner, id, inbound.HoldApproved)
+	return s.inbox.SetHoldDecision(s.owner, inbound.DefaultInbox, id, inbound.HoldApproved)
 }
 
 // DropHeld rejects a held message — it stays hidden from the agent (ADR 0021).
 func (s *Service) DropHeld(id string) (inbound.Message, error) {
-	return s.inbox.SetHoldDecision(s.owner, id, inbound.HoldRejected)
+	return s.inbox.SetHoldDecision(s.owner, inbound.DefaultInbox, id, inbound.HoldRejected)
 }
 
 // Outcome is the result of an approve/reject action. Status is the committed

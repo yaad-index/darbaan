@@ -106,7 +106,7 @@ func TestSyncPullsIncrementally(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, n)
 
-	msgs, err := store.List("agent")
+	msgs, err := store.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	require.Len(t, msgs, 2)
 	// Headers-only sync: metadata from the envelope, bodies pending (lazy).
@@ -137,7 +137,7 @@ func TestSyncPullsIncrementally(t *testing.T) {
 	n, err = syncer.Sync(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
-	msgs, _ = store.List("agent")
+	msgs, _ = store.List("agent", inbound.DefaultInbox)
 	assert.Len(t, msgs, 3)
 }
 
@@ -155,7 +155,7 @@ func TestSyncStreamsManyMessages(t *testing.T) {
 	got, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, n, got)
-	msgs, err := store.List("agent")
+	msgs, err := store.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	assert.Len(t, msgs, n)
 	for _, m := range msgs {
@@ -185,7 +185,7 @@ func TestFetchContentFillsPending(t *testing.T) {
 	assert.False(t, filled.Pending)
 	assert.Contains(t, string(filled.Raw), "real body")
 
-	got, err := store.Get("agent", m.ID)
+	got, err := store.Get("agent", inbound.DefaultInbox, m.ID)
 	require.NoError(t, err)
 	assert.False(t, got.Pending)
 	assert.Contains(t, string(got.Raw), "real body")
@@ -229,7 +229,7 @@ func TestSyncDedupsOnCursorReset(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, n)
 
-	msgs, err := store.List("agent")
+	msgs, err := store.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	assert.Len(t, msgs, 2) // no duplicates
 }
@@ -246,7 +246,7 @@ func TestSyncPullsKeywords(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 
-	msgs, err := store.List("agent")
+	msgs, err := store.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
 	assert.ElementsMatch(t, []string{"useless", "$Important"}, msgs[0].Keywords)
@@ -284,7 +284,7 @@ func TestWriteKeywordsToUpstream(t *testing.T) {
 	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
 	_, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
-	msgs, err := store.List("agent")
+	msgs, err := store.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
 
@@ -305,7 +305,7 @@ func TestWriteKeywordsRoutesToLabelStore(t *testing.T) {
 	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
 	_, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
-	msgs, err := store.List("agent")
+	msgs, err := store.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	id := msgs[0].ID
 
@@ -333,20 +333,20 @@ func TestSyncReconcilesDirtyKeywords(t *testing.T) {
 	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
 	_, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
-	msgs, err := store.List("agent")
+	msgs, err := store.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 
 	// Mark dirty locally (as if the immediate upstream write had failed).
-	_, err = store.SetKeywords("agent", msgs[0].ID, []string{"useless"})
+	_, err = store.SetKeywords("agent", inbound.DefaultInbox, msgs[0].ID, []string{"useless"})
 	require.NoError(t, err)
-	dirty, err := store.DirtyKeywords("agent")
+	dirty, err := store.DirtyKeywords("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	require.Len(t, dirty, 1)
 
 	// Next sync reconciles it upstream and clears dirty.
 	_, err = syncer.Sync(context.Background())
 	require.NoError(t, err)
-	dirty, err = store.DirtyKeywords("agent")
+	dirty, err = store.DirtyKeywords("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	assert.Empty(t, dirty)
 	assert.ElementsMatch(t, []string{"useless"}, upstreamKeywords(t, addr, 1))
@@ -365,7 +365,7 @@ func TestSyncRecencyCutoff(t *testing.T) {
 	n, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, n) // only the fresh message, ancient one skipped
-	msgs, err := store.List("agent")
+	msgs, err := store.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
 	assert.Equal(t, "fresh", msgs[0].Subject)
@@ -391,6 +391,6 @@ func TestSyncResetsOnUIDValidityMismatch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, n) // mismatch → cursor reset to 0 → message re-pulled despite LastUID=99
 
-	msgs, _ := store.List("agent")
+	msgs, _ := store.List("agent", inbound.DefaultInbox)
 	require.Len(t, msgs, 1)
 }

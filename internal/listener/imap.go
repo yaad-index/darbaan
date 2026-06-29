@@ -65,7 +65,7 @@ func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundS
 		return nil, errors.New("listener: IMAP TLS required (set TLSConfig, or AllowInsecure for local testing)")
 	}
 	if fetch == nil {
-		fetch = func(owner, id string) (inbound.Message, error) { return store.Get(owner, id) }
+		fetch = func(owner, id string) (inbound.Message, error) { return store.Get(owner, inbound.DefaultInbox, id) }
 	}
 	srv := imapserver.New(&imapserver.Options{
 		NewSession: func(_ *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
@@ -109,7 +109,7 @@ type imapSession struct {
 // visible; hide and undecided/rejected hold are omitted. Evaluated fresh each
 // call (no cache).
 func (s *imapSession) listAndFilter() (full, visible []inbound.Message, err error) {
-	full, err = s.store.List(s.owner)
+	full, err = s.store.List(s.owner, inbound.DefaultInbox)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -300,7 +300,7 @@ func (s *imapSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 			return
 		}
 		if markSeen && !m.Seen {
-			if err := s.store.SetSeen(s.owner, m.ID, true); err != nil {
+			if err := s.store.SetSeen(s.owner, inbound.DefaultInbox, m.ID, true); err != nil {
 				ferr = err
 				return
 			}
@@ -352,7 +352,7 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 			return
 		}
 		if touchesSeen && m.Seen != seen {
-			if err := s.store.SetSeen(s.owner, m.ID, seen); err != nil {
+			if err := s.store.SetSeen(s.owner, inbound.DefaultInbox, m.ID, seen); err != nil {
 				serr = err
 				return
 			}
@@ -363,7 +363,7 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 		if flags.Op == imap.StoreFlagsSet || len(kw) > 0 {
 			next, added, removed := applyKeywordOp(m.Keywords, flags.Op, kw)
 			if len(added) > 0 || len(removed) > 0 {
-				if _, err := s.store.SetKeywords(s.owner, m.ID, next); err != nil {
+				if _, err := s.store.SetKeywords(s.owner, inbound.DefaultInbox, m.ID, next); err != nil {
 					serr = err
 					return
 				}
@@ -376,7 +376,7 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 					if err := s.writeKeywords(s.owner, m.ID, added, removed); err != nil {
 						log.Printf("darbaan: imap keyword write-through for %s deferred: %v", m.ID, err)
 					} else {
-						_ = s.store.ClearKeywordsDirty(s.owner, m.ID)
+						_ = s.store.ClearKeywordsDirty(s.owner, inbound.DefaultInbox, m.ID)
 					}
 				}
 			}
