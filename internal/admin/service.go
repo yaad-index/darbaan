@@ -33,7 +33,7 @@ type Signer interface {
 type Service struct {
 	store     sluice.MessageStore
 	inbox     inbound.InboundStore
-	sender    backend.Sender
+	senders   map[string]backend.Sender // per-inbox upstream sender (ADR 0023), keyed by inbox name
 	signer    Signer
 	router    *policy.Router
 	domain    string
@@ -47,7 +47,28 @@ type Service struct {
 // the sender can never permanently fail (the stub) and rejection is unused; in
 // serve they are always provided.
 func NewService(store sluice.MessageStore, inbox inbound.InboundStore, sender backend.Sender, signer Signer, router *policy.Router, domain string) *Service {
-	return &Service{store: store, inbox: inbox, sender: sender, signer: signer, router: router, domain: domain}
+	// The single sender becomes the default inbox's; SetSenders installs the
+	// per-inbox map in serve (ADR 0023). Keeps existing callers/tests unchanged.
+	return &Service{store: store, inbox: inbox, senders: map[string]backend.Sender{inbound.DefaultInbox: sender}, signer: signer, router: router, domain: domain}
+}
+
+// SetSenders installs the per-inbox upstream senders (ADR 0023): an approved
+// message is delivered via the sender of the inbox it was submitted as. serve
+// builds one per configured inbox; tests/callers that only need one inbox keep
+// using NewService's single sender.
+func (s *Service) SetSenders(senders map[string]backend.Sender) {
+	if len(senders) > 0 {
+		s.senders = senders
+	}
+}
+
+// senderFor returns the upstream sender for a message's inbox, falling back to the
+// default inbox's sender when the message carries no/unknown inbox (ADR 0023).
+func (s *Service) senderFor(inbox string) backend.Sender {
+	if snd := s.senders[inbound.NormInbox(inbox)]; snd != nil {
+		return snd
+	}
+	return s.senders[inbound.DefaultInbox]
 }
 
 // SetInboundHolds wires the inbound hold-for-human queue (ADR 0021/0023): the
@@ -224,7 +245,7 @@ func (s *Service) ApproveID(ctx context.Context, id string) (Outcome, error) {
 	}
 	out := Outcome{ID: m.ID, Status: string(sluice.StatusApproved), Detail: fmt.Sprintf("approved by %s", m.DecidedBy)}
 
-	sendErr := s.sender.Send(ctx, m)
+	sendErr := s.senderFor(m.Inbox).Send(ctx, m) // deliver via the message's inbox's sender (ADR 0023)
 	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr)
 	if rerr != nil {
 		return Outcome{}, rerr
