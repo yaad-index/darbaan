@@ -1,6 +1,7 @@
 package filter
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -53,8 +54,9 @@ type Filter struct {
 }
 
 type rule struct {
-	conds  []cond
-	action Action
+	conds   []cond
+	action  Action
+	implied bool // action came from the default disposition (a bare rule, ADR 0022)
 }
 
 type cond struct {
@@ -86,6 +88,48 @@ func (f *Filter) Default() Action {
 		return Allow
 	}
 	return f.def
+}
+
+// RuleView is a human-readable view of one compiled rule for the `filter
+// explain` dry-run (ADR 0022): the resolved action plus whether it was implied
+// by the default disposition (a bare rule) or written explicitly.
+type RuleView struct {
+	Match   string // the AND-ed conditions, rendered
+	Action  Action
+	Implied bool
+}
+
+// Rules returns the compiled rules in evaluation order as RuleViews, so the CLI
+// can show what each rule resolved to without re-parsing the YAML.
+func (f *Filter) Rules() []RuleView {
+	if f == nil {
+		return nil
+	}
+	out := make([]RuleView, 0, len(f.rules))
+	for _, r := range f.rules {
+		out = append(out, RuleView{Match: r.describe(), Action: r.action, Implied: r.implied})
+	}
+	return out
+}
+
+// describe renders a rule's AND-ed conditions for explain output.
+func (r rule) describe() string {
+	parts := make([]string, 0, len(r.conds))
+	for _, c := range r.conds {
+		parts = append(parts, c.describe())
+	}
+	return strings.Join(parts, " AND ")
+}
+
+func (c cond) describe() string {
+	field := c.field
+	if c.field == fieldHeader {
+		field = "header:" + c.header
+	}
+	if c.field == fieldAge {
+		return fmt.Sprintf("%s %s %s", field, c.op, c.dur)
+	}
+	return fmt.Sprintf("%s %s %q", field, c.op, c.value)
 }
 
 func (r rule) matches(m inbound.Message, now time.Time) bool {

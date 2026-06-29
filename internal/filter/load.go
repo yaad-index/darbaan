@@ -11,11 +11,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// YAML shapes. A filter is `default: <action>` plus an ordered `rules:` list;
-// each rule is `match:` (AND-ed conditions) + one `action:`.
+// YAML shapes. A filter is a per-inbox default disposition plus an ordered
+// `rules:` list; each rule is `match:` (AND-ed conditions) + an optional
+// `action:`. The disposition is `default_visibility: visible|hidden` (ADR 0022)
+// and fixes both the no-match default and what a bare (action-less) rule does.
+// The legacy `default: <action>` (ADR 0008/0021) is still honored for back-compat.
 type fileConfig struct {
-	Default string       `yaml:"default"`
-	Rules   []ruleConfig `yaml:"rules"`
+	DefaultVisibility string       `yaml:"default_visibility"`
+	Default           string       `yaml:"default"`
+	Rules             []ruleConfig `yaml:"rules"`
 }
 
 type ruleConfig struct {
@@ -55,25 +59,35 @@ func Compile(data []byte) (*Filter, error) {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
 
-	def := Allow
-	if fc.Default != "" {
-		a, err := parseAction(fc.Default)
-		if err != nil {
-			return nil, fmt.Errorf("default: %w", err)
-		}
-		def = a
+	def, flip, flipSet, err := resolveDefault(fc)
+	if err != nil {
+		return nil, err
 	}
 
 	f := &Filter{def: def}
 	for i, rc := range fc.Rules {
-		action, err := parseAction(rc.Action)
-		if err != nil {
-			return nil, fmt.Errorf("rule %d: %w", i+1, err)
+		// A bare rule (no action:) takes the inverse of the default disposition
+		// — a match flips visibility (ADR 0022). An explicit action wins and is
+		// parsed as today; hold-for-human is therefore never implied by the mode.
+		var (
+			action  Action
+			implied bool
+		)
+		if rc.Action == "" {
+			if !flipSet {
+				return nil, fmt.Errorf("rule %d: no action and no default disposition to imply one (set default_visibility, or give the rule an explicit action)", i+1)
+			}
+			action, implied = flip, true
+		} else {
+			action, err = parseAction(rc.Action)
+			if err != nil {
+				return nil, fmt.Errorf("rule %d: %w", i+1, err)
+			}
 		}
 		if len(rc.Match) == 0 {
 			return nil, fmt.Errorf("rule %d: no match conditions", i+1)
 		}
-		r := rule{action: action}
+		r := rule{action: action, implied: implied}
 		for j, cc := range rc.Match {
 			c, err := compileCond(cc)
 			if err != nil {
@@ -84,6 +98,83 @@ func Compile(data []byte) (*Filter, error) {
 		f.rules = append(f.rules, r)
 	}
 	return f, nil
+}
+
+// visibility dispositions (ADR 0022).
+const (
+	visVisible = "visible"
+	visHidden  = "hidden"
+)
+
+// resolveDefault reconciles the first-class default_visibility/mode disposition
+// with the legacy default: action into the no-match action (def) and the action
+// a bare rule resolves to (flip; flipSet is false when no disposition implies
+// one — legacy default: hold-for-human, which has no visibility inverse).
+//
+// Precedence: an explicit default_visibility (or mode alias) sets the
+// disposition; a legacy default:, if also present, must agree. With only a
+// legacy default:, honor it (back-compat). With neither, the implicit default is
+// visible (default-allow) — every existing ADR 0021 config keeps working.
+func resolveDefault(fc fileConfig) (def, flip Action, flipSet bool, err error) {
+	vis, err := normVisibility(fc.DefaultVisibility)
+	if err != nil {
+		return "", "", false, err
+	}
+
+	var legacy Action
+	if fc.Default != "" {
+		legacy, err = parseAction(fc.Default)
+		if err != nil {
+			return "", "", false, fmt.Errorf("default: %w", err)
+		}
+	}
+
+	if vis != "" {
+		d := Allow
+		if vis == visHidden {
+			d = Hide
+		}
+		if fc.Default != "" && legacy != d {
+			return "", "", false, fmt.Errorf("default_visibility: %s conflicts with default: %s (use one)", vis, fc.Default)
+		}
+		return d, inverse(d), true, nil
+	}
+
+	if fc.Default != "" {
+		switch legacy {
+		case Allow:
+			return Allow, Hide, true, nil
+		case Hide:
+			return Hide, Allow, true, nil
+		default: // Hold has no visibility inverse: bare rules are not implied.
+			return legacy, "", false, nil
+		}
+	}
+
+	return Allow, Hide, true, nil
+}
+
+// inverse flips a visibility action (allow<->hide). Only called for Allow/Hide.
+func inverse(a Action) Action {
+	if a == Allow {
+		return Hide
+	}
+	return Allow
+}
+
+// normVisibility normalizes default_visibility into "" | visible | hidden.
+// (whitelist=visible / blacklist=hidden is conceptual framing in the ADR/docs,
+// not config surface — ADR 0022.)
+func normVisibility(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "":
+		return "", nil
+	case visVisible:
+		return visVisible, nil
+	case visHidden:
+		return visHidden, nil
+	}
+	return "", fmt.Errorf("default_visibility: unknown %q (visible|hidden)", s)
 }
 
 func parseAction(s string) (Action, error) {

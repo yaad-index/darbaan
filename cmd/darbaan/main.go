@@ -96,6 +96,7 @@ type CLI struct {
 	Serve      ServeCmd      `cmd:"" help:"Run the SMTP + IMAP faces and the admin API."`
 	Queue      QueueCmd      `cmd:"" help:"Inspect and decide held messages (via the running serve's admin API)."`
 	Holds      HoldsCmd      `cmd:"" help:"Inspect and decide inbound messages held for a human (ADR 0021)."`
+	Filter     FilterCmd     `cmd:"" help:"Inspect the inbound filter without starting serve (ADR 0021/0022)."`
 	Telegram   TelegramCmd   `cmd:"" help:"Run the Telegram approval client (a separate admin-API client process)."`
 	DkimPubkey DkimPubkeyCmd `cmd:"" name:"dkim-pubkey" help:"Print the DKIM public-key record to pin to the agent."`
 	Version    VersionCmd    `cmd:"" help:"Print version and exit."`
@@ -293,6 +294,63 @@ func (*DkimPubkeyCmd) Run(cli *CLI) error {
 	}
 	fmt.Println(s.PublicKeyTXT())
 	return nil
+}
+
+// FilterCmd groups inbound-filter inspection subcommands (no serve, no stores).
+type FilterCmd struct {
+	Explain FilterExplainCmd `cmd:"" help:"Resolve and print the filter: the default disposition and each rule's resolved action (bare rules show the action implied by default_visibility)."`
+}
+
+// FilterExplainCmd compiles the inbound filter and prints its resolved shape — a
+// dry-run that surfaces what a bare (action-less) rule resolves to under the
+// configured default visibility (ADR 0022), so the disposition is auditable
+// without reading mail or starting serve.
+type FilterExplainCmd struct {
+	Path string `arg:"" optional:"" help:"Filter YAML path (defaults to --inbound-filter)." type:"path"`
+}
+
+func (c *FilterExplainCmd) Run(cli *CLI) error {
+	path := c.Path
+	if path == "" {
+		path = cli.InboundFilter
+	}
+	if path == "" {
+		return errors.New("no filter path: pass an argument or set --inbound-filter")
+	}
+	flt, err := filter.Load(path)
+	if err != nil {
+		return err
+	}
+	def := flt.Default()
+	fmt.Printf("filter: %s\n", path)
+	fmt.Printf("default: %s  (no match → %s)\n", def, visibilityWord(def))
+	rules := flt.Rules()
+	if len(rules) == 0 {
+		fmt.Println("rules: (none)")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "#\tMATCH\tACTION\tSOURCE")
+	for i, r := range rules {
+		source := "explicit"
+		if r.Implied {
+			source = "implied by default_visibility"
+		}
+		_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", i+1, r.Match, r.Action, source)
+	}
+	return w.Flush()
+}
+
+// visibilityWord renders a no-match action as its operator-facing disposition.
+func visibilityWord(a filter.Action) string {
+	switch a {
+	case filter.Hide:
+		return "hidden"
+	case filter.Hold:
+		return "held for human"
+	default:
+		return "visible"
+	}
 }
 
 // VersionCmd prints the build version.
