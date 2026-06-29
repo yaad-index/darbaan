@@ -100,7 +100,7 @@ func TestSyncPullsIncrementally(t *testing.T) {
 	appendMsg(t, user, "From: bob@x.test\r\nTo: agent@d.test\r\nSubject: two\r\n\r\nbody two")
 
 	store := newInbound(t)
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
 
 	n, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
@@ -141,6 +141,28 @@ func TestSyncPullsIncrementally(t *testing.T) {
 	assert.Len(t, msgs, 3)
 }
 
+func TestSyncTagsInbox(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "From: a@x.test\r\nSubject: w\r\n\r\nbody")
+
+	store := newInbound(t)
+	// A syncer feeding the "work" inbox tags every record it writes (ADR 0023 2b).
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", "work", store, newState(t), 0)
+	n, err := syncer.Sync(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	w, err := store.List("agent", "work")
+	require.NoError(t, err)
+	require.Len(t, w, 1)
+	assert.Equal(t, "work", w[0].Inbox)
+
+	// It is not visible in a different inbox.
+	d, err := store.List("agent", inbound.DefaultInbox)
+	require.NoError(t, err)
+	assert.Empty(t, d)
+}
+
 // Streaming pulls every message (no Collect-all into memory), and the concrete
 // UIDNEXT bound makes a no-new sync return 0 (not via the "N:*" quirk).
 func TestSyncStreamsManyMessages(t *testing.T) {
@@ -150,7 +172,7 @@ func TestSyncStreamsManyMessages(t *testing.T) {
 		appendMsg(t, user, fmt.Sprintf("Subject: m%d\r\n\r\nbody %d", i, i))
 	}
 	store := newInbound(t)
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
 
 	got, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
@@ -174,7 +196,7 @@ func TestFetchContentFillsPending(t *testing.T) {
 	appendMsg(t, user, "Subject: real\r\n\r\nreal body") // upstream UID 1, UIDVALIDITY 1
 
 	store := newInbound(t)
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
 
 	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", Subject: "real", UpstreamUID: 1, UIDValidity: 1})
 	require.NoError(t, err)
@@ -203,7 +225,7 @@ func TestFetchContentStaleUIDValidity(t *testing.T) {
 	appendMsg(t, user, "Subject: x\r\n\r\ny")
 
 	store := newInbound(t)
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
 	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 999})
 	require.NoError(t, err)
 
@@ -220,12 +242,12 @@ func TestSyncDedupsOnCursorReset(t *testing.T) {
 
 	store := newInbound(t) // shared across both syncers
 
-	n, err := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0).Sync(context.Background())
+	n, err := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0).Sync(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 2, n)
 
 	// A second syncer with a FRESH cursor re-fetches both, but dedups: 0 new.
-	n, err = imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0).Sync(context.Background())
+	n, err = imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0).Sync(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 0, n)
 
@@ -241,7 +263,7 @@ func TestSyncPullsKeywords(t *testing.T) {
 	appendMsgKw(t, user, "Subject: tagged\r\n\r\nx", []imap.Flag{"useless", "$Important", imap.FlagSeen})
 
 	store := newInbound(t)
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
 	n, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
@@ -281,7 +303,7 @@ func TestWriteKeywordsToUpstream(t *testing.T) {
 	addr, user := startUpstream(t)
 	appendMsg(t, user, "Subject: x\r\n\r\ny") // upstream UID 1
 	store := newInbound(t)
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
 	_, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
 	msgs, err := store.List("agent", inbound.DefaultInbox)
@@ -302,7 +324,7 @@ func TestWriteKeywordsRoutesToLabelStore(t *testing.T) {
 	addr, user := startUpstream(t)
 	appendMsg(t, user, "Subject: x\r\n\r\ny")
 	store := newInbound(t)
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
 	_, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
 	msgs, err := store.List("agent", inbound.DefaultInbox)
@@ -330,7 +352,7 @@ func TestSyncReconcilesDirtyKeywords(t *testing.T) {
 	addr, user := startUpstream(t)
 	appendMsg(t, user, "Subject: x\r\n\r\ny")
 	store := newInbound(t)
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 0)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
 	_, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
 	msgs, err := store.List("agent", inbound.DefaultInbox)
@@ -360,7 +382,7 @@ func TestSyncRecencyCutoff(t *testing.T) {
 	appendMsgAt(t, user, "Subject: fresh\r\n\r\ny", time.Now())
 
 	store := newInbound(t)
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, newState(t), 365*24*time.Hour) // 1y
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 365*24*time.Hour) // 1y
 
 	n, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
@@ -386,7 +408,7 @@ func TestSyncResetsOnUIDValidityMismatch(t *testing.T) {
 	state := newState(t)
 	require.NoError(t, state.Save("INBOX", imapsync.State{UIDValidity: 424242, LastUID: 99}))
 
-	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", store, state, 0)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, state, 0)
 	n, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, n) // mismatch → cursor reset to 0 → message re-pulled despite LastUID=99
