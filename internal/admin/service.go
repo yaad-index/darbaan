@@ -88,15 +88,14 @@ func (s *Service) guardHoldsSpoof(m inbound.Message) bool {
 	if s.guard == nil || !s.holdSpoof {
 		return false
 	}
-	spoof, err := s.guard.Verdict(envelopeFromLocals(m), m.Raw, func() ([]byte, error) {
+	// Verdict is fail-CLOSED for a candidate it can't fetch/verify (ADR 0024), so
+	// a spoof the read face hides is also surfaced here for an operator decision —
+	// the two stay consistent. The error rides along with spoof=true; the read
+	// face logs it.
+	spoof, _ := s.guard.Verdict(envelopeFromLocals(m), m.Raw, func() ([]byte, error) {
 		fm, e := s.inbox.Get(s.owner, m.ID)
 		return fm.Raw, e
 	})
-	if err != nil {
-		// fail-open: a transient fetch error must not surface non-bounces; logged
-		// at the read face where the same verdict runs.
-		return false
-	}
 	return spoof
 }
 

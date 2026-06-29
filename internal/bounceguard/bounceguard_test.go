@@ -71,11 +71,12 @@ func TestVerdict(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, v)
 
-	// candidate but fetch fails → fail-open (false) with the error surfaced
+	// candidate but fetch fails → fail-CLOSED (true): a candidate is bounce-shaped,
+	// and shaped+unverifiable is a spoof (ADR 0024); the error is surfaced for logging.
 	boom := errors.New("fetch failed")
 	v, err = unsigned.Verdict([]string{"postmaster"}, nil, func() ([]byte, error) { return nil, boom })
 	assert.ErrorIs(t, err, boom)
-	assert.False(t, v)
+	assert.True(t, v)
 }
 
 func TestIsSpoofShapeFirstThenVerify(t *testing.T) {

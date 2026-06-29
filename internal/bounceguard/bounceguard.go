@@ -73,9 +73,14 @@ func Candidate(fromLocalParts []string) bool {
 // available. If rawInHand is non-empty it is checked directly (covers ALL shape
 // signals, no fetch). Otherwise, only a From-precheck Candidate triggers getRaw
 // (the bounded on-demand fetch) and a full check; a non-candidate passes without
-// a fetch. A getRaw failure is fail-OPEN (returns false with the error to log) —
-// a transient fetch error must not hide legitimate mail; the signature check
-// inside IsSpoof remains fail-closed.
+// a fetch.
+//
+// A getRaw failure on a Candidate is fail-CLOSED (returns true with the error):
+// Candidate reads the same From header bounceSender does, so a Candidate IS
+// bounce-shaped, and "bounce-shaped + unverifiable" is a spoof per ADR 0024 — a
+// transient fetch error must not surface a possibly-forged MAILER-DAEMON. A
+// non-candidate never fetches, so legitimate mail is never hidden on a fetch
+// error. The signature check inside IsSpoof is likewise fail-closed.
 func (g *Guard) Verdict(fromLocalParts []string, rawInHand []byte, getRaw func() ([]byte, error)) (bool, error) {
 	if len(rawInHand) > 0 {
 		return g.IsSpoof(rawInHand)
@@ -85,7 +90,7 @@ func (g *Guard) Verdict(fromLocalParts []string, rawInHand []byte, getRaw func()
 	}
 	raw, err := getRaw()
 	if err != nil {
-		return false, err
+		return true, err
 	}
 	return g.IsSpoof(raw)
 }

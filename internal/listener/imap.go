@@ -145,8 +145,9 @@ func (s *imapSession) listAndFilter() (full, visible []inbound.Message, err erro
 // A spoof under on_spoof=hide is always omitted; under on_spoof=hold-for-human it
 // is omitted until an operator exposes it (held-semantics, like a filter Hold),
 // and surfaced for decision via the admin held-list. A non-spoof returns false
-// (the user filter then applies). A guard error is logged and treated as
-// not-hiding (fail-open at the read face — the verify inside stays fail-closed).
+// (the user filter then applies). A guard error is fail-CLOSED (Verdict returns
+// spoof=true for a bounce-shaped candidate it couldn't fetch/verify, ADR 0024);
+// it is logged and the message is hidden.
 func (s *imapSession) guardHides(m inbound.Message) bool {
 	spoof, err := s.guard.Verdict(envelopeFromLocals(m), m.Raw, func() ([]byte, error) {
 		fm, e := s.fetch(s.owner, m.ID)
