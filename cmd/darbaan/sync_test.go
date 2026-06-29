@@ -35,6 +35,29 @@ func TestInboxIMAPPassword(t *testing.T) {
 	assert.Empty(t, inboxIMAPPassword("nopass"))                       // non-default, no env → empty
 }
 
+func TestInboxSMTPPassword(t *testing.T) {
+	t.Setenv("DARBAAN_INBOX_WORK_SMTP_PASSWORD", "wpass")
+	t.Setenv("DARBAAN_SMTP_PASSWORD", "legacy")
+	assert.Equal(t, "wpass", inboxSMTPPassword("work"))                // per-inbox env
+	assert.Equal(t, "legacy", inboxSMTPPassword(inbound.DefaultInbox)) // default → legacy fallback
+	assert.Empty(t, inboxSMTPPassword("nopass"))                       // non-default, no env → empty
+}
+
+func TestNewSendersPerInbox(t *testing.T) {
+	cli := &CLI{}
+	inboxes := []inboxcfg.Inbox{
+		{Name: inbound.DefaultInbox, Backend: inboxcfg.Backend{SenderType: "stub"}},
+		{Name: "work", Backend: inboxcfg.Backend{SenderType: "stub"}},
+		{Name: "no-type"}, // no sender_type → stub (default-deny)
+	}
+	senders, err := cli.newSenders(inboxes)
+	require.NoError(t, err)
+	require.Len(t, senders, 3)
+	require.NotNil(t, senders["work"])
+	require.NotNil(t, senders[inbound.DefaultInbox])
+	require.NotNil(t, senders["no-type"])
+}
+
 // Inbound sync is off by default: with no inbox carrying an upstream host,
 // newSyncers returns an empty map (no state store opened) and a no-op stop, and
 // never errors. An empty map makes imapKeywordWriter nil (local-only labels);

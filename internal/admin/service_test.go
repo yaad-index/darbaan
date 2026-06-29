@@ -99,6 +99,32 @@ func (failingInbound) Get(string, string, string) (inbound.Message, error) {
 func (failingInbound) SetSeen(string, string, string, bool) error { return nil }
 func (failingInbound) Close() error                               { return nil }
 
+type senderFunc func(sluice.Message) error
+
+func (f senderFunc) Send(_ context.Context, m sluice.Message) error { return f(m) }
+
+// ADR 0023: an approved message is delivered via the sender of the inbox it was
+// submitted as.
+func TestApproveDispatchesToInboxSender(t *testing.T) {
+	q, defID := seedStore(t) // default-inbox message
+	workMsg, err := q.Enqueue(sluice.Submission{Agent: "agent", Inbox: "work", From: "w@x.test", Rcpt: []string{"d@y.test"}, Raw: []byte("w")})
+	require.NoError(t, err)
+
+	svc := admin.NewService(q, newInbound(t), backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	var workSent, defSent int
+	svc.SetSenders(map[string]backend.Sender{
+		"work":               senderFunc(func(sluice.Message) error { workSent++; return nil }),
+		inbound.DefaultInbox: senderFunc(func(sluice.Message) error { defSent++; return nil }),
+	})
+
+	_, err = svc.ApproveID(context.Background(), workMsg.ID)
+	require.NoError(t, err)
+	_, err = svc.ApproveID(context.Background(), defID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, workSent, "work message → work sender")
+	assert.Equal(t, 1, defSent, "default message → default sender")
+}
+
 func TestApproveStubHoldsDefaultDeny(t *testing.T) {
 	q, id := seedStore(t)
 	svc := admin.NewService(q, newInbound(t), backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")

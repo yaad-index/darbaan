@@ -235,6 +235,43 @@ func inboxIMAPPassword(name string) string {
 	return ""
 }
 
+// inboxSMTPPassword resolves an inbox's upstream SMTP password (ADR 0012/0023):
+// the per-inbox env DARBAAN_INBOX_<EnvPrefix>_SMTP_PASSWORD, falling back to the
+// legacy DARBAAN_SMTP_PASSWORD for the implicit default inbox.
+func inboxSMTPPassword(name string) string {
+	if v := os.Getenv("DARBAAN_INBOX_" + inboxcfg.EnvPrefix(name) + "_SMTP_PASSWORD"); v != "" {
+		return v
+	}
+	if name == inbound.DefaultInbox {
+		return os.Getenv("DARBAAN_SMTP_PASSWORD")
+	}
+	return ""
+}
+
+// newSenders builds one upstream Sender per configured inbox (ADR 0023), keyed by
+// inbox name, from each inbox's backend coords + per-inbox SMTP secret. An inbox
+// with no sender_type uses the stub (default-deny holds, ADR 0003). At N=1 the
+// implicit default carries the legacy SMTP flags, so its sender is unchanged.
+func (cli *CLI) newSenders(inboxes []inboxcfg.Inbox) (map[string]backend.Sender, error) {
+	senders := make(map[string]backend.Sender, len(inboxes))
+	for _, in := range inboxes {
+		st := in.Backend.SenderType
+		if st == "" {
+			st = "stub"
+		}
+		snd, err := backend.New(st, backend.Config{
+			Host:     in.Backend.SMTPHost,
+			Username: in.Backend.SMTPUsername,
+			Password: inboxSMTPPassword(in.Name),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("inbox %q sender: %w", in.Name, err)
+		}
+		senders[in.Name] = snd
+	}
+	return senders, nil
+}
+
 // newSyncers builds one inbound sync engine per configured inbox that has an
 // upstream IMAP backend (ADR 0019/0023), keyed by inbox name; inboxes with no
 // backend host are skipped (no sync). The syncers share one sync-state store
@@ -538,6 +575,15 @@ func (*ServeCmd) Run(cli *CLI) error {
 		}
 		filters[in.Name] = f
 	}
+
+	// One upstream sender per inbox (ADR 0023): an approved message is delivered
+	// via the sender of the inbox it was submitted as. At N=1 this is the legacy
+	// sender under the default inbox.
+	senders, err := cli.newSenders(inboxes)
+	if err != nil {
+		return err
+	}
+	svc.SetSenders(senders)
 
 	// One local service hosts both agent faces (ADR 0001): SMTP submission
 	// (outbound trap) and IMAP read (the agent reads its bounces). The submission
