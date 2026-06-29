@@ -28,9 +28,11 @@ the store keeps everything (ADR 0019); the agent simply doesn't see spoofs.
 
 ### Bounce-shaped detection
 
-A message is **bounce-shaped** if **any** of these hold (this **shape** check is
-**metadata only**, no body fetch — only the trust check below touches the body, and
-only on a shape hit):
+A message is **bounce-shaped** if **any** of these hold. `Shaped()` reads only the
+message headers + MIME structure (no upstream fetch beyond having the raw bytes in
+hand). But **which of these signals are cheap at the lazy read face** differs (see
+*Read-face wiring* below): at SELECT only the **envelope From** is available without
+a body fetch; the other signals need the raw message.
 
 - `Content-Type: multipart/report` with `report-type="delivery-status"`, or a
   `message/delivery-status` part declared in the structure;
@@ -60,9 +62,28 @@ triggers an **on-demand body fetch** to run the verify. This is a deliberate,
 **bounded** exception: only **bounce-shaped** messages (a small subset, identified
 cheaply from metadata first) ever incur the fetch — ordinary mail never does.
 Verification reuses the DKIM library already in deps (`go-msgauth/dkim`) via a
-`signer.Verify` against the pinned bounce selector. Order matters: **cheap metadata
-shape-check first; body fetch + verify only on a shape hit.** (Thanks to the
-implementer review for catching that the trust check cannot be metadata-only.)
+`signer.Verify` against the pinned bounce selector.
+
+### Read-face wiring (lazy interaction)
+
+The read face (ADR 0019) is **lazy**: at SELECT/list, records carry metadata only
+(`Raw` is nil) and the body is fetched on demand. Because **most shape signals and
+the verify need the raw message**, running the full guard at SELECT would fetch
+every body and defeat lazy. So v1 wires it as:
+
+1. a cheap **envelope-From pre-check** at the read face — null sender `<>` /
+   `MAILER-DAEMON` / `postmaster`, the only shape signal available without a fetch;
+2. on a From hit, a **bounded on-demand raw fetch** → full `Shaped()` + `signer.Verify`;
+   non-bounce-From records pass with **no fetch**;
+3. opportunistically, the full guard also runs when `Raw` is **already in hand**
+   (fetched for any reason) — free tightening, no extra fetch.
+
+This closes ADR 0007's **named attack** (a forged `MAILER-DAEMON`/`postmaster`
+bounce) while preserving lazy. **Documented gap (v1):** a `multipart/report` DSN
+from a **non-daemon** From is not caught at the read face — it does not impersonate
+the mailer daemon, so it is not the named threat; full shape coverage is the
+follow-up below. (Implementer review surfaced this constraint: the trust check
+cannot be metadata-only, and at the lazy read face only the envelope From is.)
 
 ### Action
 
@@ -113,6 +134,12 @@ implementer review for catching that the trust check cannot be metadata-only.)
 
 ## Follow-ups
 
+- **Full read-face shape coverage** (closes the v1 non-daemon-From gap): store a
+  bounce-shape flag in inbox metadata, computed when a body is fetched, so SELECT can
+  shape-check the flag and fetch raw only to verify on a hit. Spans the sync + inbound
+  store (a data-model add), so it is deferred past the v1 wiring. Must spell out how
+  the flag is populated for never-yet-fetched records (compute on first fetch, guard
+  re-checks then) so an unfetched non-daemon DSN is not silently surfaced forever.
 - Surface a count of guarded spoofs in audit/admin so the operator can see the guard
   working (and tune `on_spoof`).
 - Revisit if a legitimate need arises to show *third-party* bounces (e.g. for an
