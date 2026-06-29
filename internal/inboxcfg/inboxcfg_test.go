@@ -1,6 +1,8 @@
 package inboxcfg_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,6 +13,23 @@ import (
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/inboxcfg"
 )
+
+func TestInboxFilterFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.yaml")
+	require.NoError(t, os.WriteFile(path,
+		[]byte("default_visibility: hidden\nrules:\n  - match: [{field: label, op: equals, value: x}]\n"), 0o600))
+
+	// filter_file loads the filter from the path.
+	flt, err := inboxcfg.Inbox{Name: "p", FilterFile: path}.Filter()
+	require.NoError(t, err)
+	assert.Equal(t, filter.Hide, flt.Default())
+
+	// filter_file AND inline together is a config error (Filter + Validate).
+	both := inboxcfg.Inbox{Name: "p", FilterFile: path, DefaultVisibility: "visible"}
+	_, err = both.Filter()
+	require.Error(t, err)
+	require.Error(t, inboxcfg.Validate([]inboxcfg.Inbox{both}))
+}
 
 const twoInboxes = `
 inboxes:

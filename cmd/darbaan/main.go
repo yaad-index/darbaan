@@ -36,6 +36,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/imapsync"
 	"github.com/yaad-index/darbaan/internal/inbound"
+	"github.com/yaad-index/darbaan/internal/inboxcfg"
 	"github.com/yaad-index/darbaan/internal/listener"
 	"github.com/yaad-index/darbaan/internal/policy"
 	"github.com/yaad-index/darbaan/internal/signer"
@@ -134,6 +135,67 @@ func (c *CLI) openStore() (sluice.MessageStore, func(), error) {
 		return nil, nil, err
 	}
 	return ms, func() { _ = ms.Close(); _ = al.Close() }, nil
+}
+
+// configBytes returns the bytes of the resolved config file (the same path kong
+// loaded — --config / DARBAAN_CONFIG / a default), or nil if none. The inboxes:
+// list (ADR 0023) is read from it directly, since kong's flat flags don't model
+// a list of inbox objects.
+func (c *CLI) configBytes() ([]byte, error) {
+	path := c.Config
+	if path == "" {
+		for _, p := range defaultConfigPaths {
+			if _, err := os.Stat(p); err == nil {
+				path = p
+				break
+			}
+		}
+	}
+	if path == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+	return data, nil
+}
+
+// resolveInboxes resolves the configured inboxes (ADR 0023), or a single implicit
+// "default" inbox built from the legacy top-level flags when no inboxes: is
+// configured — so an existing single-inbox config is unchanged. Each inbox's
+// filter is validated (compiles) by Validate.
+func (c *CLI) resolveInboxes() ([]inboxcfg.Inbox, error) {
+	data, err := c.configBytes()
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := inboxcfg.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	implicit := inboxcfg.Inbox{
+		Name:       inbound.DefaultInbox,
+		Identity:   c.SMTPUsername,
+		FilterFile: c.InboundFilter,
+		Backend: inboxcfg.Backend{
+			IMAPHost:     c.InboundIMAPHost,
+			IMAPUsername: c.InboundIMAPUsername,
+			IMAPMailbox:  c.InboundIMAPMailbox,
+			MaxAge:       c.InboundMaxAge,
+			SenderType:   c.SenderType,
+			SMTPHost:     c.SMTPHost,
+			SMTPUsername: c.SMTPUsername,
+		},
+	}
+	inboxes := inboxcfg.Resolve(parsed, implicit)
+	if err := inboxcfg.Validate(inboxes); err != nil {
+		return nil, err
+	}
+	return inboxes, nil
 }
 
 // openInbound opens the inbound (served mailbox) store per config.
@@ -440,10 +502,25 @@ func (*ServeCmd) Run(cli *CLI) error {
 	}
 	defer stopSync()
 
-	flt, err := filter.Load(cli.InboundFilter)
+	// Resolve the configured inboxes (ADR 0023): a config with no inboxes: is one
+	// implicit "default" inbox built from the legacy top-level flags, so a
+	// single-inbox deployment is unchanged. Each inbox's filter is compiled up
+	// front (fail-fast on a bad rule set). 3a wires the resolution + per-inbox
+	// filter map; the read face still serves the default inbox here — N mailboxes
+	// land in 3b.
+	inboxes, err := cli.resolveInboxes()
 	if err != nil {
 		return err
 	}
+	filters := make(map[string]*filter.Filter, len(inboxes))
+	for _, in := range inboxes {
+		f, ferr := in.Filter()
+		if ferr != nil {
+			return fmt.Errorf("inbox %q: %w", in.Name, ferr)
+		}
+		filters[in.Name] = f
+	}
+	flt := filters[inbound.DefaultInbox]
 	// The inbound bounce-spoof guard (ADR 0024) runs ahead of the user filter on
 	// both faces, verifying with the bounce signer's own key. On by default; an
 	// explicit opt-out is logged. on_spoof=hold-for-human routes spoofs to the
