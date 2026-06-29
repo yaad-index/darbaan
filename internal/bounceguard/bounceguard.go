@@ -51,6 +51,50 @@ func (g *Guard) IsSpoof(raw []byte) (bool, error) {
 	return !ok, nil
 }
 
+// Candidate reports whether any of a message's envelope From local-parts looks
+// like a bounce sender (mailer-daemon / postmaster, case-insensitive) — the
+// cheap, metadata-only pre-check that bounds the on-demand raw fetch at the lazy
+// read face (ADR 0024 v1; ADR 0019 keeps SELECT metadata-only). The null sender
+// <> is not in the stored envelope (it is the SMTP reverse-path, not the From
+// header), so it is caught only by the full Shaped() check once raw is in hand,
+// and by the follow-up shape-flag work — not by this pre-check.
+func Candidate(fromLocalParts []string) bool {
+	for _, lp := range fromLocalParts {
+		switch strings.ToLower(strings.TrimSpace(lp)) {
+		case "mailer-daemon", "postmaster":
+			return true
+		}
+	}
+	return false
+}
+
+// Verdict decides spoof for one message while honoring the lazy read face: the
+// full Shaped()+verify needs raw, so it is reached only when raw is cheaply
+// available. If rawInHand is non-empty it is checked directly (covers ALL shape
+// signals, no fetch). Otherwise, only a From-precheck Candidate triggers getRaw
+// (the bounded on-demand fetch) and a full check; a non-candidate passes without
+// a fetch.
+//
+// A getRaw failure on a Candidate is fail-CLOSED (returns true with the error):
+// Candidate reads the same From header bounceSender does, so a Candidate IS
+// bounce-shaped, and "bounce-shaped + unverifiable" is a spoof per ADR 0024 — a
+// transient fetch error must not surface a possibly-forged MAILER-DAEMON. A
+// non-candidate never fetches, so legitimate mail is never hidden on a fetch
+// error. The signature check inside IsSpoof is likewise fail-closed.
+func (g *Guard) Verdict(fromLocalParts []string, rawInHand []byte, getRaw func() ([]byte, error)) (bool, error) {
+	if len(rawInHand) > 0 {
+		return g.IsSpoof(rawInHand)
+	}
+	if !Candidate(fromLocalParts) {
+		return false, nil
+	}
+	raw, err := getRaw()
+	if err != nil {
+		return true, err
+	}
+	return g.IsSpoof(raw)
+}
+
 // Shaped reports whether raw looks like a bounce / DSN — header and structure
 // shape only, no signature check (ADR 0024). Deliberately broad: the signature is
 // the precise gate, so a false shape-positive only costs a verify on otherwise

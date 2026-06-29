@@ -32,6 +32,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/admin"
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
+	"github.com/yaad-index/darbaan/internal/bounceguard"
 	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/imapsync"
 	"github.com/yaad-index/darbaan/internal/inbound"
@@ -84,6 +85,9 @@ type CLI struct {
 	InboundSyncDB           string        `name:"inbound-sync-db" default:"darbaan-sync.db" help:"Path to the inbound sync-state (UIDVALIDITY + last UID) database." type:"path"`
 	InboundMaxAge           string        `name:"inbound-max-age" help:"Recency cutoff for the initial/full sync, e.g. 1y, 30d, 12h (ADR 0008). Empty = no cutoff (pull everything). Forward-only: widening it later needs a re-sync."`
 	InboundFilter           string        `name:"inbound-filter" help:"Path to the inbound filter rules (YAML, ADR 0021): serve-time allow/hide over synced mail. Empty = no filter (allow all)." type:"path"`
+
+	BounceGuardEnabled bool   `name:"bounce-guard-enabled" default:"true" help:"Inbound bounce-spoof guard (ADR 0024): hide mail posing as a delivery-status bounce that lacks a valid Darbaan signature. On by default; false is an explicit opt-out."`
+	BounceGuardOnSpoof string `name:"bounce-guard-on-spoof" default:"hide" enum:"hide,hold-for-human" help:"What to do with a spoof candidate: hide it from the agent (default), or hold-for-human (route to the inbound approval queue)."`
 
 	AgentUsername string `name:"agent-username" help:"The agent's Darbaan SMTP username. The password is supplied out-of-band via DARBAAN_AGENT_PASS, never inlined in config (ADR 0012)."`
 
@@ -440,14 +444,26 @@ func (*ServeCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	// The admin hold-for-human queue and the read face share one filter + owner
-	// (ADR 0021): the read face hides held mail, the admin surface decides it.
-	svc.SetInboundHolds(flt, cli.AgentUsername)
+	// The inbound bounce-spoof guard (ADR 0024) runs ahead of the user filter on
+	// both faces, verifying with the bounce signer's own key. On by default; an
+	// explicit opt-out is logged. on_spoof=hold-for-human routes spoofs to the
+	// inbound approval queue instead of hiding them.
+	var guard *bounceguard.Guard
+	if cli.BounceGuardEnabled {
+		guard = bounceguard.New(sgn.Verify)
+	} else {
+		fmt.Fprintln(os.Stderr, "darbaan: bounce-spoof guard DISABLED (bounce-guard-enabled=false)")
+	}
+	holdSpoof := cli.BounceGuardOnSpoof == "hold-for-human"
+	// The admin hold-for-human queue and the read face share one filter + owner +
+	// guard (ADR 0021/0024): the read face hides held/spoof mail, the admin surface
+	// decides it.
+	svc.SetInboundHolds(flt, cli.AgentUsername, guard, holdSpoof)
 	imapSrv, err := listener.NewIMAPServer(listener.IMAPServerConfig{
 		Addr:          cli.IMAPAddr,
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
-	}, cred, inbox, imapContentFetch(syncer), imapKeywordWriter(syncer), flt)
+	}, cred, inbox, imapContentFetch(syncer), imapKeywordWriter(syncer), flt, guard, holdSpoof)
 	if err != nil {
 		return err
 	}

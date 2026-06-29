@@ -40,6 +40,45 @@ func TestShaped(t *testing.T) {
 	}
 }
 
+func TestCandidate(t *testing.T) {
+	assert.True(t, bounceguard.Candidate([]string{"MAILER-DAEMON"}))
+	assert.True(t, bounceguard.Candidate([]string{"alice", "Postmaster"}))
+	assert.False(t, bounceguard.Candidate([]string{"alice", "bob"}))
+	assert.False(t, bounceguard.Candidate(nil))
+}
+
+func TestVerdict(t *testing.T) {
+	spoofRaw := []byte(dsnReport) // shaped, and our verifier says unsigned → spoof
+	unsigned := bounceguard.New(func([]byte) (bool, error) { return false, nil })
+
+	// raw in hand → full check, no fetch needed (fetch must NOT be called)
+	v, err := unsigned.Verdict(nil, spoofRaw, func() ([]byte, error) {
+		t.Fatal("getRaw must not be called when raw is in hand")
+		return nil, nil
+	})
+	assert.NoError(t, err)
+	assert.True(t, v)
+
+	// no raw, non-candidate From → pass without fetching
+	fetched := false
+	v, err = unsigned.Verdict([]string{"alice"}, nil, func() ([]byte, error) { fetched = true; return spoofRaw, nil })
+	assert.NoError(t, err)
+	assert.False(t, v)
+	assert.False(t, fetched, "non-candidate must not trigger a fetch")
+
+	// no raw, candidate From → fetch + full check → spoof
+	v, err = unsigned.Verdict([]string{"MAILER-DAEMON"}, nil, func() ([]byte, error) { return spoofRaw, nil })
+	assert.NoError(t, err)
+	assert.True(t, v)
+
+	// candidate but fetch fails → fail-CLOSED (true): a candidate is bounce-shaped,
+	// and shaped+unverifiable is a spoof (ADR 0024); the error is surfaced for logging.
+	boom := errors.New("fetch failed")
+	v, err = unsigned.Verdict([]string{"postmaster"}, nil, func() ([]byte, error) { return nil, boom })
+	assert.ErrorIs(t, err, boom)
+	assert.True(t, v)
+}
+
 func TestIsSpoofShapeFirstThenVerify(t *testing.T) {
 	ordinary := []byte("From: alice@example.com\r\nSubject: lunch?\r\n\r\nhey\r\n")
 
