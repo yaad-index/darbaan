@@ -44,6 +44,18 @@ func New(dial DialFunc, mailbox, owner, inbox string, store inbound.InboundStore
 	return &Syncer{dial: dial, mailbox: mailbox, owner: owner, inbox: inbox, store: store, state: state, maxAge: maxAge}
 }
 
+// stateKey is the sync-cursor key for this syncer's inbox. The default inbox uses
+// the bare upstream mailbox name (the pre-multi-inbox key — its cursor is
+// unchanged, no extra re-sync on deploy); a named inbox uses inbox+mailbox so two
+// inboxes sharing an upstream mailbox name (e.g. both "INBOX" on different
+// accounts) never collide on the cursor (ADR 0023).
+func (s *Syncer) stateKey() string {
+	if s.inbox == inbound.DefaultInbox {
+		return s.mailbox
+	}
+	return s.inbox + "\x00" + s.mailbox
+}
+
 // Dialer is the production DialFunc: TLS-connect to addr and log in with the
 // Darbaan-held upstream credentials. The engine is tested with an injected
 // DialFunc against an in-process server.
@@ -79,7 +91,7 @@ func (s *Syncer) Sync(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("imapsync: select %q: %w", s.mailbox, err)
 	}
 
-	loaded, err := s.state.Load(s.mailbox)
+	loaded, err := s.state.Load(s.stateKey())
 	if err != nil {
 		return 0, err
 	}
@@ -95,7 +107,7 @@ func (s *Syncer) Sync(ctx context.Context) (int, error) {
 
 	newState := State{UIDValidity: sel.UIDValidity, LastUID: highest}
 	if newState != loaded {
-		if err := s.state.Save(s.mailbox, newState); err != nil {
+		if err := s.state.Save(s.stateKey(), newState); err != nil {
 			return stored, err
 		}
 	}

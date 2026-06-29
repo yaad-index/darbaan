@@ -221,28 +221,62 @@ func (c *CLI) openSender() (backend.Sender, error) {
 	})
 }
 
-// newSyncer builds the inbound sync engine (ADR 0019) if an upstream is
-// configured; otherwise returns nil (gated off by default like the stub sender).
-// The returned stop func closes the sync-state store.
-func (cli *CLI) newSyncer(inbox inbound.InboundStore) (*imapsync.Syncer, func(), error) {
-	if cli.InboundIMAPHost == "" {
-		return nil, func() {}, nil
+// inboxIMAPPassword resolves an inbox's upstream IMAP password (ADR 0012/0023):
+// the per-inbox env DARBAAN_INBOX_<EnvPrefix>_IMAP_PASSWORD, falling back to the
+// legacy DARBAAN_INBOUND_IMAP_PASSWORD for the implicit default inbox (and for an
+// inbox literally named "default" when the per-inbox var is unset).
+func inboxIMAPPassword(name string) string {
+	if v := os.Getenv("DARBAAN_INBOX_" + inboxcfg.EnvPrefix(name) + "_IMAP_PASSWORD"); v != "" {
+		return v
 	}
-	maxAge, err := parseMaxAge(cli.InboundMaxAge)
-	if err != nil {
-		return nil, nil, fmt.Errorf("inbound-max-age: %w", err)
+	if name == inbound.DefaultInbox {
+		return os.Getenv("DARBAAN_INBOUND_IMAP_PASSWORD")
 	}
-	state, err := imapsync.NewStateStore(cli.InboundSyncDB)
-	if err != nil {
-		return nil, nil, err
+	return ""
+}
+
+// newSyncers builds one inbound sync engine per configured inbox that has an
+// upstream IMAP backend (ADR 0019/0023), keyed by inbox name; inboxes with no
+// backend host are skipped (no sync). The syncers share one sync-state store
+// (keyed per inbox internally); the returned stop func closes it. An empty map
+// means no inbox syncs (gated off, like the stub sender).
+func (cli *CLI) newSyncers(inboxes []inboxcfg.Inbox, store inbound.InboundStore) (map[string]*imapsync.Syncer, func(), error) {
+	syncers := map[string]*imapsync.Syncer{}
+	var state imapsync.StateStore
+	stop := func() {
+		if state != nil {
+			_ = state.Close()
+		}
 	}
-	pass := os.Getenv("DARBAAN_INBOUND_IMAP_PASSWORD")
-	dial := imapsync.Dialer(cli.InboundIMAPHost, cli.InboundIMAPUsername, pass)
-	syncer := imapsync.New(dial, cli.InboundIMAPMailbox, cli.AgentUsername, inbound.DefaultInbox, inbox, state, maxAge)
-	// Gmail label write-through (ADR 0020 20c): capability-gated, so harmless on a
-	// non-Gmail backend (reports not-supported → WriteKeywords uses plain keywords).
-	syncer.SetLabelStore(imapsync.RawGmailLabelStore(cli.InboundIMAPHost, cli.InboundIMAPUsername, pass, cli.InboundIMAPMailbox))
-	return syncer, func() { _ = state.Close() }, nil
+	for _, in := range inboxes {
+		if in.Backend.IMAPHost == "" {
+			continue // no upstream → no syncer (bounce-only / sync-disabled inbox)
+		}
+		if state == nil {
+			st, err := imapsync.NewStateStore(cli.InboundSyncDB)
+			if err != nil {
+				return nil, nil, err
+			}
+			state = st
+		}
+		maxAge, err := parseMaxAge(in.Backend.MaxAge)
+		if err != nil {
+			stop()
+			return nil, nil, fmt.Errorf("inbox %q max_age: %w", in.Name, err)
+		}
+		mailbox := in.Backend.IMAPMailbox
+		if mailbox == "" {
+			mailbox = "INBOX"
+		}
+		pass := inboxIMAPPassword(in.Name)
+		dial := imapsync.Dialer(in.Backend.IMAPHost, in.Backend.IMAPUsername, pass)
+		syn := imapsync.New(dial, mailbox, cli.AgentUsername, in.Name, store, state, maxAge)
+		// Gmail label write-through (ADR 0020 20c): capability-gated, harmless on a
+		// non-Gmail backend (reports not-supported → WriteKeywords uses plain keywords).
+		syn.SetLabelStore(imapsync.RawGmailLabelStore(in.Backend.IMAPHost, in.Backend.IMAPUsername, pass, mailbox))
+		syncers[in.Name] = syn
+	}
+	return syncers, stop, nil
 }
 
 // parseMaxAge parses the recency-cutoff duration: time.ParseDuration units
@@ -271,33 +305,39 @@ func parseMaxAge(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
-// imapContentFetch is the read face's on-demand content resolver: the syncer's
-// FetchContent when sync is on (serves a pending body by fetching upstream),
-// else nil — the read face then reads content from the store (no pending records
-// exist without sync).
-func imapContentFetch(syncer *imapsync.Syncer) listener.ContentFetch {
-	if syncer == nil {
-		return nil
+// imapContentFetch is the read face's on-demand content resolver: it dispatches a
+// FETCH to the SELECTed inbox's syncer (serves a pending body by fetching that
+// inbox's upstream), and falls back to a direct store read for an inbox with no
+// syncer (no upstream → no pending records).
+func imapContentFetch(syncers map[string]*imapsync.Syncer, store inbound.InboundStore) listener.ContentFetch {
+	return func(owner, inbox, id string) (inbound.Message, error) {
+		if syn := syncers[inbox]; syn != nil {
+			return syn.FetchContent(owner, inbox, id)
+		}
+		return store.Get(owner, inbox, id)
 	}
-	return syncer.FetchContent
 }
 
-// imapKeywordWriter is the read face's label write-through (ADR 0020): the
-// syncer's WriteKeywords when sync is on, else nil (local-only labels — a
-// sync-disabled deploy has no upstream to replicate to).
-func imapKeywordWriter(syncer *imapsync.Syncer) listener.KeywordWriter {
-	if syncer == nil {
+// imapKeywordWriter is the read face's label write-through (ADR 0020): it
+// dispatches to the SELECTed inbox's syncer; an inbox with no syncer replicates
+// nowhere (local-only labels). nil when no inbox has an upstream.
+func imapKeywordWriter(syncers map[string]*imapsync.Syncer) listener.KeywordWriter {
+	if len(syncers) == 0 {
 		return nil
 	}
-	return syncer.WriteKeywords
+	return func(owner, inbox, id string, add, remove []string) error {
+		if syn := syncers[inbox]; syn != nil {
+			return syn.WriteKeywords(owner, inbox, id, add, remove)
+		}
+		return nil
+	}
 }
 
-// runSyncLoop polls the upstream mailbox on the configured interval until ctx is
+// runSyncLoop polls one inbox's upstream on the configured interval until ctx is
 // cancelled. Sync errors are logged, never fatal — a flaky or unreachable
 // upstream must not take down serve.
-func (cli *CLI) runSyncLoop(ctx context.Context, syncer *imapsync.Syncer) {
-	fmt.Fprintf(os.Stderr, "darbaan: inbound sync on %s (%s as %s) every %s\n",
-		cli.InboundIMAPHost, cli.InboundIMAPMailbox, cli.InboundIMAPUsername, cli.InboundIMAPPollInterval)
+func (cli *CLI) runSyncLoop(ctx context.Context, inbox string, syncer *imapsync.Syncer) {
+	fmt.Fprintf(os.Stderr, "darbaan: inbound sync for inbox %q every %s\n", inbox, cli.InboundIMAPPollInterval)
 	t := time.NewTicker(cli.InboundIMAPPollInterval)
 	defer t.Stop()
 	runSync(ctx, syncer) // initial pull at startup
@@ -493,21 +533,10 @@ func (*ServeCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	// Inbound mailbox sync (ADR 0019) — built before the read face so its
-	// FetchContent serves pending bodies on demand. nil when no upstream is
-	// configured (the read face then reads content straight from the store).
-	syncer, stopSync, err := cli.newSyncer(inbox)
-	if err != nil {
-		return err
-	}
-	defer stopSync()
-
 	// Resolve the configured inboxes (ADR 0023): a config with no inboxes: is one
 	// implicit "default" inbox built from the legacy top-level flags, so a
 	// single-inbox deployment is unchanged. Each inbox's filter is compiled up
-	// front (fail-fast on a bad rule set). 3a wires the resolution + per-inbox
-	// filter map; the read face still serves the default inbox here — N mailboxes
-	// land in 3b.
+	// front (fail-fast on a bad rule set).
 	inboxes, err := cli.resolveInboxes()
 	if err != nil {
 		return err
@@ -521,6 +550,15 @@ func (*ServeCmd) Run(cli *CLI) error {
 		filters[in.Name] = f
 	}
 	flt := filters[inbound.DefaultInbox]
+
+	// One inbound syncer per inbox with an upstream (ADR 0019/0023), built before
+	// the read face so per-inbox FetchContent serves pending bodies on demand. An
+	// empty map = no inbox syncs.
+	syncers, stopSync, err := cli.newSyncers(inboxes, inbox)
+	if err != nil {
+		return err
+	}
+	defer stopSync()
 	// The inbound bounce-spoof guard (ADR 0024) runs ahead of the user filter on
 	// both faces, verifying with the bounce signer's own key. On by default; an
 	// explicit opt-out is logged. on_spoof=hold-for-human routes spoofs to the
@@ -540,7 +578,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 		Addr:          cli.IMAPAddr,
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
-	}, cred, inbox, imapContentFetch(syncer), imapKeywordWriter(syncer), filters, guard, holdSpoof)
+	}, cred, inbox, imapContentFetch(syncers, inbox), imapKeywordWriter(syncers), filters, guard, holdSpoof)
 	if err != nil {
 		return err
 	}
@@ -548,11 +586,13 @@ func (*ServeCmd) Run(cli *CLI) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Run the sync poll loop (shares the shutdown ctx; errors logged, never fatal).
-	if syncer != nil {
-		go cli.runSyncLoop(ctx, syncer)
-	} else {
-		fmt.Fprintln(os.Stderr, "darbaan: inbound sync disabled (no inbound-imap-host configured)")
+	// Run one sync poll loop per inbox with an upstream (shared shutdown ctx;
+	// errors logged, never fatal).
+	if len(syncers) == 0 {
+		fmt.Fprintln(os.Stderr, "darbaan: inbound sync disabled (no inbox has an upstream configured)")
+	}
+	for name, syn := range syncers {
+		go cli.runSyncLoop(ctx, name, syn)
 	}
 
 	closeAll := func() {
