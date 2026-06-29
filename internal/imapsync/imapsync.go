@@ -25,6 +25,7 @@ type Syncer struct {
 	dial       DialFunc
 	mailbox    string
 	owner      string // the agent whose mailbox this is
+	inbox      string // the named inbox this syncer feeds (ADR 0023); "" = DefaultInbox
 	store      inbound.InboundStore
 	state      StateStore
 	maxAge     time.Duration  // recency cutoff; 0 = no cutoff (ADR 0008)
@@ -36,10 +37,11 @@ type Syncer struct {
 // (capability-gated) and falls back to plain keywords elsewhere.
 func (s *Syncer) SetLabelStore(fn LabelStoreFunc) { s.labelStore = fn }
 
-// New builds a Syncer. owner is the agent the synced mail belongs to. maxAge is
+// New builds a Syncer. owner is the agent the synced mail belongs to; inbox is the
+// named inbox this syncer feeds (ADR 0023; empty reads as DefaultInbox). maxAge is
 // the recency cutoff for the initial/full sync (0 = pull everything).
-func New(dial DialFunc, mailbox, owner string, store inbound.InboundStore, state StateStore, maxAge time.Duration) *Syncer {
-	return &Syncer{dial: dial, mailbox: mailbox, owner: owner, store: store, state: state, maxAge: maxAge}
+func New(dial DialFunc, mailbox, owner, inbox string, store inbound.InboundStore, state StateStore, maxAge time.Duration) *Syncer {
+	return &Syncer{dial: dial, mailbox: mailbox, owner: owner, inbox: inbox, store: store, state: state, maxAge: maxAge}
 }
 
 // Dialer is the production DialFunc: TLS-connect to addr and log in with the
@@ -147,7 +149,7 @@ func (s *Syncer) pull(c *imapclient.Client, uidValidity, uidNext, last uint32) (
 		if uid <= last {
 			continue // dynamic "N:*" past-the-end guard
 		}
-		d := deliveryOf(s.owner, m)
+		d := deliveryOf(s.owner, s.inbox, m)
 		d.UpstreamUID = uid
 		d.UIDValidity = uidValidity
 		// Store headers-only (pending); the body is fetched on demand. Idempotent
@@ -252,7 +254,7 @@ func uidSetOf(uids []imap.UID) imap.UIDSet {
 // stale) or the message is gone upstream, so the read face can surface a
 // transient error rather than empty content.
 func (s *Syncer) FetchContent(owner, id string) (inbound.Message, error) {
-	m, err := s.store.Get(owner, inbound.DefaultInbox, id)
+	m, err := s.store.Get(owner, s.inbox, id)
 	if err != nil {
 		return inbound.Message{}, err
 	}
@@ -301,7 +303,7 @@ func (s *Syncer) FetchContent(owner, id string) (inbound.Message, error) {
 	if raw == nil {
 		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: upstream uid %d not found", id, m.UpstreamUID)
 	}
-	return s.store.SetContent(owner, inbound.DefaultInbox, id, raw)
+	return s.store.SetContent(owner, s.inbox, id, raw)
 }
 
 // WriteKeywords replicates a message's keyword set to the upstream backend over a
@@ -314,7 +316,7 @@ func (s *Syncer) WriteKeywords(owner, id string, add, remove []string) error {
 	if len(add) == 0 && len(remove) == 0 {
 		return nil
 	}
-	m, err := s.store.Get(owner, inbound.DefaultInbox, id)
+	m, err := s.store.Get(owner, s.inbox, id)
 	if err != nil {
 		return err
 	}
@@ -364,7 +366,7 @@ func (s *Syncer) WriteKeywords(owner, id string, add, remove []string) error {
 // write whose immediate upstream replicate failed is retried here on the next sync
 // (ADR 0020). Best-effort: failures are logged, never fatal to the sync.
 func (s *Syncer) reconcileKeywords() {
-	dirty, err := s.store.DirtyKeywords(s.owner, inbound.DefaultInbox)
+	dirty, err := s.store.DirtyKeywords(s.owner, s.inbox)
 	if err != nil {
 		log.Printf("darbaan: keyword reconcile list: %v", err)
 		return
@@ -378,7 +380,7 @@ func (s *Syncer) reconcileKeywords() {
 			log.Printf("darbaan: keyword reconcile %s deferred: %v", m.ID, err)
 			continue
 		}
-		if err := s.store.ClearKeywordsDirty(s.owner, inbound.DefaultInbox, m.ID); err != nil {
+		if err := s.store.ClearKeywordsDirty(s.owner, s.inbox, m.ID); err != nil {
 			log.Printf("darbaan: keyword reconcile clear %s: %v", m.ID, err)
 		}
 	}
@@ -392,8 +394,8 @@ func toFlags(kw []string) []imap.Flag {
 	return f
 }
 
-func deliveryOf(owner string, m *imapclient.FetchMessageBuffer) inbound.Delivery {
-	d := inbound.Delivery{Owner: owner, Raw: rawBody(m), Size: m.RFC822Size, Keywords: keywordsOf(m.Flags)}
+func deliveryOf(owner, inbox string, m *imapclient.FetchMessageBuffer) inbound.Delivery {
+	d := inbound.Delivery{Owner: owner, Inbox: inbox, Raw: rawBody(m), Size: m.RFC822Size, Keywords: keywordsOf(m.Flags)}
 	if m.Envelope != nil {
 		d.Subject = m.Envelope.Subject
 		d.From = firstAddr(m.Envelope.From)
