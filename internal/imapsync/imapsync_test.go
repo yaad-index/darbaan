@@ -127,7 +127,7 @@ func TestSyncPullsIncrementally(t *testing.T) {
 	assert.Equal(t, 0, n)
 
 	// The body is fetched on demand.
-	filled, err := syncer.FetchContent("agent", msgs[0].ID)
+	filled, err := syncer.FetchContent("agent", inbound.DefaultInbox, msgs[0].ID)
 	require.NoError(t, err)
 	assert.False(t, filled.Pending)
 	assert.Contains(t, string(filled.Raw), "body")
@@ -202,7 +202,7 @@ func TestFetchContentFillsPending(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, m.Pending)
 
-	filled, err := syncer.FetchContent("agent", m.ID)
+	filled, err := syncer.FetchContent("agent", inbound.DefaultInbox, m.ID)
 	require.NoError(t, err)
 	assert.False(t, filled.Pending)
 	assert.Contains(t, string(filled.Raw), "real body")
@@ -213,7 +213,7 @@ func TestFetchContentFillsPending(t *testing.T) {
 	assert.Contains(t, string(got.Raw), "real body")
 
 	// Present message → no upstream contact, returned as-is.
-	again, err := syncer.FetchContent("agent", m.ID)
+	again, err := syncer.FetchContent("agent", inbound.DefaultInbox, m.ID)
 	require.NoError(t, err)
 	assert.False(t, again.Pending)
 }
@@ -229,7 +229,7 @@ func TestFetchContentStaleUIDValidity(t *testing.T) {
 	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 999})
 	require.NoError(t, err)
 
-	_, err = syncer.FetchContent("agent", m.ID)
+	_, err = syncer.FetchContent("agent", inbound.DefaultInbox, m.ID)
 	require.Error(t, err)
 }
 
@@ -310,11 +310,11 @@ func TestWriteKeywordsToUpstream(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
 
-	require.NoError(t, syncer.WriteKeywords("agent", msgs[0].ID, []string{"useless", "handled"}, nil))
+	require.NoError(t, syncer.WriteKeywords("agent", inbound.DefaultInbox, msgs[0].ID, []string{"useless", "handled"}, nil))
 	assert.ElementsMatch(t, []string{"useless", "handled"}, upstreamKeywords(t, addr, 1))
 
 	// Removing one via the delta.
-	require.NoError(t, syncer.WriteKeywords("agent", msgs[0].ID, nil, []string{"useless"}))
+	require.NoError(t, syncer.WriteKeywords("agent", inbound.DefaultInbox, msgs[0].ID, nil, []string{"useless"}))
 	assert.ElementsMatch(t, []string{"handled"}, upstreamKeywords(t, addr, 1))
 }
 
@@ -335,14 +335,14 @@ func TestWriteKeywordsRoutesToLabelStore(t *testing.T) {
 	var gotUID uint32
 	var gotAdd []string
 	syncer.SetLabelStore(func(uid, _ uint32, add, remove []string) error { gotUID, gotAdd = uid, add; return nil })
-	require.NoError(t, syncer.WriteKeywords("agent", id, []string{"useless"}, nil))
+	require.NoError(t, syncer.WriteKeywords("agent", inbound.DefaultInbox, id, []string{"useless"}, nil))
 	assert.Equal(t, uint32(1), gotUID)
 	assert.Equal(t, []string{"useless"}, gotAdd)
 	assert.Empty(t, upstreamKeywords(t, addr, 1)) // went the label path, not keywords
 
 	// ErrNotXGM → fall back to a plain keyword STORE.
 	syncer.SetLabelStore(func(uid, _ uint32, add, remove []string) error { return imapsync.ErrNotXGM })
-	require.NoError(t, syncer.WriteKeywords("agent", id, []string{"plainkw"}, nil))
+	require.NoError(t, syncer.WriteKeywords("agent", inbound.DefaultInbox, id, []string{"plainkw"}, nil))
 	assert.ElementsMatch(t, []string{"plainkw"}, upstreamKeywords(t, addr, 1))
 }
 

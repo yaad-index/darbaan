@@ -540,7 +540,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 		Addr:          cli.IMAPAddr,
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
-	}, cred, inbox, imapContentFetch(syncer), imapKeywordWriter(syncer), flt, guard, holdSpoof)
+	}, cred, inbox, imapContentFetch(syncer), imapKeywordWriter(syncer), filters, guard, holdSpoof)
 	if err != nil {
 		return err
 	}

@@ -39,14 +39,14 @@ type IMAPServerConfig struct {
 // ContentFetch resolves a message's full content (Raw) on demand: for a present
 // record from its blob, for a pending record by fetching the body from upstream
 // (lazy, ADR 0019). It is called per-FETCH, never at SELECT.
-type ContentFetch func(owner, id string) (inbound.Message, error)
+type ContentFetch func(owner, inbox, id string) (inbound.Message, error)
 
 // KeywordWriter replicates a keyword change to the upstream backend as an
 // add/remove delta (the label write-through, ADR 0020). The local store is
 // canonical; a returned error means the upstream replicate failed and is
 // reconciled later. nil disables write-through (local-only labels — e.g. sync
 // disabled).
-type KeywordWriter func(owner, id string, add, remove []string) error
+type KeywordWriter func(owner, inbox, id string, add, remove []string) error
 
 // IMAPServer serves the agent's mailbox (the InboundStore) over IMAP as a
 // translation adapter (ADR 0016): the store is canonical. SELECT snapshots
@@ -60,16 +60,23 @@ type IMAPServer struct {
 // content on demand; if nil it defaults to reading straight from the store
 // (no upstream — bounce-only / sync-disabled deployments have no pending
 // records).
-func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter, flt *filter.Filter, guard *bounceguard.Guard, holdSpoof bool) (*IMAPServer, error) {
+// filters maps each inbox name to its compiled serve-time filter (ADR 0021/0022).
+// The keys are the configured inboxes (ADR 0023); each is exposed as an IMAP
+// mailbox (the default inbox as INBOX). A single-inbox deploy passes one entry
+// keyed DefaultInbox.
+func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter, filters map[string]*filter.Filter, guard *bounceguard.Guard, holdSpoof bool) (*IMAPServer, error) {
 	if cfg.TLSConfig == nil && !cfg.AllowInsecure {
 		return nil, errors.New("listener: IMAP TLS required (set TLSConfig, or AllowInsecure for local testing)")
 	}
+	if len(filters) == 0 {
+		filters = map[string]*filter.Filter{inbound.DefaultInbox: nil} // no filter = allow-all default inbox
+	}
 	if fetch == nil {
-		fetch = func(owner, id string) (inbound.Message, error) { return store.Get(owner, inbound.DefaultInbox, id) }
+		fetch = func(owner, inbox, id string) (inbound.Message, error) { return store.Get(owner, inbox, id) }
 	}
 	srv := imapserver.New(&imapserver.Options{
 		NewSession: func(_ *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return &imapSession{cred: cred, store: store, fetch: fetch, writeKeywords: writeKeywords, filter: flt, guard: guard, holdSpoof: holdSpoof}, nil, nil
+			return &imapSession{cred: cred, store: store, fetch: fetch, writeKeywords: writeKeywords, filters: filters, guard: guard, holdSpoof: holdSpoof}, nil, nil
 		},
 		TLSConfig:    cfg.TLSConfig,
 		InsecureAuth: cfg.AllowInsecure,
@@ -92,14 +99,45 @@ func (s *IMAPServer) Close() error { return s.imap.Close() }
 type imapSession struct {
 	cred          Credential
 	store         inbound.InboundStore
-	fetch         ContentFetch       // resolves message content on demand (per-FETCH)
-	writeKeywords KeywordWriter      // replicates a keyword change upstream (nil = local-only)
-	filter        *filter.Filter     // serve-time inbound filter (nil = allow all; ADR 0021)
-	guard         *bounceguard.Guard // inbound bounce-spoof guard, ahead of the filter (nil = off; ADR 0024)
-	holdSpoof     bool               // on_spoof=hold-for-human → held-semantics; false = hide
+	fetch         ContentFetch              // resolves message content on demand (per-FETCH)
+	writeKeywords KeywordWriter             // replicates a keyword change upstream (nil = local-only)
+	filters       map[string]*filter.Filter // per-inbox serve-time filter (ADR 0021/0022/0023)
+	guard         *bounceguard.Guard        // inbound bounce-spoof guard, ahead of the filter (nil = off; ADR 0024)
+	holdSpoof     bool                      // on_spoof=hold-for-human → held-semantics; false = hide
 	owner         string
+	selectedInbox string // the inbox name of the SELECTed mailbox (ADR 0023)
 	authed        bool
 	selected      []inbound.Message // metadata snapshot taken at Select (no content)
+}
+
+// mailboxName maps an inbox name to its IMAP mailbox name: the default inbox is
+// exposed as INBOX (back-compat), every other inbox by its own name (ADR 0023).
+func mailboxName(inbox string) string {
+	if inbox == inbound.DefaultInbox {
+		return imapMailbox
+	}
+	return inbox
+}
+
+// resolveMailbox maps an IMAP mailbox name back to a configured inbox name,
+// reporting whether it exists.
+func (s *imapSession) resolveMailbox(mailbox string) (string, bool) {
+	for inbox := range s.filters {
+		if mailboxName(inbox) == mailbox {
+			return inbox, true
+		}
+	}
+	return "", false
+}
+
+// mailboxNames returns the exposed IMAP mailbox names, sorted for stable LIST.
+func (s *imapSession) mailboxNames() []string {
+	names := make([]string, 0, len(s.filters))
+	for inbox := range s.filters {
+		names = append(names, mailboxName(inbox))
+	}
+	sort.Strings(names)
+	return names
 }
 
 // listAndFilter returns the owner's full message list and the filtered-visible
@@ -108,26 +146,27 @@ type imapSession struct {
 // when the highest-UID messages are hidden, breaking client sync. allow is
 // visible; hide and undecided/rejected hold are omitted. Evaluated fresh each
 // call (no cache).
-func (s *imapSession) listAndFilter() (full, visible []inbound.Message, err error) {
-	full, err = s.store.List(s.owner, inbound.DefaultInbox)
+func (s *imapSession) listAndFilter(inbox string) (full, visible []inbound.Message, err error) {
+	full, err = s.store.List(s.owner, inbox)
 	if err != nil {
 		return nil, nil, err
 	}
+	flt := s.filters[inbox] // per-inbox filter (ADR 0023); nil = allow-all
 	now := time.Now()
 	for _, m := range full { // new backing slice — leave full intact for UIDNEXT
 		// The bounce-spoof guard runs AHEAD of the user filter (ADR 0024): it is a
 		// security floor, so a spoof can't be surfaced by a permissive default or a
 		// broad allow rule.
 		if s.guard != nil {
-			if s.guardHides(m) {
+			if s.guardHides(m, inbox) {
 				continue
 			}
 		}
-		if s.filter == nil {
+		if flt == nil {
 			visible = append(visible, m)
 			continue
 		}
-		switch s.filter.Decide(m, now) {
+		switch flt.Decide(m, now) {
 		case filter.Allow:
 			visible = append(visible, m)
 		case filter.Hold:
@@ -148,9 +187,9 @@ func (s *imapSession) listAndFilter() (full, visible []inbound.Message, err erro
 // (the user filter then applies). A guard error is fail-CLOSED (Verdict returns
 // spoof=true for a bounce-shaped candidate it couldn't fetch/verify, ADR 0024);
 // it is logged and the message is hidden.
-func (s *imapSession) guardHides(m inbound.Message) bool {
+func (s *imapSession) guardHides(m inbound.Message, inbox string) bool {
 	spoof, err := s.guard.Verdict(envelopeFromLocals(m), m.Raw, func() ([]byte, error) {
-		fm, e := s.fetch(s.owner, m.ID)
+		fm, e := s.fetch(s.owner, inbox, m.ID)
 		return fm.Raw, e
 	})
 	if err != nil {
@@ -202,10 +241,12 @@ func (s *imapSession) Login(username, password string) error {
 }
 
 func (s *imapSession) Select(mailbox string, _ *imap.SelectOptions) (*imap.SelectData, error) {
-	if mailbox != imapMailbox {
+	inbox, ok := s.resolveMailbox(mailbox)
+	if !ok {
 		return nil, fmt.Errorf("imap: no such mailbox %q", mailbox)
 	}
-	full, visible, err := s.listAndFilter()
+	s.selectedInbox = inbox
+	full, visible, err := s.listAndFilter(inbox)
 	if err != nil {
 		return nil, err
 	}
@@ -245,10 +286,11 @@ func (s *imapSession) Unselect() error {
 }
 
 func (s *imapSession) Status(mailbox string, options *imap.StatusOptions) (*imap.StatusData, error) {
-	if mailbox != imapMailbox {
+	inbox, ok := s.resolveMailbox(mailbox)
+	if !ok {
 		return nil, fmt.Errorf("imap: no such mailbox %q", mailbox)
 	}
-	full, visible, err := s.listAndFilter()
+	full, visible, err := s.listAndFilter(inbox) // a query, not a selection — selectedInbox unchanged
 	if err != nil {
 		return nil, err
 	}
@@ -279,10 +321,14 @@ func (s *imapSession) List(w *imapserver.ListWriter, _ string, patterns []string
 	if len(patterns) == 0 {
 		return nil // LIST "" "" is a delimiter query; nothing to enumerate
 	}
-	return w.WriteList(&imap.ListData{
-		Mailbox: imapMailbox,
-		Delim:   '/',
-	})
+	// Advertise every configured inbox as a mailbox (the default inbox as INBOX),
+	// in stable order (ADR 0023).
+	for _, name := range s.mailboxNames() {
+		if err := w.WriteList(&imap.ListData{Mailbox: name, Delim: '/'}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *imapSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
@@ -300,7 +346,7 @@ func (s *imapSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 			return
 		}
 		if markSeen && !m.Seen {
-			if err := s.store.SetSeen(s.owner, inbound.DefaultInbox, m.ID, true); err != nil {
+			if err := s.store.SetSeen(s.owner, s.selectedInbox, m.ID, true); err != nil {
 				ferr = err
 				return
 			}
@@ -333,7 +379,7 @@ func (s *imapSession) rawResolver(m inbound.Message) rawFunc {
 		if !done {
 			done = true
 			var full inbound.Message
-			if full, err = s.fetch(s.owner, m.ID); err == nil {
+			if full, err = s.fetch(s.owner, s.selectedInbox, m.ID); err == nil {
 				raw = full.Raw
 			}
 		}
@@ -352,7 +398,7 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 			return
 		}
 		if touchesSeen && m.Seen != seen {
-			if err := s.store.SetSeen(s.owner, inbound.DefaultInbox, m.ID, seen); err != nil {
+			if err := s.store.SetSeen(s.owner, s.selectedInbox, m.ID, seen); err != nil {
 				serr = err
 				return
 			}
@@ -363,7 +409,7 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 		if flags.Op == imap.StoreFlagsSet || len(kw) > 0 {
 			next, added, removed := applyKeywordOp(m.Keywords, flags.Op, kw)
 			if len(added) > 0 || len(removed) > 0 {
-				if _, err := s.store.SetKeywords(s.owner, inbound.DefaultInbox, m.ID, next); err != nil {
+				if _, err := s.store.SetKeywords(s.owner, s.selectedInbox, m.ID, next); err != nil {
 					serr = err
 					return
 				}
@@ -373,10 +419,10 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 				// Skip records with no upstream (locally-generated, e.g. bounces) —
 				// their labels are local-only, nothing to replicate.
 				if s.writeKeywords != nil && m.UpstreamUID != 0 {
-					if err := s.writeKeywords(s.owner, m.ID, added, removed); err != nil {
+					if err := s.writeKeywords(s.owner, s.selectedInbox, m.ID, added, removed); err != nil {
 						log.Printf("darbaan: imap keyword write-through for %s deferred: %v", m.ID, err)
 					} else {
-						_ = s.store.ClearKeywordsDirty(s.owner, inbound.DefaultInbox, m.ID)
+						_ = s.store.ClearKeywordsDirty(s.owner, s.selectedInbox, m.ID)
 					}
 				}
 			}

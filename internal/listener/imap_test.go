@@ -45,11 +45,63 @@ func startIMAPFull(t *testing.T, store inbound.InboundStore, fetch listener.Cont
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		listener.Credential{Username: "agent", Password: "pw"}, store, fetch, wk, flt, nil, false)
+		listener.Credential{Username: "agent", Password: "pw"}, store, fetch, wk, map[string]*filter.Filter{inbound.DefaultInbox: flt}, nil, false)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return l.Addr().String()
+}
+
+func startIMAPMulti(t *testing.T, store inbound.InboundStore, filters map[string]*filter.Filter) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
+		listener.Credential{Username: "agent", Password: "pw"}, store, nil, nil, filters, nil, false)
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return l.Addr().String()
+}
+
+// ADR 0023: each configured inbox is a named IMAP mailbox (the default inbox as
+// INBOX); SELECT serves that inbox's records, isolated from the others.
+func TestIMAPMultiInbox(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	_, err = store.Add(inbound.Delivery{Owner: "agent", Subject: "d", Raw: []byte("Subject: d\r\n\r\nd")})
+	require.NoError(t, err)
+	_, err = store.Add(inbound.Delivery{Owner: "agent", Inbox: "work", Subject: "w", Raw: []byte("Subject: w\r\n\r\nw")})
+	require.NoError(t, err)
+
+	addr := startIMAPMulti(t, store, map[string]*filter.Filter{inbound.DefaultInbox: nil, "work": nil})
+	c, err := imapclient.DialInsecure(addr, nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+
+	// LIST advertises the default inbox as INBOX plus the named "work" mailbox.
+	boxes, err := c.List("", "*", nil).Collect()
+	require.NoError(t, err)
+	names := map[string]bool{}
+	for _, b := range boxes {
+		names[b.Mailbox] = true
+	}
+	assert.True(t, names["INBOX"], "LIST shows INBOX (default inbox)")
+	assert.True(t, names["work"], "LIST shows the work mailbox")
+
+	// Each mailbox serves only its own inbox's records.
+	selWork, err := c.Select("work", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1), selWork.NumMessages)
+	selInbox, err := c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1), selInbox.NumMessages)
+
+	// A mailbox that isn't configured does not exist.
+	_, err = c.Select("nope", nil).Wait()
+	require.Error(t, err)
 }
 
 // A body FETCH of a pending (headers-only) record resolves its content on demand
@@ -62,7 +114,7 @@ func TestIMAPFetchResolvesPendingOnDemand(t *testing.T) {
 	require.NoError(t, err) // pending record at seq 2
 
 	var fetchCalls int
-	fetch := func(owner, id string) (inbound.Message, error) {
+	fetch := func(owner, inbox, id string) (inbound.Message, error) {
 		fetchCalls++
 		if id == m.ID { // simulate the on-demand upstream fill
 			return store.SetContent(owner, inbound.DefaultInbox, id, []byte("Subject: lazy\r\n\r\nlazy-body"))
@@ -231,7 +283,7 @@ func TestIMAPEnvelopeAndHeaderSearchFromMetadata(t *testing.T) {
 	require.NoError(t, err)
 
 	var fetchCalls int
-	fetch := func(owner, id string) (inbound.Message, error) {
+	fetch := func(owner, inbox, id string) (inbound.Message, error) {
 		fetchCalls++
 		return store.Get(owner, inbound.DefaultInbox, id)
 	}
@@ -324,7 +376,7 @@ func TestIMAPStoreKeywordWritesThrough(t *testing.T) {
 
 	var wroteID string
 	var wroteAdd []string
-	wk := func(owner, id string, add, remove []string) error { wroteID, wroteAdd = id, add; return nil }
+	wk := func(owner, inbox, id string, add, remove []string) error { wroteID, wroteAdd = id, add; return nil }
 
 	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk, nil), nil)
 	require.NoError(t, err)
@@ -355,7 +407,7 @@ func TestIMAPStoreKeywordWriteFailureStaysDirty(t *testing.T) {
 	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1})
 	require.NoError(t, err)
 
-	wk := func(owner, id string, add, remove []string) error { return errors.New("upstream down") }
+	wk := func(owner, inbox, id string, add, remove []string) error { return errors.New("upstream down") }
 
 	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk, nil), nil)
 	require.NoError(t, err)
@@ -382,7 +434,7 @@ func TestIMAPStoreKeywordWriteFailureStaysDirty(t *testing.T) {
 func TestIMAPStoreKeywordLocalOnlyNoUpstream(t *testing.T) {
 	store := seedInbound(t) // a bounce: Add → no UpstreamUID, seq 1
 	called := false
-	wk := func(owner, id string, add, remove []string) error { called = true; return nil }
+	wk := func(owner, inbox, id string, add, remove []string) error { called = true; return nil }
 
 	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, wk, nil), nil)
 	require.NoError(t, err)
