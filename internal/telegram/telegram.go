@@ -194,23 +194,31 @@ func (c *Client) notify(ctx context.Context, m sluice.Meta) error {
 	// The decision message + keyboard is the anchor and the gating send: it is
 	// marked posted on success, so a later attachment-upload failure never
 	// causes a duplicate re-notify.
+	text, bodyOffloaded := formatNotification(n)
 	sent, err := c.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      c.operatorID,
-		Text:        formatNotification(n),
+		Text:        text,
 		ReplyMarkup: decisionKeyboard(m.ID),
 	})
 	if err != nil {
 		return err
+	}
+	var anchorID int
+	if sent != nil {
+		anchorID = sent.ID
+	}
+	// When the body overflowed the inline cap, attach the full decoded body as a
+	// .txt onto the decision message (ADR 0025) — FIRST, before the email's own
+	// attachments, so the operator reviews the complete text. The caption (not the
+	// filename) is the trust anchor distinguishing it from sender-controlled files.
+	if bodyOffloaded {
+		c.sendFullBody(ctx, m.ID, anchorID, n.body)
 	}
 	// Then upload each attachment so the operator can open the real file before
 	// approving — best-effort, after the anchor (the metadata line already
 	// describes them, so an upload failure degrades, never blocks the decision).
 	// Each doc is threaded under the decision message so several held messages'
 	// files don't mix.
-	var anchorID int
-	if sent != nil {
-		anchorID = sent.ID
-	}
 	c.sendAttachments(ctx, m.ID, anchorID, n.attachments)
 	return nil
 }
@@ -246,6 +254,47 @@ func (c *Client) sendAttachments(ctx context.Context, queueID string, anchorID i
 // which approval it belongs to (e.g. "msg 18 - invoice.pdf").
 func attachmentCaption(queueID, filename string) string {
 	return fmt.Sprintf("msg %s - %s", queueID, filename)
+}
+
+// fullBodyFilename labels the offloaded full-body document (ADR 0025). The
+// filename is only a hint — a sender can name a carried attachment anything — so
+// the caption (below), which is Darbaan-authored and a sender cannot reproduce,
+// is what actually distinguishes this from the email's own attachments.
+const fullBodyFilename = "full-message-body.txt"
+
+// sendFullBody uploads the complete decoded text body as a .txt threaded onto the
+// decision message (ADR 0025) when it was too long to render inline. Best-effort:
+// a failed upload degrades to the truncated inline preview, never blocks the
+// decision. Sent before the email's own attachments so it is the first document
+// under the decision message.
+func (c *Client) sendFullBody(ctx context.Context, queueID string, anchorID int, body string) {
+	data := []byte(body)
+	if len(data) == 0 {
+		return
+	}
+	if len(data) > maxUpload {
+		log.Printf("darbaan telegram: full body %s too large to attach (%d bytes)", queueID, len(data))
+		return
+	}
+	params := &bot.SendDocumentParams{
+		ChatID:   c.operatorID,
+		Document: &models.InputFileUpload{Filename: fullBodyFilename, Data: bytes.NewReader(data)},
+		Caption:  fullBodyCaption(queueID),
+	}
+	if anchorID != 0 {
+		params.ReplyParameters = &models.ReplyParameters{MessageID: anchorID}
+	}
+	if _, err := c.bot.SendDocument(ctx, params); err != nil {
+		log.Printf("darbaan telegram: upload full body %s: %v", queueID, err)
+	}
+}
+
+// fullBodyCaption is the trust anchor for the offloaded body (ADR 0025): it states
+// the document is the full text of the message under review and, explicitly, that
+// it is NOT a file the email carried — caption text a sender cannot influence,
+// unlike a filename that a carried attachment could mimic.
+func fullBodyCaption(queueID string) string {
+	return fmt.Sprintf("msg %s - FULL MESSAGE BODY under review (NOT a file the email carried)", queueID)
 }
 
 // prunePosted drops de-dup entries for messages no longer pending, bounding the
@@ -303,10 +352,12 @@ const maxNotificationRunes = 3900
 
 // formatNotification renders the headers (human address forms, plus a flag for
 // any hidden recipient) followed by the message body so the operator reviews
-// the content before deciding. The body is truncated (rune-safe) with a marker
-// when the whole notification would exceed the cap. Plain text — no parse mode,
-// so addresses and subjects never need markdown escaping.
-func formatNotification(n notification) string {
+// the content before deciding. When the whole notification would exceed the cap
+// the body is truncated (rune-safe) with a marker that names the attached full
+// body (ADR 0025); the returned bool reports that offload so the caller uploads
+// the full text as a .txt. Plain text — no parse mode, so addresses and subjects
+// never need markdown escaping.
+func formatNotification(n notification) (text string, bodyOffloaded bool) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Held outbound message\nid: %s\nfrom: %s\nto: %s\nsubject: %s\nsize: %d bytes",
 		n.id, n.from, n.to, n.subject, n.size)
@@ -319,17 +370,18 @@ func formatNotification(n notification) string {
 	// first, the attachment list always survives.
 	suffix := "\n\n" + attachmentsLine(n.attachments)
 	if n.body == "" {
-		return header + "\n\n(no text body)" + suffix
+		return header + "\n\n(no text body)" + suffix, false
 	}
 	prefix := header + "\n\n--- body ---\n"
-	avail := maxNotificationRunes - len([]rune(prefix)) - len([]rune(suffix)) - 40 // room for the marker
+	marker := "\n...[truncated — full body attached as " + fullBodyFilename + "]"
+	avail := maxNotificationRunes - len([]rune(prefix)) - len([]rune(suffix)) - len([]rune(marker))
 	if avail < 0 {
 		avail = 0
 	}
 	if br := []rune(n.body); len(br) > avail {
-		return prefix + string(br[:avail]) + fmt.Sprintf("\n...(truncated, %d bytes)", len(n.body)) + suffix
+		return prefix + string(br[:avail]) + marker + suffix, true
 	}
-	return prefix + n.body + suffix
+	return prefix + n.body + suffix, false
 }
 
 // attachmentsLine lists the attachments (filename, content-type, human size) —

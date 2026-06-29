@@ -37,24 +37,27 @@ func TestBodyTextNoTextPart(t *testing.T) {
 }
 
 func TestFormatNotificationBody(t *testing.T) {
-	out := formatNotification(notification{id: "7", from: "Alice <a@x>", to: "Bob <b@y>", subject: "s", size: 10, body: "the message body"})
+	out, offloaded := formatNotification(notification{id: "7", from: "Alice <a@x>", to: "Bob <b@y>", subject: "s", size: 10, body: "the message body"})
+	assert.False(t, offloaded) // short body fits inline
 	assert.Contains(t, out, "from: Alice <a@x>")
 	assert.Contains(t, out, "to: Bob <b@y>")
 	assert.Contains(t, out, "subject: s")
 	assert.Contains(t, out, "--- body ---")
 	assert.Contains(t, out, "the message body")
 
-	assert.Contains(t, formatNotification(notification{id: "7", body: ""}), "(no text body)")
+	empty, _ := formatNotification(notification{id: "7", body: ""})
+	assert.Contains(t, empty, "(no text body)")
 }
 
 func TestFormatNotificationTruncates(t *testing.T) {
-	out := formatNotification(notification{id: "7", subject: "s", body: strings.Repeat("x", 8000)})
+	out, offloaded := formatNotification(notification{id: "7", subject: "s", body: strings.Repeat("x", 8000)})
+	assert.True(t, offloaded) // long body offloaded to a .txt attachment
 	assert.LessOrEqual(t, len([]rune(out)), maxNotificationRunes)
-	assert.Contains(t, out, "...(truncated, 8000 bytes)")
+	assert.Contains(t, out, "full body attached as full-message-body.txt")
 }
 
 func TestFormatNotificationHidden(t *testing.T) {
-	out := formatNotification(notification{id: "7", to: "Bob <b@y>", hidden: []string{"secret@z"}, body: "x"})
+	out, _ := formatNotification(notification{id: "7", to: "Bob <b@y>", hidden: []string{"secret@z"}, body: "x"})
 	assert.Contains(t, out, "(!) also delivering to (not in headers): secret@z")
 }
 
@@ -113,6 +116,15 @@ func TestAttachmentCaption(t *testing.T) {
 	assert.Equal(t, "msg 18 - invoice.pdf", attachmentCaption("18", "invoice.pdf"))
 }
 
+func TestFullBodyCaption(t *testing.T) {
+	// The caption is the trust anchor (ADR 0025): it names the message id and
+	// states explicitly that this is NOT a file the email carried.
+	caption := fullBodyCaption("18")
+	assert.Contains(t, caption, "msg 18")
+	assert.Contains(t, caption, "FULL MESSAGE BODY")
+	assert.Contains(t, caption, "NOT a file the email carried")
+}
+
 func TestHumanSize(t *testing.T) {
 	assert.Equal(t, "512 B", humanSize(512))
 	assert.Equal(t, "1 KB", humanSize(1024))
@@ -135,10 +147,11 @@ func TestFormatNotificationAttachmentsSurviveTruncation(t *testing.T) {
 		id: "7", subject: "s", body: strings.Repeat("x", 8000),
 		attachments: []attachment{{filename: "secret.pdf", contentType: "application/pdf", size: 1024}},
 	}
-	out := formatNotification(n)
+	out, offloaded := formatNotification(n)
+	assert.True(t, offloaded)
 	assert.LessOrEqual(t, len([]rune(out)), maxNotificationRunes)
-	assert.Contains(t, out, "secret.pdf")    // attachment list survives a long-body truncation
-	assert.Contains(t, out, "...(truncated") // ...because the body truncated instead
+	assert.Contains(t, out, "secret.pdf")        // attachment list survives a long-body truncation
+	assert.Contains(t, out, "[truncated — full") // ...because the body offloaded instead
 }
 
 func TestPrunePosted(t *testing.T) {
