@@ -64,10 +64,13 @@ via **that inbox's backend**. The match is on the **RFC 5321 address-portion**
 display name or address casing never changes which inbox is selected. A reply
 defaults to the identity of the inbox that **received** the original
 (Darbaan knows which mailbox a held/synced message belongs to), so "reply" stays on
-the right account without the agent having to restate it. A From that matches no
-configured identity is **rejected at submit** (fail-closed, ADR 0003 spirit) rather
-than silently sent from a default — sending as the wrong account is the failure mode
-to prevent.
+the right account without the agent having to restate it. A submit From whose
+address matches a configured inbox `identity` routes to that inbox; otherwise, if a
+`default` inbox exists it routes there (**catch-all**, From **not rewritten** —
+preserves N=1/legacy behavior); otherwise it is **rejected at submit** (fail-closed,
+ADR 0003 spirit). So N=1 (the implicit `default`) accepts any From byte-for-byte,
+and a multi-inbox config with no `default` rejects an unmatched From — sending as
+the wrong account is the failure mode to prevent.
 
 ### Sender override at the approval gate (Change)
 
@@ -123,8 +126,10 @@ what turns on multi-inbox.
   future multi-agent split but cost credential multiplication now.
 - **Mailbox naming:** flat (`work`, `personal`) vs nested under `INBOX/`. Leaning
   flat top-level mailboxes; minor, settle in implementation.
-- **Unmatched-From on submit:** reject (chosen) vs route to a configured default
-  inbox. Reject is safer; revisit if it proves annoying in practice.
+- **Unmatched-From on submit:** resolved to matched-identity → that inbox, else a
+  configured `default` inbox as catch-all (From not rewritten), else reject. This
+  keeps N=1 byte-for-byte (the implicit `default` is the catch-all) while a
+  multi-inbox config with no `default` still rejects unmatched-From.
 
 ## Follow-ups
 

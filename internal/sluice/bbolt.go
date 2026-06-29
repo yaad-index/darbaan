@@ -129,6 +129,7 @@ func (s *bboltStore) Enqueue(sub Submission) (Message, error) {
 		msg = Message{
 			ID:         strconv.FormatUint(seq, 10),
 			Agent:      sub.Agent,
+			Inbox:      sub.Inbox,
 			From:       sub.From,
 			Rcpt:       append([]string(nil), sub.Rcpt...),
 			Raw:        sub.Raw,

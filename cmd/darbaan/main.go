@@ -522,17 +522,6 @@ func (*ServeCmd) Run(cli *CLI) error {
 		return err
 	}
 
-	// One local service hosts both agent faces (ADR 0001): SMTP submission
-	// (outbound trap) and IMAP read (the agent reads its bounces).
-	smtpSrv, err := listener.NewServer(listener.ServerConfig{
-		Addr:          cli.ListenerAddr,
-		Domain:        cli.ListenerDomain,
-		TLSConfig:     tlsConfig,
-		AllowInsecure: cli.ListenerAllowInsecure,
-	}, cred, q)
-	if err != nil {
-		return err
-	}
 	// Resolve the configured inboxes (ADR 0023): a config with no inboxes: is one
 	// implicit "default" inbox built from the legacy top-level flags, so a
 	// single-inbox deployment is unchanged. Each inbox's filter is compiled up
@@ -548,6 +537,23 @@ func (*ServeCmd) Run(cli *CLI) error {
 			return fmt.Errorf("inbox %q: %w", in.Name, ferr)
 		}
 		filters[in.Name] = f
+	}
+
+	// One local service hosts both agent faces (ADR 0001): SMTP submission
+	// (outbound trap) and IMAP read (the agent reads its bounces). The submission
+	// face routes each From to an inbox (ADR 0023): matched Identity → that inbox,
+	// else the default catch-all, else refused at MAIL FROM.
+	route := func(from string) (string, bool) {
+		return inboxcfg.Route(inboxes, from, inbound.DefaultInbox)
+	}
+	smtpSrv, err := listener.NewServer(listener.ServerConfig{
+		Addr:          cli.ListenerAddr,
+		Domain:        cli.ListenerDomain,
+		TLSConfig:     tlsConfig,
+		AllowInsecure: cli.ListenerAllowInsecure,
+	}, cred, q, route)
+	if err != nil {
+		return err
 	}
 
 	// One inbound syncer per inbox with an upstream (ADR 0019/0023), built before

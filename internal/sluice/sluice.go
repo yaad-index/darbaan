@@ -42,6 +42,7 @@ const (
 // Submission is a new outbound message to trap, as captured from the SMTP face.
 type Submission struct {
 	Agent string   // authenticated agent identity (ADR 0002)
+	Inbox string   // the inbox the From routed to (ADR 0023); "" = default
 	From  string   // envelope MAIL FROM
 	Rcpt  []string // envelope RCPT TO
 	Raw   []byte   // raw message/rfc822
@@ -51,6 +52,7 @@ type Submission struct {
 type Message struct {
 	ID         string    `json:"id"`
 	Agent      string    `json:"agent"`
+	Inbox      string    `json:"inbox,omitempty"` // routed inbox (ADR 0023); "" reads as default
 	From       string    `json:"from"`
 	Rcpt       []string  `json:"rcpt"`
 	Raw        []byte    `json:"raw"`
