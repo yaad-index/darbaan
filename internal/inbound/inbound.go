@@ -46,6 +46,7 @@ type Envelope struct {
 // Delivery is a new inbound message to store.
 type Delivery struct {
 	Owner   string // the agent whose mailbox this is (whose send was rejected)
+	Inbox   string // the named inbox this delivery belongs to (ADR 0023); "" = DefaultInbox
 	From    string // e.g. MAILER-DAEMON@<domain>
 	To      string // the original submitter
 	Subject string
@@ -73,6 +74,7 @@ type Delivery struct {
 type Message struct {
 	ID         string    `json:"id"`
 	Owner      string    `json:"owner"`
+	Inbox      string    `json:"inbox,omitempty"` // named inbox (ADR 0023); "" reads as DefaultInbox
 	From       string    `json:"from"`
 	To         string    `json:"to"`
 	Subject    string    `json:"subject"`
@@ -115,6 +117,20 @@ const (
 	HoldRejected = "rejected"
 )
 
+// DefaultInbox is the implicit single inbox (ADR 0023). A record stored before
+// multi-inbox carries no Inbox and reads as DefaultInbox, and a single-inbox
+// deployment addresses everything as DefaultInbox — so N=1 is unchanged.
+const DefaultInbox = "default"
+
+// NormInbox resolves an empty inbox name to DefaultInbox, so stored records
+// written before multi-inbox (Inbox == "") match the default inbox.
+func NormInbox(inbox string) string {
+	if inbox == "" {
+		return DefaultInbox
+	}
+	return inbox
+}
+
 // InboundStore is the agent's served mailbox. Implementations are selected by
 // config (inbound-type) and constructed through New.
 type InboundStore interface {
@@ -130,26 +146,28 @@ type InboundStore interface {
 	// Delivery's Raw is ignored. SetContent fills the body later.
 	AddSyncedPending(Delivery) (added bool, m Message, err error)
 	// SetContent fills a pending message's body (write the content blob, mark it
-	// present) and returns the now-complete message. Owner-scoped.
-	SetContent(owner, id string, raw []byte) (Message, error)
+	// present) and returns the now-complete message. Scoped to (owner, inbox).
+	SetContent(owner, inbox, id string, raw []byte) (Message, error)
 	// SetKeywords replaces a message's keyword set (ADR 0020) and marks it dirty
-	// for upstream reconcile. Local store is canonical. Owner-scoped.
-	SetKeywords(owner, id string, keywords []string) (Message, error)
+	// for upstream reconcile. Local store is canonical. Scoped to (owner, inbox).
+	SetKeywords(owner, inbox, id string, keywords []string) (Message, error)
 	// ClearKeywordsDirty clears the dirty flag after upstream replication succeeds.
-	ClearKeywordsDirty(owner, id string) error
-	// DirtyKeywords returns messages whose keywords await upstream replication.
-	DirtyKeywords(owner string) ([]Message, error)
+	ClearKeywordsDirty(owner, inbox, id string) error
+	// DirtyKeywords returns the inbox's messages whose keywords await upstream
+	// replication — per inbox, since each inbox reconciles against its own backend.
+	DirtyKeywords(owner, inbox string) ([]Message, error)
 	// SetHoldDecision persists the human's hold-for-human decision (ADR 0021):
-	// "approved" exposes the message, "rejected" keeps it hidden. Owner-scoped.
-	SetHoldDecision(owner, id, decision string) (Message, error)
-	// List returns the owner's messages' metadata (no content/Raw) in receive
-	// order; a body is fetched per-message via Get / the content fetcher.
-	List(owner string) ([]Message, error)
-	// Get returns one of the owner's messages with content, or ErrNotFound.
-	Get(owner, id string) (Message, error)
-	// SetSeen sets or clears the \Seen flag on the owner's message — the only
-	// mutable flag the v1 IMAP face persists. Owner-scoped like Get.
-	SetSeen(owner, id string, seen bool) error
+	// "approved" exposes the message, "rejected" keeps it hidden. (owner, inbox)-scoped.
+	SetHoldDecision(owner, inbox, id, decision string) (Message, error)
+	// List returns the inbox's messages' metadata (no content/Raw) in receive
+	// order; a body is fetched per-message via Get / the content fetcher. Each
+	// inbox is an independent mailbox (ADR 0023).
+	List(owner, inbox string) ([]Message, error)
+	// Get returns one of the inbox's messages with content, or ErrNotFound.
+	Get(owner, inbox, id string) (Message, error)
+	// SetSeen sets or clears the \Seen flag on the inbox's message — the only
+	// mutable flag the v1 IMAP face persists. (owner, inbox)-scoped like Get.
+	SetSeen(owner, inbox, id string, seen bool) error
 	// Close releases the underlying resources.
 	Close() error
 }

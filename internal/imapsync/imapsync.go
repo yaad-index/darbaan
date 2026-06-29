@@ -252,7 +252,7 @@ func uidSetOf(uids []imap.UID) imap.UIDSet {
 // stale) or the message is gone upstream, so the read face can surface a
 // transient error rather than empty content.
 func (s *Syncer) FetchContent(owner, id string) (inbound.Message, error) {
-	m, err := s.store.Get(owner, id)
+	m, err := s.store.Get(owner, inbound.DefaultInbox, id)
 	if err != nil {
 		return inbound.Message{}, err
 	}
@@ -301,7 +301,7 @@ func (s *Syncer) FetchContent(owner, id string) (inbound.Message, error) {
 	if raw == nil {
 		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: upstream uid %d not found", id, m.UpstreamUID)
 	}
-	return s.store.SetContent(owner, id, raw)
+	return s.store.SetContent(owner, inbound.DefaultInbox, id, raw)
 }
 
 // WriteKeywords replicates a message's keyword set to the upstream backend over a
@@ -314,7 +314,7 @@ func (s *Syncer) WriteKeywords(owner, id string, add, remove []string) error {
 	if len(add) == 0 && len(remove) == 0 {
 		return nil
 	}
-	m, err := s.store.Get(owner, id)
+	m, err := s.store.Get(owner, inbound.DefaultInbox, id)
 	if err != nil {
 		return err
 	}
@@ -364,7 +364,7 @@ func (s *Syncer) WriteKeywords(owner, id string, add, remove []string) error {
 // write whose immediate upstream replicate failed is retried here on the next sync
 // (ADR 0020). Best-effort: failures are logged, never fatal to the sync.
 func (s *Syncer) reconcileKeywords() {
-	dirty, err := s.store.DirtyKeywords(s.owner)
+	dirty, err := s.store.DirtyKeywords(s.owner, inbound.DefaultInbox)
 	if err != nil {
 		log.Printf("darbaan: keyword reconcile list: %v", err)
 		return
@@ -378,7 +378,7 @@ func (s *Syncer) reconcileKeywords() {
 			log.Printf("darbaan: keyword reconcile %s deferred: %v", m.ID, err)
 			continue
 		}
-		if err := s.store.ClearKeywordsDirty(s.owner, m.ID); err != nil {
+		if err := s.store.ClearKeywordsDirty(s.owner, inbound.DefaultInbox, m.ID); err != nil {
 			log.Printf("darbaan: keyword reconcile clear %s: %v", m.ID, err)
 		}
 	}

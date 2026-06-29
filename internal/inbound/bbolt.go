@@ -148,7 +148,7 @@ func (s *bboltStore) addSynced(d Delivery, pending bool) (bool, Message, error) 
 	if d.UpstreamUID == 0 {
 		return false, Message{}, fmt.Errorf("inbound: AddSynced requires a non-zero upstream UID")
 	}
-	idxKey := syncedKey(d.Owner, d.UIDValidity, d.UpstreamUID)
+	idxKey := syncedKey(d.Owner, d.Inbox, d.UIDValidity, d.UpstreamUID)
 	var (
 		added bool
 		msg   Message
@@ -180,14 +180,14 @@ func (s *bboltStore) addSynced(d Delivery, pending bool) (bool, Message, error) 
 
 // SetContent fills a pending message's body: write the content blob and mark the
 // record present. Owner-scoped; returns the now-complete message.
-func (s *bboltStore) SetContent(owner, id string, raw []byte) (Message, error) {
+func (s *bboltStore) SetContent(owner, inbox, id string, raw []byte) (Message, error) {
 	var msg Message
 	err := s.db.Update(func(tx *bbolt.Tx) error {
 		rec, key, err := loadStored(tx, id)
 		if err != nil {
 			return err
 		}
-		if rec.Owner != owner {
+		if !recScoped(rec, owner, inbox) {
 			return ErrNotFound
 		}
 		// Content blob first, then the metadata flip (same ordering as Add).
@@ -218,6 +218,7 @@ func (s *bboltStore) put(tx *bbolt.Tx, d Delivery, pending bool) (Message, []byt
 	msg := Message{
 		ID:          strconv.FormatUint(seq, 10),
 		Owner:       d.Owner,
+		Inbox:       NormInbox(d.Inbox),
 		From:        d.From,
 		To:          d.To,
 		Subject:     d.Subject,
@@ -245,19 +246,31 @@ func (s *bboltStore) put(tx *bbolt.Tx, d Delivery, pending bool) (Message, []byt
 	return msg, key, nil
 }
 
-// syncedKey is the dedup index key for an upstream message: owner + UIDVALIDITY
-// + UID. UIDVALIDITY is included because UIDs are only unique within it.
-func syncedKey(owner string, uidValidity, uid uint32) []byte {
-	k := make([]byte, 0, len(owner)+1+8)
+// syncedKey is the dedup index key for an upstream message: owner + inbox +
+// UIDVALIDITY + UID. The inbox is included because each inbox is an independent
+// upstream UID space (ADR 0023) — two inboxes (esp. on different accounts) can
+// carry the same (UIDVALIDITY, UID), and must not collide in the dedup index.
+// UIDVALIDITY is included because UIDs are only unique within it.
+func syncedKey(owner, inbox string, uidValidity, uid uint32) []byte {
+	inbox = NormInbox(inbox)
+	k := make([]byte, 0, len(owner)+1+len(inbox)+1+8)
 	k = append(k, owner...)
 	k = append(k, 0) // separator (an owner name has no NUL)
+	k = append(k, inbox...)
+	k = append(k, 0)
 	var n [8]byte
 	binary.BigEndian.PutUint32(n[0:4], uidValidity)
 	binary.BigEndian.PutUint32(n[4:8], uid)
 	return append(k, n[:]...)
 }
 
-func (s *bboltStore) List(owner string) ([]Message, error) {
+// recScoped reports whether a stored record belongs to (owner, inbox), treating a
+// record with no Inbox (written before multi-inbox) as DefaultInbox.
+func recScoped(rec stored, owner, inbox string) bool {
+	return rec.Owner == owner && NormInbox(rec.Inbox) == NormInbox(inbox)
+}
+
+func (s *bboltStore) List(owner, inbox string) ([]Message, error) {
 	var recs []stored
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		return tx.Bucket(bucketInbound).ForEach(func(_, v []byte) error {
@@ -265,7 +278,7 @@ func (s *bboltStore) List(owner string) ([]Message, error) {
 			if err := json.Unmarshal(v, &rec); err != nil {
 				return err
 			}
-			if rec.Owner == owner {
+			if recScoped(rec, owner, inbox) {
 				recs = append(recs, rec)
 			}
 			return nil
@@ -286,14 +299,14 @@ func (s *bboltStore) List(owner string) ([]Message, error) {
 	return out, nil
 }
 
-func (s *bboltStore) SetSeen(owner, id string, seen bool) error {
+func (s *bboltStore) SetSeen(owner, inbox, id string, seen bool) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		rec, key, err := loadStored(tx, id)
 		if err != nil {
 			return err
 		}
-		if rec.Owner != owner {
-			return ErrNotFound // do not touch another owner's message
+		if !recScoped(rec, owner, inbox) {
+			return ErrNotFound // do not touch another owner's/inbox's message
 		}
 		if rec.Seen == seen {
 			return nil
@@ -306,14 +319,14 @@ func (s *bboltStore) SetSeen(owner, id string, seen bool) error {
 // SetKeywords replaces the owner's message's keyword set (ADR 0020) and marks it
 // dirty for upstream reconcile. The local store is canonical; the returned
 // message carries the new keywords (without content). Metadata-only write.
-func (s *bboltStore) SetKeywords(owner, id string, keywords []string) (Message, error) {
+func (s *bboltStore) SetKeywords(owner, inbox, id string, keywords []string) (Message, error) {
 	var msg Message
 	err := s.db.Update(func(tx *bbolt.Tx) error {
 		rec, key, err := loadStored(tx, id)
 		if err != nil {
 			return err
 		}
-		if rec.Owner != owner {
+		if !recScoped(rec, owner, inbox) {
 			return ErrNotFound
 		}
 		rec.Keywords = keywords
@@ -332,13 +345,13 @@ func (s *bboltStore) SetKeywords(owner, id string, keywords []string) (Message, 
 }
 
 // ClearKeywordsDirty clears the dirty flag after a successful upstream replicate.
-func (s *bboltStore) ClearKeywordsDirty(owner, id string) error {
+func (s *bboltStore) ClearKeywordsDirty(owner, inbox, id string) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		rec, key, err := loadStored(tx, id)
 		if err != nil {
 			return err
 		}
-		if rec.Owner != owner {
+		if !recScoped(rec, owner, inbox) {
 			return ErrNotFound
 		}
 		if !rec.KeywordsDirty {
@@ -351,14 +364,14 @@ func (s *bboltStore) ClearKeywordsDirty(owner, id string) error {
 
 // SetHoldDecision persists the human's hold-for-human decision (ADR 0021) on the
 // owner's message (metadata only; the blob is untouched) and returns it.
-func (s *bboltStore) SetHoldDecision(owner, id, decision string) (Message, error) {
+func (s *bboltStore) SetHoldDecision(owner, inbox, id, decision string) (Message, error) {
 	var msg Message
 	err := s.db.Update(func(tx *bbolt.Tx) error {
 		rec, key, err := loadStored(tx, id)
 		if err != nil {
 			return err
 		}
-		if rec.Owner != owner {
+		if !recScoped(rec, owner, inbox) {
 			return ErrNotFound
 		}
 		rec.HoldDecision = decision
@@ -373,7 +386,7 @@ func (s *bboltStore) SetHoldDecision(owner, id, decision string) (Message, error
 
 // DirtyKeywords returns the owner's messages whose keywords await upstream
 // replication (metadata only), for the sync to reconcile.
-func (s *bboltStore) DirtyKeywords(owner string) ([]Message, error) {
+func (s *bboltStore) DirtyKeywords(owner, inbox string) ([]Message, error) {
 	var out []Message
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		return tx.Bucket(bucketInbound).ForEach(func(_, v []byte) error {
@@ -381,7 +394,7 @@ func (s *bboltStore) DirtyKeywords(owner string) ([]Message, error) {
 			if err := json.Unmarshal(v, &rec); err != nil {
 				return err
 			}
-			if rec.KeywordsDirty && rec.Owner == owner {
+			if rec.KeywordsDirty && recScoped(rec, owner, inbox) {
 				out = append(out, rec.Message)
 			}
 			return nil
@@ -393,15 +406,15 @@ func (s *bboltStore) DirtyKeywords(owner string) ([]Message, error) {
 	return out, nil
 }
 
-func (s *bboltStore) Get(owner, id string) (Message, error) {
+func (s *bboltStore) Get(owner, inbox, id string) (Message, error) {
 	var rec stored
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		r, _, e := loadStored(tx, id)
 		if e != nil {
 			return e
 		}
-		if r.Owner != owner {
-			return ErrNotFound // do not leak another owner's message
+		if !recScoped(r, owner, inbox) {
+			return ErrNotFound // do not leak another owner's/inbox's message
 		}
 		rec = r
 		return nil

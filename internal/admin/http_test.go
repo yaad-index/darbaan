@@ -78,7 +78,7 @@ func TestAdminRejectViaClient(t *testing.T) {
 	out, err := admin.NewClient(addr, "tok").Reject(context.Background(), id, "policy", false)
 	require.NoError(t, err)
 	assert.Equal(t, string(sluice.StatusRejected), out.Status)
-	msgs, _ := inbox.List("agent")
+	msgs, _ := inbox.List("agent", inbound.DefaultInbox)
 	require.Len(t, msgs, 1) // bounce delivered server-side
 }
 

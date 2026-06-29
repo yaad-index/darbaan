@@ -79,25 +79,25 @@ func (failingInbound) AddSynced(inbound.Delivery) (bool, inbound.Message, error)
 func (failingInbound) AddSyncedPending(inbound.Delivery) (bool, inbound.Message, error) {
 	return false, inbound.Message{}, errors.New("inbound store down")
 }
-func (failingInbound) SetContent(string, string, []byte) (inbound.Message, error) {
+func (failingInbound) SetContent(string, string, string, []byte) (inbound.Message, error) {
 	return inbound.Message{}, errors.New("inbound store down")
 }
-func (failingInbound) SetKeywords(string, string, []string) (inbound.Message, error) {
+func (failingInbound) SetKeywords(string, string, string, []string) (inbound.Message, error) {
 	return inbound.Message{}, errors.New("inbound store down")
 }
-func (failingInbound) ClearKeywordsDirty(string, string) error { return nil }
-func (failingInbound) DirtyKeywords(string) ([]inbound.Message, error) {
+func (failingInbound) ClearKeywordsDirty(string, string, string) error { return nil }
+func (failingInbound) DirtyKeywords(string, string) ([]inbound.Message, error) {
 	return nil, nil
 }
-func (failingInbound) SetHoldDecision(string, string, string) (inbound.Message, error) {
+func (failingInbound) SetHoldDecision(string, string, string, string) (inbound.Message, error) {
 	return inbound.Message{}, errors.New("inbound store down")
 }
-func (failingInbound) List(string) ([]inbound.Message, error) { return nil, nil }
-func (failingInbound) Get(string, string) (inbound.Message, error) {
+func (failingInbound) List(string, string) ([]inbound.Message, error) { return nil, nil }
+func (failingInbound) Get(string, string, string) (inbound.Message, error) {
 	return inbound.Message{}, inbound.ErrNotFound
 }
-func (failingInbound) SetSeen(string, string, bool) error { return nil }
-func (failingInbound) Close() error                       { return nil }
+func (failingInbound) SetSeen(string, string, string, bool) error { return nil }
+func (failingInbound) Close() error                               { return nil }
 
 func TestApproveStubHoldsDefaultDeny(t *testing.T) {
 	q, id := seedStore(t)
@@ -130,10 +130,10 @@ func TestApprovePermanentFailureBounces(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, out.Warn) // surfaced as a warning, not a failed verdict
 
-	msgs, err := inbox.List("agent")
+	msgs, err := inbox.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
-	bounce, err := inbox.Get("agent", msgs[0].ID) // List is metadata-only; content via Get
+	bounce, err := inbox.Get("agent", inbound.DefaultInbox, msgs[0].ID) // List is metadata-only; content via Get
 	require.NoError(t, err)
 	assert.Contains(t, string(bounce.Raw), "upstream delivery failed permanently")
 	assert.NotContains(t, string(bounce.Raw), "mailbox unavailable") // never echo upstream body
@@ -152,7 +152,7 @@ func TestApproveTransientStaysApproved(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out.Warn, "transient")
 
-	msgs, _ := inbox.List("agent")
+	msgs, _ := inbox.List("agent", inbound.DefaultInbox)
 	assert.Empty(t, msgs) // no bounce on transient
 	got, _ := q.Get(id)
 	assert.Equal(t, sluice.StatusApproved, got.Status)
@@ -168,11 +168,11 @@ func TestRejectDeliversSignedBounce(t *testing.T) {
 	assert.Equal(t, string(sluice.StatusRejected), out.Status)
 	assert.Empty(t, out.Warn)
 
-	msgs, err := inbox.List("agent")
+	msgs, err := inbox.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
 	assert.Equal(t, "MAILER-DAEMON@darbaan.test", msgs[0].From)
-	bounce, err := inbox.Get("agent", msgs[0].ID) // List is metadata-only; content via Get
+	bounce, err := inbox.Get("agent", inbound.DefaultInbox, msgs[0].ID) // List is metadata-only; content via Get
 	require.NoError(t, err)
 	assert.Contains(t, string(bounce.Raw), "smells like exfiltration")
 	assert.Contains(t, string(bounce.Raw), "5.7.1")
