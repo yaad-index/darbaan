@@ -28,8 +28,9 @@ the store keeps everything (ADR 0019); the agent simply doesn't see spoofs.
 
 ### Bounce-shaped detection
 
-A message is **bounce-shaped** if **any** of these hold (metadata only — no body
-fetch, consistent with ADR 0021):
+A message is **bounce-shaped** if **any** of these hold (this **shape** check is
+**metadata only**, no body fetch — only the trust check below touches the body, and
+only on a shape hit):
 
 - `Content-Type: multipart/report` with `report-type="delivery-status"`, or a
   `message/delivery-status` part declared in the structure;
@@ -50,6 +51,18 @@ from Darbaan's own bounce signing domain/selector** (the key Darbaan signs with 
 inbound. A genuine Darbaan-issued bounce verifies and passes through (the agent
 **must** still receive its real failures — ADR 0006). Any bounce-shaped message
 without that valid signature is a **spoof candidate**.
+
+**Verification needs the body (bounded on-demand fetch).** Unlike the rest of the
+serve-time filter (ADR 0021), DKIM verification is **not metadata-only**: the
+signature's body-hash (`bh=`) covers the message body, so verifying it requires the
+body. For a **shape-positive** record still lazy/unfetched (ADR 0019), the guard
+triggers an **on-demand body fetch** to run the verify. This is a deliberate,
+**bounded** exception: only **bounce-shaped** messages (a small subset, identified
+cheaply from metadata first) ever incur the fetch — ordinary mail never does.
+Verification reuses the DKIM library already in deps (`go-msgauth/dkim`) via a
+`signer.Verify` against the pinned bounce selector. Order matters: **cheap metadata
+shape-check first; body fetch + verify only on a shape hit.** (Thanks to the
+implementer review for catching that the trust check cannot be metadata-only.)
 
 ### Action
 
@@ -77,8 +90,10 @@ without that valid signature is a **spoof candidate**.
 - **Not anti-injection in general.** This guard addresses the specific forged-bounce
   vector of ADR 0007; the outbound trap (ADR 0003) remains the containment boundary
   for everything an *allowed* sender might say.
-- **No body matching.** Detection uses envelope/structure metadata only (ADR 0021);
-  it does not parse the human-readable bounce body.
+- **No body content matching.** Shape detection uses envelope/structure metadata
+  only; we never parse or pattern-match the human-readable bounce text. (The DKIM
+  trust check reads the body to compute its hash, but that is cryptographic
+  verification, not content matching.)
 - **Not DMARC/SPF.** The trust anchor is Darbaan's **own** signature (ADR 0007), not
   the upstream's authentication of the purported origin. We are answering "did
   Darbaan issue this bounce?", not "is this a legitimate third-party bounce?".
