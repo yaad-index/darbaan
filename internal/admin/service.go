@@ -41,6 +41,56 @@ type Service struct {
 	owner     string                    // the agent whose inbound mailbox the holds belong to
 	guard     *bounceguard.Guard        // inbound bounce-spoof guard (ADR 0024; nil = off)
 	holdSpoof bool                      // on_spoof=hold-for-human → spoofs join the held queue
+
+	// Reconcile controls (ADR 0026), wired by serve over its per-inbox syncers;
+	// nil when no inbox has an upstream (nothing to reconcile).
+	reconcileRelease func(ctx context.Context, inbox string) (int, error)
+	reconcileStatus  func() ([]ReconcileStatus, error)
+}
+
+// ReconcileStatus reports one inbox's reconciliation latch (ADR 0026): whether
+// the safety cap has it suspended, and the candidate count that tripped it.
+type ReconcileStatus struct {
+	Inbox     string `json:"inbox"`
+	Suspended bool   `json:"suspended"`
+	HeldCount int    `json:"held_count"`
+}
+
+// ReconcileReleaseResult is the outcome of releasing a latched inbox (ADR 0026).
+type ReconcileReleaseResult struct {
+	Inbox  string `json:"inbox"`
+	Purged int    `json:"purged"`
+}
+
+// ErrReconcileUnavailable is returned by the reconcile controls when no inbox has
+// an upstream syncer, so there is nothing to reconcile or release.
+var ErrReconcileUnavailable = errors.New("admin: reconcile control not available (no upstream inbox configured)")
+
+// SetReconcileControls wires the reconcile release/status callbacks (ADR 0026).
+// serve supplies them over its per-inbox syncers; without them the endpoints
+// report ErrReconcileUnavailable.
+func (s *Service) SetReconcileControls(release func(context.Context, string) (int, error), status func() ([]ReconcileStatus, error)) {
+	s.reconcileRelease = release
+	s.reconcileStatus = status
+}
+
+// ReleaseReconcile releases a latched inbox (ADR 0026): the operator confirms the
+// large retraction is legitimate; the held purge completes once and capped
+// reconciliation resumes. Returns the number retracted.
+func (s *Service) ReleaseReconcile(ctx context.Context, inbox string) (int, error) {
+	if s.reconcileRelease == nil {
+		return 0, ErrReconcileUnavailable
+	}
+	return s.reconcileRelease(ctx, inbox)
+}
+
+// ReconcileStatusAll lists every inbox's reconciliation latch (ADR 0026) so the
+// operator can discover which inboxes are held.
+func (s *Service) ReconcileStatusAll() ([]ReconcileStatus, error) {
+	if s.reconcileStatus == nil {
+		return nil, ErrReconcileUnavailable
+	}
+	return s.reconcileStatus()
 }
 
 // NewService wires the approval service. inbox and signer may be nil only when

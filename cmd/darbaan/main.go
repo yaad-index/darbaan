@@ -101,6 +101,7 @@ type CLI struct {
 	Serve      ServeCmd      `cmd:"" help:"Run the SMTP + IMAP faces and the admin API."`
 	Queue      QueueCmd      `cmd:"" help:"Inspect and decide held messages (via the running serve's admin API)."`
 	Holds      HoldsCmd      `cmd:"" help:"Inspect and decide inbound messages held for a human (ADR 0021)."`
+	Reconcile  ReconcileCmd  `cmd:"" help:"Inspect and release inboxes held by the reconcile safety cap (ADR 0026)."`
 	Filter     FilterCmd     `cmd:"" help:"Inspect the inbound filter without starting serve (ADR 0021/0022)."`
 	Telegram   TelegramCmd   `cmd:"" help:"Run the Telegram approval client (a separate admin-API client process)."`
 	DkimPubkey DkimPubkeyCmd `cmd:"" name:"dkim-pubkey" help:"Print the DKIM public-key record to pin to the agent."`
@@ -482,6 +483,57 @@ func (c *CLI) adminClient() (*admin.Client, error) {
 	return admin.NewClient(c.AdminAddr, token), nil
 }
 
+// ReconcileCmd groups the reconcile safety-cap controls (ADR 0026), each a thin
+// client of the running serve's admin API.
+type ReconcileCmd struct {
+	Status  ReconcileStatusCmd  `cmd:"" help:"List inboxes whose reconciliation the safety cap has held."`
+	Release ReconcileReleaseCmd `cmd:"" help:"Release a held inbox: confirm the large retraction and resume reconciliation."`
+}
+
+// ReconcileStatusCmd lists inboxes the reconcile safety cap has suspended.
+type ReconcileStatusCmd struct{}
+
+func (*ReconcileStatusCmd) Run(cli *CLI) error {
+	client, err := cli.adminClient()
+	if err != nil {
+		return err
+	}
+	st, err := client.ReconcileStatus(context.Background())
+	if err != nil {
+		return err
+	}
+	held := 0
+	for _, s := range st {
+		if s.Suspended {
+			fmt.Printf("%s\tHELD\t%d candidate(s)\n", s.Inbox, s.HeldCount)
+			held++
+		}
+	}
+	if held == 0 {
+		fmt.Println("no inboxes are held by the reconcile safety cap")
+	}
+	return nil
+}
+
+// ReconcileReleaseCmd releases a held inbox: the operator confirms the large
+// retraction is legitimate, so it completes once and reconciliation resumes.
+type ReconcileReleaseCmd struct {
+	Inbox string `arg:"" help:"Inbox name to release."`
+}
+
+func (c *ReconcileReleaseCmd) Run(cli *CLI) error {
+	client, err := cli.adminClient()
+	if err != nil {
+		return err
+	}
+	res, err := client.ReleaseReconcile(context.Background(), c.Inbox)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("released %s: retracted %d message(s)\n", res.Inbox, res.Purged)
+	return nil
+}
+
 // TelegramCmd runs the Telegram approval client — a separate long-running
 // process that is a client of the admin API (ADR 0017), not part of serve.
 type TelegramCmd struct{}
@@ -692,6 +744,33 @@ func (*ServeCmd) Run(cli *CLI) error {
 		return err
 	}
 	defer stopSync()
+
+	// Wire the reconcile safety-cap controls onto the admin surface (ADR 0026):
+	// release a latched inbox (clear + cap-bypassed purge once) and report each
+	// inbox's latch. Only when an inbox has an upstream — otherwise the endpoints
+	// report unavailable.
+	if len(syncers) > 0 {
+		svc.SetReconcileControls(
+			func(ctx context.Context, name string) (int, error) {
+				syn, ok := syncers[name]
+				if !ok {
+					return 0, fmt.Errorf("inbox %q has no upstream to reconcile", name)
+				}
+				return syn.ReleaseReconcile(ctx, imapsync.ReconcileOptions{Audit: al})
+			},
+			func() ([]admin.ReconcileStatus, error) {
+				out := make([]admin.ReconcileStatus, 0, len(syncers))
+				for name, syn := range syncers {
+					rs, lerr := syn.ReconcileLatch()
+					if lerr != nil {
+						return nil, lerr
+					}
+					out = append(out, admin.ReconcileStatus{Inbox: name, Suspended: rs.Suspended, HeldCount: rs.HeldCount})
+				}
+				return out, nil
+			},
+		)
+	}
 	// The inbound bounce-spoof guard (ADR 0024) runs ahead of the user filter on
 	// both faces, verifying with the bounce signer's own key. On by default; an
 	// explicit opt-out is logged. on_spoof=hold-for-human routes spoofs to the
