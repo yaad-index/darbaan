@@ -97,6 +97,7 @@ func (failingInbound) Get(string, string, string) (inbound.Message, error) {
 	return inbound.Message{}, inbound.ErrNotFound
 }
 func (failingInbound) SetSeen(string, string, string, bool) error { return nil }
+func (failingInbound) RemoveSynced(string, string, string) error  { return nil }
 func (failingInbound) Close() error                               { return nil }
 
 type senderFunc func(sluice.Message) error

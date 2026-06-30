@@ -168,6 +168,15 @@ type InboundStore interface {
 	// SetSeen sets or clears the \Seen flag on the inbox's message — the only
 	// mutable flag the v1 IMAP face persists. (owner, inbox)-scoped like Get.
 	SetSeen(owner, inbox, id string, seen bool) error
+	// RemoveSynced hard-removes an upstream-synced message — its metadata record,
+	// dedup-index entry, and content blob — so it disappears from the read face
+	// entirely. This is the retraction path for upstream reconciliation (ADR 0026):
+	// the source dropped the message, so Darbaan drops its local copy (the upstream
+	// itself is never touched). It is (owner, inbox)-scoped like Get and **refuses a
+	// locally-generated record** (UpstreamUID == 0, e.g. a signed bounce) — those
+	// have no upstream and are never reconciled. Returns ErrNotFound if the
+	// (owner, inbox) has no such message.
+	RemoveSynced(owner, inbox, id string) error
 	// Close releases the underlying resources.
 	Close() error
 }
