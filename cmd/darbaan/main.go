@@ -122,19 +122,16 @@ func (c *CLI) router() *policy.Router {
 	return policy.NewRouter(c.ApprovalStrict, c.ApprovalLight)
 }
 
-// openStore opens the audit log and the message store per config and returns
-// the store plus a close func that closes both (store first, then audit).
-func (c *CLI) openStore() (sluice.MessageStore, func(), error) {
-	al, err := audit.New(c.AuditType, c.AuditDB)
-	if err != nil {
-		return nil, nil, err
-	}
+// openStore opens the message store per config, writing best-effort audit
+// entries to al. al is created and closed by the caller (it is shared with the
+// reconcile pass, which audits each retraction — ADR 0026), so the returned close
+// func closes only the store.
+func (c *CLI) openStore(al audit.AuditLog) (sluice.MessageStore, func(), error) {
 	ms, err := sluice.New(c.StoreType, c.SluiceDB, al)
 	if err != nil {
-		_ = al.Close()
 		return nil, nil, err
 	}
-	return ms, func() { _ = ms.Close(); _ = al.Close() }, nil
+	return ms, func() { _ = ms.Close() }, nil
 }
 
 // configBytes returns the bytes of the resolved config file (the same path kong
@@ -399,6 +396,82 @@ func runSync(ctx context.Context, s *imapsync.Syncer) {
 	}
 }
 
+// DefaultReconcileInterval is the reconcile-pass period for an inbox that enables
+// reconciliation without setting one (ADR 0026). A full UID listing is heavier
+// than the incremental forward poll, so the default is deliberately coarse.
+const DefaultReconcileInterval = time.Hour
+
+// reconcileTarget is one inbox whose reconciliation is enabled and has an upstream
+// syncer — the input to a per-inbox reconcile loop (ADR 0026).
+type reconcileTarget struct {
+	inbox    string
+	syncer   *imapsync.Syncer
+	interval time.Duration
+	opts     imapsync.ReconcileOptions
+}
+
+// reconcileTargets selects the inboxes to run a reconcile loop for: those with
+// reconcile_enabled AND an upstream syncer (a bounce-only inbox has none). The
+// interval is the inbox's reconcile_interval or DefaultReconcileInterval; the cap
+// fraction/floor and the shared audit log ride in the pass options.
+func reconcileTargets(inboxes []inboxcfg.Inbox, syncers map[string]*imapsync.Syncer, al audit.AuditLog) []reconcileTarget {
+	var targets []reconcileTarget
+	for _, in := range inboxes {
+		if !in.ReconcileEnabled {
+			continue
+		}
+		syn, ok := syncers[in.Name]
+		if !ok {
+			continue
+		}
+		interval, _ := in.ReconcileDuration() // validated at load; 0 ⇒ default
+		if interval <= 0 {
+			interval = DefaultReconcileInterval
+		}
+		targets = append(targets, reconcileTarget{
+			inbox:    in.Name,
+			syncer:   syn,
+			interval: interval,
+			opts: imapsync.ReconcileOptions{
+				Audit:       al,
+				CapFraction: in.ReconcileCapFraction,
+				CapFloor:    in.ReconcileCapFloor,
+			},
+		})
+	}
+	return targets
+}
+
+// runReconcileLoop runs one inbox's reconcile pass on its interval until ctx is
+// cancelled (ADR 0026). Like the sync loop, errors are logged, never fatal — a
+// flaky upstream or a held cap must not take down serve.
+func (cli *CLI) runReconcileLoop(ctx context.Context, t reconcileTarget) {
+	fmt.Fprintf(os.Stderr, "darbaan: reconcile for inbox %q every %s\n", t.inbox, t.interval)
+	tk := time.NewTicker(t.interval)
+	defer tk.Stop()
+	runReconcile(ctx, t) // initial pass at startup
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+			runReconcile(ctx, t)
+		}
+	}
+}
+
+func runReconcile(ctx context.Context, t reconcileTarget) {
+	n, err := t.syncer.Reconcile(ctx, t.opts)
+	switch {
+	case errors.Is(err, imapsync.ErrReconcileHeld):
+		log.Printf("darbaan: reconcile for inbox %q HELD by the safety cap; awaiting operator release", t.inbox)
+	case err != nil:
+		log.Printf("darbaan: reconcile for inbox %q: %v", t.inbox, err)
+	case n > 0:
+		log.Printf("darbaan: reconcile for inbox %q retracted %d message(s)", t.inbox, n)
+	}
+}
+
 // adminClient builds a thin client for the running serve's admin API. The token
 // is the shared secret from DARBAAN_ADMIN_TOKEN.
 func (c *CLI) adminClient() (*admin.Client, error) {
@@ -528,7 +601,16 @@ func (*ServeCmd) Run(cli *CLI) error {
 		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 	}
 
-	q, closeStore, err := cli.openStore()
+	// The audit log is opened once and shared: the message store writes verdict
+	// entries to it, and the reconcile pass writes a retract entry per retraction
+	// (ADR 0026). Closed last (after the stores) so a final commit can still audit.
+	al, err := audit.New(cli.AuditType, cli.AuditDB)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = al.Close() }()
+
+	q, closeStore, err := cli.openStore(al)
 	if err != nil {
 		return err
 	}
@@ -644,6 +726,20 @@ func (*ServeCmd) Run(cli *CLI) error {
 	}
 	for name, syn := range syncers {
 		go cli.runSyncLoop(ctx, name, syn)
+	}
+
+	// Per-inbox reconcile loops (ADR 0026): retract local copies of messages that
+	// left the source, for inboxes that opted in (reconcile_enabled) and have an
+	// upstream. Off by default; the cap latch holds an anomalous mass purge.
+	for _, in := range inboxes {
+		if in.ReconcileEnabled {
+			if _, ok := syncers[in.Name]; !ok {
+				fmt.Fprintf(os.Stderr, "darbaan: reconcile enabled for inbox %q but it has no upstream — not running\n", in.Name)
+			}
+		}
+	}
+	for _, rt := range reconcileTargets(inboxes, syncers, al) {
+		go cli.runReconcileLoop(ctx, rt)
 	}
 
 	closeAll := func() {
