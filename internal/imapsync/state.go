@@ -21,14 +21,33 @@ type State struct {
 	LastUID     uint32 `json:"last_uid"`
 }
 
-// StateStore persists the sync cursor per mailbox.
+// ReconcileState is the per-inbox reconciliation latch (ADR 0026 safety cap).
+// When a single reconcile pass would retract more than the configured fraction of
+// the inbox's synced set, reconciliation is SUSPENDED for that inbox and held
+// until an operator release — the anomaly backstop against a source-side mass
+// removal silently emptying the store. It is kept separate from the sync cursor
+// (State) so a forward sync never clears the latch.
+type ReconcileState struct {
+	Suspended bool `json:"suspended"`
+	HeldCount int  `json:"held_count,omitempty"` // candidates when it latched (operator info)
+}
+
+// StateStore persists the sync cursor and the reconcile latch per mailbox.
 type StateStore interface {
 	Load(mailbox string) (State, error)
 	Save(mailbox string, st State) error
+	// LoadReconcile / SaveReconcile persist the reconciliation latch (ADR 0026),
+	// keyed like the cursor but in a separate namespace so a cursor Save never
+	// clears a latch. An unset key reads as the zero ReconcileState (not suspended).
+	LoadReconcile(mailbox string) (ReconcileState, error)
+	SaveReconcile(mailbox string, rs ReconcileState) error
 	Close() error
 }
 
-var bucketSyncState = []byte("syncstate")
+var (
+	bucketSyncState      = []byte("syncstate")
+	bucketReconcileState = []byte("reconcilestate")
+)
 
 type bboltState struct{ db *bbolt.DB }
 
@@ -42,7 +61,10 @@ func NewStateStore(path string) (StateStore, error) {
 		return nil, fmt.Errorf("imapsync: open state db: %w", err)
 	}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		_, e := tx.CreateBucketIfNotExists(bucketSyncState)
+		if _, e := tx.CreateBucketIfNotExists(bucketSyncState); e != nil {
+			return e
+		}
+		_, e := tx.CreateBucketIfNotExists(bucketReconcileState)
 		return e
 	}); err != nil {
 		_ = db.Close()
@@ -78,6 +100,36 @@ func (s *bboltState) Save(mailbox string, st State) error {
 		return tx.Bucket(bucketSyncState).Put([]byte(mailbox), enc)
 	}); err != nil {
 		return fmt.Errorf("imapsync: save state %q: %w", mailbox, err)
+	}
+	return nil
+}
+
+// LoadReconcile returns the reconcile latch for a mailbox, or the zero
+// ReconcileState (not suspended) if none is recorded.
+func (s *bboltState) LoadReconcile(mailbox string) (ReconcileState, error) {
+	var rs ReconcileState
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		v := tx.Bucket(bucketReconcileState).Get([]byte(mailbox))
+		if v == nil {
+			return nil // zero ReconcileState — never latched
+		}
+		return json.Unmarshal(v, &rs)
+	})
+	if err != nil {
+		return ReconcileState{}, fmt.Errorf("imapsync: load reconcile state %q: %w", mailbox, err)
+	}
+	return rs, nil
+}
+
+func (s *bboltState) SaveReconcile(mailbox string, rs ReconcileState) error {
+	enc, err := json.Marshal(rs)
+	if err != nil {
+		return err
+	}
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketReconcileState).Put([]byte(mailbox), enc)
+	}); err != nil {
+		return fmt.Errorf("imapsync: save reconcile state %q: %w", mailbox, err)
 	}
 	return nil
 }

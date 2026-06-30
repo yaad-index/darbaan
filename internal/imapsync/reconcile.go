@@ -4,12 +4,32 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/emersion/go-imap/v2"
 
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/inbound"
 )
+
+// DefaultReconcileCapFraction is the safety-cap fraction used when an inbox does
+// not configure one (ADR 0026): a pass that would retract more than this fraction
+// of the inbox's synced set latches instead of purging. Half the set is a
+// conservative anomaly threshold; the operator can tune it per inbox.
+const DefaultReconcileCapFraction = 0.5
+
+// DefaultReconcileCapFloor is the absolute floor used when an inbox does not
+// configure one (ADR 0026): the cap never latches unless at least this many
+// messages would be retracted, regardless of the fraction. Without it a pure
+// fraction would latch a tiny inbox on a single normal removal (1 of 2 = 50%);
+// the floor keeps the cap an anomaly backstop that only bites at scale.
+const DefaultReconcileCapFloor = 5
+
+// ErrReconcileHeld is returned by Reconcile when the safety cap has the inbox
+// latched (this pass tripped it, or a prior pass did and it has not been
+// released). It is an expected hold, not a failure: the caller distinguishes it
+// with errors.Is and reports it as held, not as an error.
+var ErrReconcileHeld = errors.New("imapsync: reconcile held: cap exceeded, awaiting operator release")
 
 // ListUpstreamUIDs returns the inbox mailbox's current UIDVALIDITY and the full
 // set of UIDs present upstream right now. It is the authoritative present-set
@@ -58,6 +78,15 @@ type ReconcileOptions struct {
 	// hash chain). nil disables auditing (a no-op); the production wiring always
 	// supplies the real log.
 	Audit audit.AuditLog
+	// CapFraction is the safety-cap fraction (ADR 0026): a pass that would retract
+	// more than this fraction of the synced set latches instead of purging. A value
+	// outside (0,1] falls back to DefaultReconcileCapFraction.
+	CapFraction float64
+	// CapFloor is the safety-cap absolute floor: the cap never latches unless at
+	// least this many messages would be retracted. A value < 1 falls back to
+	// DefaultReconcileCapFloor. The latch rule is the conjunction of both:
+	// retract-count >= floor AND retract-count > fraction * synced-set.
+	CapFloor int
 }
 
 // Reconcile runs one upstream-reconciliation pass for this syncer's inbox
@@ -84,10 +113,23 @@ type ReconcileOptions struct {
 //     Per-message failures are collected and the pass continues (best-effort), so
 //     one stuck record never blocks the rest; the next cycle retries the failures.
 //
-// The safety cap that holds a too-large purge (ADR 0026) is layered on top of
-// this pass in a following increment — its insertion point is just before the
-// retraction loop.
+// Before retracting, a SAFETY CAP holds a too-large purge: if the candidate set
+// clears an absolute floor and exceeds a configured fraction of the synced set,
+// the pass latches the inbox (suspends reconciliation) and returns
+// ErrReconcileHeld instead of purging — the anomaly backstop against a
+// source-side mass removal silently emptying the store. A latched inbox stays
+// held (every pass returns ErrReconcileHeld) until an operator release.
 func (s *Syncer) Reconcile(ctx context.Context, opts ReconcileOptions) (int, error) {
+	// Already latched by a prior pass and not yet released: hold without listing or
+	// purging (no wasted upstream round-trip).
+	rs, err := s.state.LoadReconcile(s.stateKey())
+	if err != nil {
+		return 0, fmt.Errorf("imapsync: reconcile: load latch: %w", err)
+	}
+	if rs.Suspended {
+		return 0, ErrReconcileHeld
+	}
+
 	// Guard 1: authoritative present-set (read-only). Failure ⇒ skip (fail-safe).
 	uidValidity, upUIDs, err := s.ListUpstreamUIDs()
 	if err != nil {
@@ -117,17 +159,38 @@ func (s *Syncer) Reconcile(ctx context.Context, opts ReconcileOptions) (int, err
 	// UID) and records under a superseded UIDVALIDITY; a candidate is a synced
 	// record whose UID is no longer present upstream.
 	var gone []inbound.Message
+	syncedCount := 0
 	for _, m := range msgs {
 		if m.UpstreamUID == 0 || m.UIDValidity != uidValidity {
 			continue
 		}
+		syncedCount++
 		if !present[m.UpstreamUID] {
 			gone = append(gone, m)
 		}
 	}
 
-	// (safety-cap insertion point — a following increment holds the pass here when
-	// |gone| exceeds a configured fraction of the synced set.)
+	// Safety cap (ADR 0026): hold a too-large purge instead of auto-purging. Latch
+	// only when the candidate set BOTH clears the absolute floor (so a tiny inbox
+	// never false-latches on a normal single removal) AND exceeds the configured
+	// fraction of the synced set. A latch suspends the inbox until an operator
+	// release; the upstream is untouched (nothing is purged this pass).
+	frac := opts.CapFraction
+	if frac <= 0 || frac > 1 {
+		frac = DefaultReconcileCapFraction
+	}
+	floor := opts.CapFloor
+	if floor < 1 {
+		floor = DefaultReconcileCapFloor
+	}
+	if len(gone) >= floor && float64(len(gone)) > frac*float64(syncedCount) {
+		if err := s.state.SaveReconcile(s.stateKey(), ReconcileState{Suspended: true, HeldCount: len(gone)}); err != nil {
+			return 0, fmt.Errorf("imapsync: reconcile: latch: %w", err)
+		}
+		log.Printf("darbaan: reconcile HELD for inbox %q: a pass would retract %d of %d synced messages (cap %.0f%%); suspended pending operator release",
+			inbound.NormInbox(s.inbox), len(gone), syncedCount, frac*100)
+		return 0, ErrReconcileHeld
+	}
 
 	// Guard 4: retract each candidate + audit, best-effort.
 	removed := 0
