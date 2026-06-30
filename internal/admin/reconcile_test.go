@@ -64,3 +64,18 @@ func TestReconcileUnavailableOverHTTP(t *testing.T) {
 	_, err = c.ReleaseReconcile(ctx, "work")
 	require.Error(t, err)
 }
+
+// Releasing a non-held inbox surfaces as an error to the client (the service
+// returns ErrReconcileNotHeld → 409).
+func TestReconcileReleaseNotHeldOverHTTP(t *testing.T) {
+	q, _ := seedStore(t)
+	svc := admin.NewService(q, newInbound(t), backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	svc.SetReconcileControls(
+		func(_ context.Context, _ string) (int, error) { return 0, admin.ErrReconcileNotHeld },
+		func() ([]admin.ReconcileStatus, error) { return nil, nil },
+	)
+	c := admin.NewClient(startServer(t, svc, "tok"), "tok")
+
+	_, err := c.ReleaseReconcile(context.Background(), "work")
+	require.Error(t, err)
+}

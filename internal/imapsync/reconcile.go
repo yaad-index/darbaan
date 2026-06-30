@@ -31,6 +31,12 @@ const DefaultReconcileCapFloor = 5
 // with errors.Is and reports it as held, not as an error.
 var ErrReconcileHeld = errors.New("imapsync: reconcile held: cap exceeded, awaiting operator release")
 
+// ErrReconcileNotHeld is returned by ReleaseReconcile when the inbox is not
+// latched — there is nothing to release. The guard matters because release runs
+// CAP-BYPASSED: releasing a non-held inbox would purge the current gone-set with
+// no safety cap, so release refuses unless the cap is actually holding it.
+var ErrReconcileNotHeld = errors.New("imapsync: inbox is not held by the safety cap (nothing to release)")
+
 // ListUpstreamUIDs returns the inbox mailbox's current UIDVALIDITY and the full
 // set of UIDs present upstream right now. It is the authoritative present-set
 // that upstream reconciliation (ADR 0026) diffs against the synced store to find
@@ -234,6 +240,16 @@ func (s *Syncer) Reconcile(ctx context.Context, opts ReconcileOptions) (int, err
 // reflects the source's state at release time, not a stale snapshot from when it
 // latched.
 func (s *Syncer) ReleaseReconcile(ctx context.Context, opts ReconcileOptions) (int, error) {
+	// Refuse to release an inbox that is not actually held: release runs the pass
+	// cap-bypassed, so releasing a non-held inbox would purge with no safety cap.
+	// Only a real latch may be released (ErrReconcileNotHeld otherwise).
+	rs, err := s.state.LoadReconcile(s.stateKey())
+	if err != nil {
+		return 0, fmt.Errorf("imapsync: release: load latch: %w", err)
+	}
+	if !rs.Suspended {
+		return 0, ErrReconcileNotHeld
+	}
 	// Clear the latch first so the suspended-check in Reconcile lets the pass run;
 	// BypassCap then stops it from re-latching on the same large purge.
 	if err := s.state.SaveReconcile(s.stateKey(), ReconcileState{}); err != nil {
