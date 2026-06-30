@@ -13,6 +13,7 @@ package inboxcfg
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -34,6 +35,17 @@ type Inbox struct {
 	DefaultVisibility string    `yaml:"default_visibility"`
 	Rules             yaml.Node `yaml:"rules"`
 	FilterFile        string    `yaml:"filter_file"`
+
+	// Upstream reconciliation (ADR 0026): when the source drops a synced message
+	// (deleted, archived out, or un-labeled out of a label-folder-scoped mailbox),
+	// Darbaan retracts its local copy. The upstream is never modified — retraction
+	// is local-only. It is OPT-IN and OFF unless ReconcileEnabled is set, so an
+	// upgrade never starts retracting on deploy by surprise; the operator turns it
+	// on per inbox. ReconcileInterval is the period between reconcile passes — a
+	// full UID listing, heavier than the incremental forward poll, so typically
+	// longer; empty uses the runtime default. It is only meaningful when enabled.
+	ReconcileEnabled  bool   `yaml:"reconcile_enabled"`
+	ReconcileInterval string `yaml:"reconcile_interval"`
 }
 
 // Backend is an inbox's upstream account coordinates (ADR 0009). Secrets
@@ -103,6 +115,13 @@ func Validate(inboxes []Inbox) error {
 		envSeen[ep] = name
 		if _, err := in.Filter(); err != nil {
 			return fmt.Errorf("inboxcfg: inbox %q: %w", name, err)
+		}
+		// Fail-fast on a malformed reconcile interval for an enabled inbox, so a bad
+		// duration is caught at load, not at the first reconcile pass (ADR 0026).
+		if in.ReconcileEnabled {
+			if _, err := in.ReconcileDuration(); err != nil {
+				return fmt.Errorf("inboxcfg: inbox %q: %w", name, err)
+			}
 		}
 	}
 	return nil
@@ -177,4 +196,23 @@ func (in Inbox) Filter() (*filter.Filter, error) {
 		return nil, fmt.Errorf("marshal filter: %w", err)
 	}
 	return filter.Compile(b)
+}
+
+// ReconcileDuration parses the inbox's reconcile interval (ADR 0026). An empty
+// interval returns (0, nil) — the caller substitutes the runtime default. A set
+// interval must be a positive Go duration (e.g. "1h", "30m", "6h"); zero or
+// negative is an error. It is only meaningful when ReconcileEnabled is set.
+func (in Inbox) ReconcileDuration() (time.Duration, error) {
+	s := strings.TrimSpace(in.ReconcileInterval)
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid reconcile_interval %q: %w", s, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("reconcile_interval must be positive, got %q", s)
+	}
+	return d, nil
 }
