@@ -316,6 +316,56 @@ func (s *bboltStore) SetSeen(owner, inbox, id string, seen bool) error {
 	})
 }
 
+// RemoveSynced hard-removes an upstream-synced message (ADR 0026 reconciliation):
+// its metadata record, its dedup-index entry, and its content blob. It refuses a
+// locally-generated record (UpstreamUID == 0, e.g. a signed bounce) — those have
+// no upstream and are never reconciled — and is (owner, inbox)-scoped.
+//
+// The metadata record and the dedup-index entry are removed in one txn; the blob
+// is deleted AFTER the commit. The ordering mirrors the blob-first WRITE path
+// (put/SetContent, ADR 0018) inverted: removing metadata first means a crash
+// before the blob delete only ORPHANS the blob (no record references it), which
+// the startup sweep reclaims — it can never leave a metadata pointer to a missing
+// blob.
+func (s *bboltStore) RemoveSynced(owner, inbox, id string) error {
+	var blobbed bool
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		rec, key, err := loadStored(tx, id)
+		if err != nil {
+			return err
+		}
+		if !recScoped(rec, owner, inbox) {
+			return ErrNotFound // do not retract another owner's/inbox's message
+		}
+		if rec.UpstreamUID == 0 {
+			return fmt.Errorf("refusing to retract locally-generated message %s (no upstream UID)", id)
+		}
+		if err := tx.Bucket(bucketInbound).Delete(key); err != nil {
+			return err
+		}
+		// Clear the dedup index so the message re-syncs cleanly if it returns to the
+		// source later (ADR 0026 re-appearance): a stale index entry would suppress
+		// the re-add as a false duplicate.
+		idxKey := syncedKey(rec.Owner, rec.Inbox, rec.UIDValidity, rec.UpstreamUID)
+		if err := tx.Bucket(bucketSynced).Delete(idxKey); err != nil {
+			return err
+		}
+		blobbed = rec.Blobbed
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("inbound: remove synced %s: %w", id, err)
+	}
+	if blobbed {
+		// Best-effort: a present record's blob. Delete is idempotent (a missing blob
+		// is not an error); a real failure only orphans it for the next sweep.
+		if err := s.blobs.Delete(id); err != nil {
+			log.Printf("darbaan: inbound retract %s: blob delete failed (orphan, will be swept): %v", id, err)
+		}
+	}
+	return nil
+}
+
 // SetKeywords replaces the owner's message's keyword set (ADR 0020) and marks it
 // dirty for upstream reconcile. The local store is canonical; the returned
 // message carries the new keywords (without content). Metadata-only write.
