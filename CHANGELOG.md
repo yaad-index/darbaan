@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.6.0](https://github.com/yaad-index/darbaan/compare/v0.5.0...v0.6.0) (2026-06-30)
+
+
+### Features
+
+* **admin:** reconcile status + release operator UX (ADR 0026) ([#153](https://github.com/yaad-index/darbaan/issues/153)) ([afb78f3](https://github.com/yaad-index/darbaan/commit/afb78f3e7a17d61cad9d1719eab2d2069ee6553c)), closes [#140](https://github.com/yaad-index/darbaan/issues/140)
+* **imapsync:** ListUpstreamUIDs — current present-set for reconciliation ([#143](https://github.com/yaad-index/darbaan/issues/143)) ([e40eb7b](https://github.com/yaad-index/darbaan/commit/e40eb7b764e59bae07493ee4626074ad5ef2436c))
+* **imapsync:** Reconcile — retract messages that left the source ([#146](https://github.com/yaad-index/darbaan/issues/146)) ([c488bde](https://github.com/yaad-index/darbaan/commit/c488bde14ac2a7affbd7750c4e4751ec82f4b4fe))
+* **inbound:** RemoveSynced — hard-retract a synced message ([#142](https://github.com/yaad-index/darbaan/issues/142)) ([86c0fb9](https://github.com/yaad-index/darbaan/commit/86c0fb982acef529101dac16efb146e634068a3a))
+* **inboxcfg:** per-inbox reconcile opt-in + interval ([#145](https://github.com/yaad-index/darbaan/issues/145)) ([d7fe0de](https://github.com/yaad-index/darbaan/commit/d7fe0dede5cf21ed63cc4d411882e19017c01f01))
+* **reconcile:** operator-ack release — clear latch + cap-bypassed purge ([#150](https://github.com/yaad-index/darbaan/issues/150)) ([5a170aa](https://github.com/yaad-index/darbaan/commit/5a170aadf76d6567a1332cf37d3585a52eea4952))
+* **reconcile:** safety-cap latch — hold a too-large purge (ADR 0026) ([#148](https://github.com/yaad-index/darbaan/issues/148)) ([3253688](https://github.com/yaad-index/darbaan/commit/32536882f4b6967309d84539c2cfe9efa83d1b8b))
+* **serve:** reconcile cadence loop + shared audit log (ADR 0026) ([#152](https://github.com/yaad-index/darbaan/issues/152)) ([59211fb](https://github.com/yaad-index/darbaan/commit/59211fb006364079117073ce48e13c443bce789b))
+
+
+### Bug Fixes
+
+* **reconcile:** release refuses a non-held inbox ([#154](https://github.com/yaad-index/darbaan/issues/154)) ([#155](https://github.com/yaad-index/darbaan/issues/155)) ([8be819b](https://github.com/yaad-index/darbaan/commit/8be819bf907f3b6ff65cf49d50b19a6e2f5dcb06))
+
 ## [0.5.0](https://github.com/yaad-index/darbaan/compare/v0.4.0...v0.5.0) (2026-06-29)
 
 
