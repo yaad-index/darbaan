@@ -46,6 +46,19 @@ type Inbox struct {
 	// longer; empty uses the runtime default. It is only meaningful when enabled.
 	ReconcileEnabled  bool   `yaml:"reconcile_enabled"`
 	ReconcileInterval string `yaml:"reconcile_interval"`
+
+	// ReconcileCapFraction is the safety-cap fraction (ADR 0026): a reconcile pass
+	// that would retract more than this fraction of the inbox's synced set latches
+	// (suspends reconciliation, pending an operator release) instead of purging —
+	// the anomaly backstop against a source-side mass removal silently emptying the
+	// store. Zero uses the runtime default; a set value must be in (0,1].
+	ReconcileCapFraction float64 `yaml:"reconcile_cap_fraction"`
+	// ReconcileCapFloor is the safety-cap absolute floor: the cap never latches
+	// unless at least this many messages would be retracted (so a tiny inbox never
+	// false-latches on a normal single removal). Zero uses the runtime default; a
+	// set value must be >= 1. The latch rule is the conjunction of both —
+	// retract-count >= floor AND retract-count > fraction * synced-set.
+	ReconcileCapFloor int `yaml:"reconcile_cap_floor"`
 }
 
 // Backend is an inbox's upstream account coordinates (ADR 0009). Secrets
@@ -121,6 +134,12 @@ func Validate(inboxes []Inbox) error {
 		if in.ReconcileEnabled {
 			if _, err := in.ReconcileDuration(); err != nil {
 				return fmt.Errorf("inboxcfg: inbox %q: %w", name, err)
+			}
+			if f := in.ReconcileCapFraction; f != 0 && (f < 0 || f > 1) {
+				return fmt.Errorf("inboxcfg: inbox %q: reconcile_cap_fraction must be in (0,1], got %v", name, f)
+			}
+			if fl := in.ReconcileCapFloor; fl != 0 && fl < 1 {
+				return fmt.Errorf("inboxcfg: inbox %q: reconcile_cap_floor must be >= 1, got %d", name, fl)
 			}
 		}
 	}

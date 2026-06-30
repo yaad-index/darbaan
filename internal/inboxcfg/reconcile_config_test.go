@@ -74,3 +74,28 @@ func TestValidateReconcileInterval(t *testing.T) {
 	disabledBad := []inboxcfg.Inbox{{Name: "work", ReconcileInterval: "nope"}}
 	assert.NoError(t, inboxcfg.Validate(disabledBad), "a disabled inbox's interval is not validated")
 }
+
+func TestReconcileCapParse(t *testing.T) {
+	doc := []byte("inboxes:\n  - name: work\n    reconcile_enabled: true\n    reconcile_cap_fraction: 0.3\n    reconcile_cap_floor: 10\n")
+	inboxes, err := inboxcfg.Parse(doc)
+	require.NoError(t, err)
+	require.Len(t, inboxes, 1)
+	assert.InDelta(t, 0.3, inboxes[0].ReconcileCapFraction, 1e-9)
+	assert.Equal(t, 10, inboxes[0].ReconcileCapFloor)
+}
+
+// The cap fraction (0,1] and floor >=1 are validated only for an enabled inbox;
+// zero means "runtime default".
+func TestValidateReconcileCap(t *testing.T) {
+	en := func(f float64, fl int) []inboxcfg.Inbox {
+		return []inboxcfg.Inbox{{Name: "work", ReconcileEnabled: true, ReconcileCapFraction: f, ReconcileCapFloor: fl}}
+	}
+	assert.Error(t, inboxcfg.Validate(en(1.5, 0)), "fraction >1 rejected")
+	assert.Error(t, inboxcfg.Validate(en(-0.1, 0)), "negative fraction rejected")
+	assert.Error(t, inboxcfg.Validate(en(0, -1)), "floor <1 rejected")
+	assert.NoError(t, inboxcfg.Validate(en(0.3, 1)))
+	assert.NoError(t, inboxcfg.Validate(en(0, 0)), "zero fraction/floor = runtime default")
+
+	disabled := []inboxcfg.Inbox{{Name: "work", ReconcileCapFraction: 9, ReconcileCapFloor: -5}}
+	assert.NoError(t, inboxcfg.Validate(disabled), "the cap is not validated when reconciliation is disabled")
+}
