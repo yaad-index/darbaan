@@ -87,6 +87,11 @@ type ReconcileOptions struct {
 	// DefaultReconcileCapFloor. The latch rule is the conjunction of both:
 	// retract-count >= floor AND retract-count > fraction * synced-set.
 	CapFloor int
+	// BypassCap skips the safety cap for this pass. It is set by ReleaseReconcile
+	// for the operator-ack release of a latched inbox: the operator has confirmed
+	// the large removal is legitimate, so the held purge completes without
+	// re-latching. Normal (non-release) passes leave it false.
+	BypassCap bool
 }
 
 // Reconcile runs one upstream-reconciliation pass for this syncer's inbox
@@ -183,7 +188,7 @@ func (s *Syncer) Reconcile(ctx context.Context, opts ReconcileOptions) (int, err
 	if floor < 1 {
 		floor = DefaultReconcileCapFloor
 	}
-	if len(gone) >= floor && float64(len(gone)) > frac*float64(syncedCount) {
+	if !opts.BypassCap && len(gone) >= floor && float64(len(gone)) > frac*float64(syncedCount) {
 		if err := s.state.SaveReconcile(s.stateKey(), ReconcileState{Suspended: true, HeldCount: len(gone)}); err != nil {
 			return 0, fmt.Errorf("imapsync: reconcile: latch: %w", err)
 		}
@@ -219,4 +224,28 @@ func (s *Syncer) Reconcile(ctx context.Context, opts ReconcileOptions) (int, err
 		return removed, fmt.Errorf("imapsync: reconcile: %d of %d retraction(s) failed: %w", len(errs), len(gone), errors.Join(errs...))
 	}
 	return removed, nil
+}
+
+// ReleaseReconcile is the operator-ack release of a latched inbox (ADR 0026): it
+// clears the reconcile latch and runs one pass with the safety cap bypassed, so
+// the held retraction completes once. The operator has confirmed the large
+// removal is legitimate; after this pass, normal capped operation resumes (a new
+// anomaly would latch again). The pass re-lists the upstream, so the purge
+// reflects the source's state at release time, not a stale snapshot from when it
+// latched.
+func (s *Syncer) ReleaseReconcile(ctx context.Context, opts ReconcileOptions) (int, error) {
+	// Clear the latch first so the suspended-check in Reconcile lets the pass run;
+	// BypassCap then stops it from re-latching on the same large purge.
+	if err := s.state.SaveReconcile(s.stateKey(), ReconcileState{}); err != nil {
+		return 0, fmt.Errorf("imapsync: release: clear latch: %w", err)
+	}
+	opts.BypassCap = true
+	return s.Reconcile(ctx, opts)
+}
+
+// ReconcileLatch reports the inbox's current reconcile latch (ADR 0026) — whether
+// reconciliation is suspended and the candidate count that tripped it. The
+// operator status surface reads it to show which inboxes are held.
+func (s *Syncer) ReconcileLatch() (ReconcileState, error) {
+	return s.state.LoadReconcile(s.stateKey())
 }
