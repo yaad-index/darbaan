@@ -153,3 +153,38 @@ func (c *Client) action(ctx context.Context, path string, body io.Reader) (Outco
 	}
 	return out, nil
 }
+
+// ReconcileStatus lists each inbox's reconciliation latch (ADR 0026).
+func (c *Client) ReconcileStatus(ctx context.Context) ([]ReconcileStatus, error) {
+	resp, err := c.request(ctx, http.MethodGet, "/reconcile", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errorFrom(resp)
+	}
+	var st []ReconcileStatus
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+// ReleaseReconcile releases a latched inbox — confirm the large retraction and
+// resume reconciliation (ADR 0026).
+func (c *Client) ReleaseReconcile(ctx context.Context, inbox string) (ReconcileReleaseResult, error) {
+	resp, err := c.request(ctx, http.MethodPost, "/reconcile/"+inbox+"/release", nil)
+	if err != nil {
+		return ReconcileReleaseResult{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return ReconcileReleaseResult{}, errorFrom(resp)
+	}
+	var res ReconcileReleaseResult
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return ReconcileReleaseResult{}, err
+	}
+	return res, nil
+}

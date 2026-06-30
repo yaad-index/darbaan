@@ -41,6 +41,10 @@ func NewServer(addr, token string, svc *Service) (*Server, error) {
 	mux.HandleFunc("POST /holds/{id}/expose", s.auth(s.handleExpose))
 	mux.HandleFunc("POST /holds/{id}/drop", s.auth(s.handleDrop))
 
+	// Reconcile safety-cap controls (ADR 0026): list held inboxes, release one.
+	mux.HandleFunc("GET /reconcile", s.auth(s.handleReconcileStatus))
+	mux.HandleFunc("POST /reconcile/{inbox}/release", s.auth(s.handleReconcileRelease))
+
 	s.http = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
 }
@@ -130,6 +134,36 @@ func (s *Server) writeHold(w http.ResponseWriter, m inbound.Message, err error) 
 		return
 	}
 	writeJSON(w, http.StatusOK, m)
+}
+
+func (s *Server) handleReconcileStatus(w http.ResponseWriter, _ *http.Request) {
+	st, err := s.svc.ReconcileStatusAll()
+	if errors.Is(err, ErrReconcileUnavailable) {
+		writeErr(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if st == nil {
+		st = []ReconcileStatus{}
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) handleReconcileRelease(w http.ResponseWriter, r *http.Request) {
+	inbox := r.PathValue("inbox")
+	n, err := s.svc.ReleaseReconcile(r.Context(), inbox)
+	if errors.Is(err, ErrReconcileUnavailable) {
+		writeErr(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ReconcileReleaseResult{Inbox: inbox, Purged: n})
 }
 
 func (s *Server) handleReject(w http.ResponseWriter, r *http.Request) {
