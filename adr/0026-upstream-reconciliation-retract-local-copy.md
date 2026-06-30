@@ -116,3 +116,28 @@ backend is out of scope for v1.
 - Full bidirectional flag/keyword reconciliation (beyond presence).
 
 Relates to ADR 0001, 0002, 0007, 0016, 0018, 0019, 0020, 0021, 0023.
+
+## Amendment (2026-06-30): safety-cap breach — latch semantics
+
+The Decision's safety cap ("hold and log/alert instead of auto-purging" when a pass would purge an unusually large fraction) is made concrete here, resolving the open question of what a breach does.
+
+**Threshold — both conditions must hold to trip the cap:**
+
+- `gone >= floor` — at least an absolute floor of candidates would be retracted, **and**
+- `gone > fraction * synced` — they exceed a fraction of the inbox's synced set.
+
+Defaults: `fraction = 0.5`, `floor = 5`, both per-inbox configurable (`reconcile_cap_fraction`, `reconcile_cap_floor`). The floor prevents a tiny inbox from false-latching (a 2-message inbox losing 1 is 50%, but only 1 message); the fraction only bites at scale.
+
+**On breach — LATCH, not transient-skip:**
+
+- The pass retracts nothing, **suspends reconciliation for that inbox**, and alerts.
+- A transient skip is rejected: it would re-alert every cycle and never reconcile a *legitimate* large removal, and auto-purging next cycle would defeat the cap.
+- The suspended state is **runtime store state** — a dedicated reconcile-state record in the store, separate from the forward-sync cursor (which the sync rewrites each cycle) and not a config flag (config is read-only at runtime).
+
+**Release — explicit operator action:**
+
+- Resuming is an operator action via the admin API / approval surface (ADR 0004/0017), not a config edit. On release, reconciliation resumes and performs the confirmed purge **once** (the held retraction), then returns to normal per-cycle operation.
+
+**Rationale:** the cap exists so a source-side anomaly — a mass deletion or bulk un-label upstream — cannot silently empty the local store. The latch keeps the operator in the loop for an anomalous purge while still allowing a confirmed legitimate large removal to complete: neither alerting forever nor auto-purging.
+
+Relates to ADR 0004, 0017 (admin API / approval surface for the release action).
