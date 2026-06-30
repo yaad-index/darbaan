@@ -66,6 +66,11 @@ type ReconcileReleaseResult struct {
 // an upstream syncer, so there is nothing to reconcile or release.
 var ErrReconcileUnavailable = errors.New("admin: reconcile control not available (no upstream inbox configured)")
 
+// ErrReconcileNotHeld is returned by ReleaseReconcile when the inbox is not held
+// by the safety cap — there is nothing to release. serve translates the syncer's
+// equivalent error into this so the API can answer 409 (conflict) rather than 500.
+var ErrReconcileNotHeld = errors.New("admin: inbox is not held by the reconcile safety cap (nothing to release)")
+
 // SetReconcileControls wires the reconcile release/status callbacks (ADR 0026).
 // serve supplies them over its per-inbox syncers; without them the endpoints
 // report ErrReconcileUnavailable.

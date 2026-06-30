@@ -756,7 +756,11 @@ func (*ServeCmd) Run(cli *CLI) error {
 				if !ok {
 					return 0, fmt.Errorf("inbox %q has no upstream to reconcile", name)
 				}
-				return syn.ReleaseReconcile(ctx, imapsync.ReconcileOptions{Audit: al})
+				n, rerr := syn.ReleaseReconcile(ctx, imapsync.ReconcileOptions{Audit: al})
+				if errors.Is(rerr, imapsync.ErrReconcileNotHeld) {
+					return 0, admin.ErrReconcileNotHeld // → 409 at the API
+				}
+				return n, rerr
 			},
 			func() ([]admin.ReconcileStatus, error) {
 				out := make([]admin.ReconcileStatus, 0, len(syncers))

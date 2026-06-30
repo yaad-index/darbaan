@@ -159,6 +159,10 @@ func (s *Server) handleReconcileRelease(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusServiceUnavailable, err)
 		return
 	}
+	if errors.Is(err, ErrReconcileNotHeld) {
+		writeErr(w, http.StatusConflict, err) // not held → nothing to release
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
