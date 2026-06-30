@@ -66,8 +66,11 @@ chain) so it is traceable.
 
 - A **configurable reconcile interval**, independent of (and typically longer
   than) the forward poll — a full UID listing is heavier than incremental sync.
-- **Per-inbox enable.** Reconciliation is configured per inbox (ADR 0023); a
-  label-folder-scoped inbox is the primary case (un-labeling = retraction).
+- **Per-inbox enable — opt-in, default off.** Reconciliation is configured per
+  inbox (ADR 0023) and is **off unless explicitly enabled**, so an upgrade never
+  starts retracting on deploy by surprise; the operator turns it on per inbox. A
+  label-folder-scoped inbox is the primary case to enable (un-labeling =
+  retraction).
 
 ### Re-appearance
 
@@ -75,6 +78,12 @@ If a message returns to the source after retraction (e.g. re-applying a label
 adds it back to the folder with a **new** folder UID above the high-water),
 forward sync re-pulls it naturally (ADR 0019). No special handling: retract on
 exit, re-sync on return.
+
+**Assumption:** the re-added message gets a new UID above the sync high-water.
+This holds for standard IMAP (UIDs are monotonic within a `UIDVALIDITY`,
+RFC 3501) and for the label-as-folder model. A backend that reuses or lowers
+UIDs without bumping `UIDVALIDITY` would not re-pull a returned message; such a
+backend is out of scope for v1.
 
 ## Boundaries / non-goals (this increment)
 
