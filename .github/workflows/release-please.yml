@@ -14,6 +14,14 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
+          # Use a PAT instead of the default GITHUB_TOKEN. Events made with
+          # GITHUB_TOKEN do not trigger further workflows (GitHub's
+          # anti-recursion rule), which suppressed two things: the release PR's
+          # CI never ran (so the required check was absent and the PR could not
+          # merge without an admin override), and the release tag did not fire
+          # the image publish. A PAT acts as a real account, so the release PR
+          # gets its CI run and the tag triggers tag-gated workflows.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           release-type: go
           # No custom release-rules — the action's defaults match the
           # conventional-commits type→bump table the fleet follows.
