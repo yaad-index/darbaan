@@ -3,7 +3,7 @@ package sluice
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -100,7 +100,7 @@ func (s *bboltStore) sweepOrphans() error {
 		return err
 	}
 	if n > 0 {
-		log.Printf("darbaan: sluice reclaimed %d orphan blob(s) at startup", n)
+		slog.Info("sluice reclaimed orphan blobs at startup", "count", n)
 	}
 	return nil
 }
@@ -114,7 +114,7 @@ func (s *bboltStore) Close() error { return s.db.Close() }
 // (ADR 0011, #17 trade-off).
 func (s *bboltStore) writeAudit(rec audit.Record) {
 	if err := s.audit.Append(rec); err != nil {
-		log.Printf("darbaan: best-effort audit append failed for message %s (%s): %v", rec.MessageID, rec.Event, err)
+		slog.Warn("best-effort audit append failed", "message_id", rec.MessageID, "event", rec.Event, "err", err)
 	}
 }
 

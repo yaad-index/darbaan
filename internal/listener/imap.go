@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"sort"
 	"strconv"
@@ -193,7 +193,7 @@ func (s *imapSession) guardHides(m inbound.Message, inbox string) bool {
 		return fm.Raw, e
 	})
 	if err != nil {
-		log.Printf("darbaan imap: bounce-guard %s: %v", m.ID, err)
+		slog.Warn("imap bounce-guard check failed", "id", m.ID, "err", err)
 	}
 	if !spoof {
 		return false
@@ -420,7 +420,7 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 				// their labels are local-only, nothing to replicate.
 				if s.writeKeywords != nil && m.UpstreamUID != 0 {
 					if err := s.writeKeywords(s.owner, s.selectedInbox, m.ID, added, removed); err != nil {
-						log.Printf("darbaan: imap keyword write-through for %s deferred: %v", m.ID, err)
+						slog.Warn("imap keyword write-through deferred", "id", m.ID, "err", err)
 					} else {
 						_ = s.store.ClearKeywordsDirty(s.owner, s.selectedInbox, m.ID)
 					}
@@ -557,7 +557,7 @@ func (s *imapSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCr
 		// — but log it: a skipped candidate is a silently-missing result.
 		ok, err := matchSearch(seqNum, m, criteria, s.rawResolver(*m))
 		if err != nil {
-			log.Printf("darbaan: imap search skipped message %s: %v", m.ID, err)
+			slog.Warn("imap search skipped message", "id", m.ID, "err", err)
 			continue
 		}
 		if !ok {
