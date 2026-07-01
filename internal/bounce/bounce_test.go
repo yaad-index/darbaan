@@ -36,6 +36,17 @@ func parseParts(t *testing.T, raw []byte) map[string]string {
 	return parts
 }
 
+// ADR 0027: a bounce is keyed to its originating agent (Owner) AND the inbox the
+// failed submission was for (Inbox), so it surfaces in that inbox's view, private
+// to the originator.
+func TestGenerateKeysOwnerAndInbox(t *testing.T) {
+	orig := sluice.Message{Agent: "agent-a", Inbox: "work", From: "w@x.test", Rcpt: []string{"d@y.test"}, Raw: []byte("Subject: hi\r\n\r\nb\r\n")}
+	b, err := bounce.Generate(orig, "refused", false, "darbaan.test")
+	require.NoError(t, err)
+	assert.Equal(t, "agent-a", b.Owner)
+	assert.Equal(t, "work", b.Inbox)
+}
+
 func TestGeneratePermanent(t *testing.T) {
 	orig := sluice.Message{Agent: "agent", From: "sender@local", Rcpt: []string{"dest@example.test"}, Raw: []byte("Subject: hi\r\n\r\nbody-marker\r\n")}
 	b, err := bounce.Generate(orig, "refused by policy", false, "darbaan.test")

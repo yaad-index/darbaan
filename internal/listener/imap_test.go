@@ -45,7 +45,7 @@ func startIMAPFull(t *testing.T, store inbound.InboundStore, fetch listener.Cont
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		listener.SingleAuth("agent", "pw"), store, fetch, wk, map[string]*filter.Filter{inbound.DefaultInbox: flt}, nil, false)
+		listener.SingleAuth("agent", "pw"), store, fetch, wk, map[string]*filter.Filter{inbound.DefaultInbox: flt}, nil, false, nil)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -57,7 +57,7 @@ func startIMAPMulti(t *testing.T, store inbound.InboundStore, filters map[string
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		listener.SingleAuth("agent", "pw"), store, nil, nil, filters, nil, false)
+		listener.SingleAuth("agent", "pw"), store, nil, nil, filters, nil, false, nil)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -69,7 +69,7 @@ func startIMAPAuth(t *testing.T, store inbound.InboundStore, filters map[string]
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		auth, store, nil, nil, filters, nil, false)
+		auth, store, nil, nil, filters, nil, false, nil)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -630,6 +630,73 @@ func TestIMAPBadAuthRejected(t *testing.T) {
 
 func TestIMAPRequiresTLS(t *testing.T) {
 	_, err := listener.NewIMAPServer(listener.IMAPServerConfig{},
-		listener.SingleAuth("agent", "pw"), seedInbound(t), nil, nil, nil, nil, false)
+		listener.SingleAuth("agent", "pw"), seedInbound(t), nil, nil, nil, nil, false, nil)
 	require.Error(t, err)
+}
+
+func startIMAPDecoupled(t *testing.T, store inbound.InboundStore, filters map[string]*filter.Filter, auth *listener.Auth, mailOwner func(string) string) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
+		auth, store, nil, nil, filters, nil, false, mailOwner)
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return l.Addr().String()
+}
+
+// ADR 0027 bounce privacy on a shared inbox: two agents share inbox "work". Its
+// synced mail is owned by the inbox and visible to both; each agent's own bounce
+// is owned by the agent and visible ONLY to that agent — a co-reader never sees
+// it. This is the two-key-space read union.
+func TestIMAPBouncePrivacyOnSharedInbox(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	// Shared synced mail owned by the inbox name (post-decoupling).
+	_, _, err = store.AddSynced(inbound.Delivery{Owner: "work", Inbox: "work", UpstreamUID: 1, UIDValidity: 1, Raw: []byte("Subject: synced-w\r\n\r\nx")})
+	require.NoError(t, err)
+	// Each agent's private bounce (locally-generated, owned by the agent).
+	_, err = store.Add(inbound.Delivery{Owner: "agent-a", Inbox: "work", Raw: []byte("Subject: bounce-a\r\n\r\nx")})
+	require.NoError(t, err)
+	_, err = store.Add(inbound.Delivery{Owner: "agent-b", Inbox: "work", Raw: []byte("Subject: bounce-b\r\n\r\nx")})
+	require.NoError(t, err)
+
+	principal := func(name string) listener.Principal {
+		return listener.Principal{Name: name, Password: "pw", DefaultInbox: "work",
+			Reads: map[string]bool{"work": true}, Sends: map[string]bool{"work": true}}
+	}
+	auth := listener.NewAuth([]listener.Principal{principal("agent-a"), principal("agent-b")})
+	filters := map[string]*filter.Filter{"work": nil}
+	mailOwner := func(inbox string) string { return inbox } // agents mode: owner = inbox name
+	addr := startIMAPDecoupled(t, store, filters, auth, mailOwner)
+
+	subjects := func(agent string) map[string]bool {
+		c, err := imapclient.DialInsecure(addr, nil)
+		require.NoError(t, err)
+		defer func() { _ = c.Close() }()
+		require.NoError(t, c.Login(agent, "pw").Wait())
+		sel, err := c.Select("INBOX", nil).Wait()
+		require.NoError(t, err)
+		got := map[string]bool{}
+		if sel.NumMessages == 0 {
+			return got
+		}
+		seqs := make([]uint32, sel.NumMessages)
+		for i := range seqs {
+			seqs[i] = uint32(i) + 1
+		}
+		msgs, err := c.Fetch(imap.SeqSetNum(seqs...), &imap.FetchOptions{Envelope: true}).Collect()
+		require.NoError(t, err)
+		for _, m := range msgs {
+			got[m.Envelope.Subject] = true
+		}
+		return got
+	}
+
+	assert.Equal(t, map[string]bool{"synced-w": true, "bounce-a": true}, subjects("agent-a"),
+		"agent-a sees shared synced mail + its own bounce, never agent-b's")
+	assert.Equal(t, map[string]bool{"synced-w": true, "bounce-b": true}, subjects("agent-b"),
+		"agent-b sees shared synced mail + its own bounce, never agent-a's")
 }

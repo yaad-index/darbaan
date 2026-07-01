@@ -95,7 +95,7 @@ func TestHoldsRoundtrip(t *testing.T) {
 	svc := admin.NewService(q, inbox, fakeSender{nil}, testSigner(t), strictRouter(), "darbaan.test")
 	flt, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]"))
 	require.NoError(t, err)
-	svc.SetInboundHolds(map[string]*filter.Filter{inbound.DefaultInbox: flt}, "agent", nil, false)
+	svc.SetInboundHolds(map[string]*filter.Filter{inbound.DefaultInbox: flt}, func(string) string { return "agent" }, nil, false)
 	_, held, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", Subject: "review me", UpstreamUID: 1, UIDValidity: 1, Keywords: []string{"review"}})
 	require.NoError(t, err)
 

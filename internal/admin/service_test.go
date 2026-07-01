@@ -98,6 +98,7 @@ func (failingInbound) Get(string, string, string) (inbound.Message, error) {
 }
 func (failingInbound) SetSeen(string, string, string, bool) error { return nil }
 func (failingInbound) RemoveSynced(string, string, string) error  { return nil }
+func (failingInbound) RekeyOwnersToInbox() (int, error)           { return 0, nil }
 func (failingInbound) Close() error                               { return nil }
 
 type senderFunc func(sluice.Message) error
@@ -251,7 +252,7 @@ func TestInboundHoldQueue(t *testing.T) {
 	svc := admin.NewService(q, inbox, backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
 	flt, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]"))
 	require.NoError(t, err)
-	svc.SetInboundHolds(map[string]*filter.Filter{inbound.DefaultInbox: flt}, "agent", nil, false)
+	svc.SetInboundHolds(map[string]*filter.Filter{inbound.DefaultInbox: flt}, func(string) string { return "agent" }, nil, false)
 
 	_, _, err = inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1}) // allowed
 	require.NoError(t, err)
@@ -288,7 +289,7 @@ func TestInboundHoldQueueMultiInbox(t *testing.T) {
 	svc := admin.NewService(q, inbox, backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
 	hold, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]"))
 	require.NoError(t, err)
-	svc.SetInboundHolds(map[string]*filter.Filter{"work": hold, "personal": hold}, "agent", nil, false)
+	svc.SetInboundHolds(map[string]*filter.Filter{"work": hold, "personal": hold}, func(string) string { return "agent" }, nil, false)
 
 	_, workHeld, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", Inbox: "work", UpstreamUID: 1, UIDValidity: 1, Keywords: []string{"review"}})
 	require.NoError(t, err)
@@ -328,7 +329,7 @@ func TestInboundBounceGuardHold(t *testing.T) {
 	require.NoError(t, err)
 	// Verifier says "no valid Darbaan signature" → a bounce-shaped message is a spoof.
 	guard := bounceguard.New(func([]byte) (bool, error) { return false, nil })
-	svc.SetInboundHolds(map[string]*filter.Filter{inbound.DefaultInbox: passthrough}, "agent", guard, true /* hold-for-human */)
+	svc.SetInboundHolds(map[string]*filter.Filter{inbound.DefaultInbox: passthrough}, func(string) string { return "agent" }, guard, true /* hold-for-human */)
 
 	// A bounce-shaped message from MAILER-DAEMON (envelope From hits the precheck;
 	// the stored raw is bounce-shaped) → spoof → held.

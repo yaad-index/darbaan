@@ -222,3 +222,50 @@ func TestSetSeen(t *testing.T) {
 	require.ErrorIs(t, s.SetSeen("other", inbound.DefaultInbox, m.ID, true), inbound.ErrNotFound)
 	require.ErrorIs(t, s.SetSeen("agent", inbound.DefaultInbox, "999", true), inbound.ErrNotFound)
 }
+
+// ADR 0027 mail-owner decoupling: RekeyOwnersToInbox rewrites synced records'
+// owner to their inbox name, leaves locally-generated records (bounces) keyed to
+// their originating agent, and moves the dedup index so a re-sync still dedups.
+func TestRekeyOwnersToInbox(t *testing.T) {
+	s := newStore(t)
+
+	// Two synced records under an old login owner, in two inboxes.
+	_, _, err := s.AddSynced(inbound.Delivery{Owner: "old-login", Inbox: "work", UpstreamUID: 5, UIDValidity: 1, Raw: []byte("From: a@x\r\n\r\nw")})
+	require.NoError(t, err)
+	_, _, err = s.AddSynced(inbound.Delivery{Owner: "old-login", Inbox: "personal", UpstreamUID: 7, UIDValidity: 1, Raw: []byte("From: b@y\r\n\r\np")})
+	require.NoError(t, err)
+	// A bounce (locally-generated) owned by the originating agent.
+	_, err = s.Add(inbound.Delivery{Owner: "agent-a", Inbox: "work", Raw: []byte("From: MAILER-DAEMON\r\n\r\nbounce")})
+	require.NoError(t, err)
+
+	n, err := s.RekeyOwnersToInbox()
+	require.NoError(t, err)
+	assert.Equal(t, 2, n, "only the two synced records are rekeyed")
+
+	// Synced records are now owned by their inbox name; the old owner has none.
+	work, err := s.List("work", "work")
+	require.NoError(t, err)
+	require.Len(t, work, 1)
+	assert.Equal(t, "work", work[0].Owner)
+	old, err := s.List("old-login", "work")
+	require.NoError(t, err)
+	assert.Empty(t, old, "no synced record remains under the old owner")
+
+	// The bounce keeps its originating-agent owner — private, never rekeyed.
+	bounces, err := s.List("agent-a", "work")
+	require.NoError(t, err)
+	require.Len(t, bounces, 1)
+	assert.Equal(t, "agent-a", bounces[0].Owner)
+	assert.Zero(t, bounces[0].UpstreamUID)
+
+	// The dedup index moved with the record: a re-sync under the new (inbox) owner
+	// finds the existing record instead of duplicating it.
+	added, _, err := s.AddSynced(inbound.Delivery{Owner: "work", Inbox: "work", UpstreamUID: 5, UIDValidity: 1, Raw: []byte("re-sync")})
+	require.NoError(t, err)
+	assert.False(t, added, "re-sync under the inbox owner dedups against the moved index")
+
+	// Idempotent: a second rekey changes nothing.
+	n, err = s.RekeyOwnersToInbox()
+	require.NoError(t, err)
+	assert.Zero(t, n)
+}

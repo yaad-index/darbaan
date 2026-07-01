@@ -221,45 +221,62 @@ func (c *CLI) resolveInboxes() ([]inboxcfg.Inbox, error) {
 	return inboxes, nil
 }
 
+// principalWiring is the resolved multi-agent auth for the serve loop (ADR 0027):
+// the login principals, the synced-mail owner key per inbox, and whether the
+// mail-owner is decoupled from the login (multi-agent mode).
+type principalWiring struct {
+	principals []listener.Principal
+	// mailOwner is an inbox's synced-mail store owner: its own name in multi-agent
+	// mode (so agents sharing an inbox read the same records), or the single
+	// implicit agent in back-compat mode (unchanged store keys).
+	mailOwner func(inbox string) string
+	// decoupled is true in multi-agent mode, where synced mail is keyed by inbox
+	// name and existing records are rekeyed once at startup.
+	decoupled bool
+}
+
 // resolvePrincipals resolves the configured agent principals (ADR 0027): the
 // `agents:` list, each a login with per-inbox grants and a password read from
 // DARBAAN_AGENT_<NAME>_PASSWORD (ADR 0012). With no `agents:` list it returns a
 // single implicit agent authenticated by DARBAAN_AGENT_PASS, granted every inbox
-// read+send — the back-compat single-agent path, unchanged. Grants are validated
-// here; their enforcement (read/send scoping) lands in a later increment.
-func (c *CLI) resolvePrincipals(inboxes []inboxcfg.Inbox) ([]listener.Principal, error) {
+// read+send — the back-compat single-agent path, whose store keys are unchanged.
+func (c *CLI) resolvePrincipals(inboxes []inboxcfg.Inbox) (principalWiring, error) {
 	data, err := c.configBytes()
 	if err != nil {
-		return nil, err
+		return principalWiring{}, err
 	}
 	agents, err := agentcfg.Parse(data)
 	if err != nil {
-		return nil, err
+		return principalWiring{}, err
 	}
 	if len(agents) == 0 {
 		pass := os.Getenv("DARBAAN_AGENT_PASS")
 		if c.AgentUsername == "" || pass == "" {
-			return nil, errors.New("set agent-username (config/flag/DARBAAN_AGENT_USERNAME) and DARBAAN_AGENT_PASS")
+			return principalWiring{}, errors.New("set agent-username (config/flag/DARBAAN_AGENT_USERNAME) and DARBAAN_AGENT_PASS")
 		}
-		return []listener.Principal{{Name: c.AgentUsername, Password: pass}}, nil
+		owner := c.AgentUsername
+		return principalWiring{
+			principals: []listener.Principal{{Name: owner, Password: pass}},
+			mailOwner:  func(string) string { return owner },
+		}, nil
 	}
 	inboxNames := make(map[string]bool, len(inboxes))
 	for _, in := range inboxes {
 		inboxNames[in.Name] = true
 	}
 	if err := agentcfg.Validate(agents, inboxNames); err != nil {
-		return nil, err
+		return principalWiring{}, err
 	}
 	principals := make([]listener.Principal, 0, len(agents))
 	for _, a := range agents {
 		env := agentcfg.PasswordEnv(a.Name)
 		pass := os.Getenv(env)
 		if pass == "" {
-			return nil, fmt.Errorf("agent %q: set %s (the password is supplied out-of-band, never in config — ADR 0012)", a.Name, env)
+			return principalWiring{}, fmt.Errorf("agent %q: set %s (the password is supplied out-of-band, never in config — ADR 0012)", a.Name, env)
 		}
 		def, err := agentcfg.DefaultInbox(a)
 		if err != nil {
-			return nil, err
+			return principalWiring{}, err
 		}
 		reads := make(map[string]bool, len(a.Grants))
 		sends := make(map[string]bool, len(a.Grants))
@@ -276,7 +293,11 @@ func (c *CLI) resolvePrincipals(inboxes []inboxcfg.Inbox) ([]listener.Principal,
 			DefaultInbox: def, Reads: reads, Sends: sends,
 		})
 	}
-	return principals, nil
+	return principalWiring{
+		principals: principals,
+		mailOwner:  func(inbox string) string { return inbound.NormInbox(inbox) },
+		decoupled:  true,
+	}, nil
 }
 
 // openInbound opens the inbound (served mailbox) store per config.
@@ -358,7 +379,7 @@ func (cli *CLI) newSenders(inboxes []inboxcfg.Inbox) (map[string]backend.Sender,
 // backend host are skipped (no sync). The syncers share one sync-state store
 // (keyed per inbox internally); the returned stop func closes it. An empty map
 // means no inbox syncs (gated off, like the stub sender).
-func (cli *CLI) newSyncers(inboxes []inboxcfg.Inbox, store inbound.InboundStore) (map[string]*imapsync.Syncer, func(), error) {
+func (cli *CLI) newSyncers(inboxes []inboxcfg.Inbox, store inbound.InboundStore, mailOwner func(inbox string) string) (map[string]*imapsync.Syncer, func(), error) {
 	syncers := map[string]*imapsync.Syncer{}
 	var state imapsync.StateStore
 	stop := func() {
@@ -388,7 +409,7 @@ func (cli *CLI) newSyncers(inboxes []inboxcfg.Inbox, store inbound.InboundStore)
 		}
 		pass := inboxIMAPPassword(in.Name)
 		dial := imapsync.Dialer(in.Backend.IMAPHost, in.Backend.IMAPUsername, pass)
-		syn := imapsync.New(dial, mailbox, cli.AgentUsername, in.Name, store, state, maxAge)
+		syn := imapsync.New(dial, mailbox, mailOwner(in.Name), in.Name, store, state, maxAge)
 		// Per-inbox structured logger (#151): every sync/reconcile record this
 		// syncer emits is tagged with its inbox.
 		syn.SetLogger(slog.Default().With("inbox", in.Name))
@@ -794,11 +815,24 @@ func (*ServeCmd) Run(cli *CLI) error {
 	// inbox — the back-compat single-agent path. The secret is kept in memory only
 	// (ADR 0012). Grants are validated here; their enforcement lands in a later
 	// increment.
-	principals, err := cli.resolvePrincipals(inboxes)
+	pw, err := cli.resolvePrincipals(inboxes)
 	if err != nil {
 		return err
 	}
-	auth := listener.NewAuth(principals)
+	auth := listener.NewAuth(pw.principals)
+
+	// Multi-agent mode keys synced mail by inbox name (ADR 0027 mail-owner
+	// decoupling), so agents sharing an inbox read the same records. Rekey existing
+	// synced records once at startup; bounces (UpstreamUID==0) keep their
+	// originating-agent owner and are never touched. The rekey is idempotent, so it
+	// is safe to run every start.
+	if pw.decoupled {
+		if n, rerr := inbox.RekeyOwnersToInbox(); rerr != nil {
+			return fmt.Errorf("rekey inbound owners: %w", rerr)
+		} else if n > 0 {
+			slog.Info("rekeyed inbound owners to inbox name (multi-agent)", "count", n)
+		}
+	}
 
 	// One upstream sender per inbox (ADR 0023): an approved message is delivered
 	// via the sender of the inbox it was submitted as. At N=1 this is the legacy
@@ -839,7 +873,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 	// One inbound syncer per inbox with an upstream (ADR 0019/0023), built before
 	// the read face so per-inbox FetchContent serves pending bodies on demand. An
 	// empty map = no inbox syncs.
-	syncers, stopSync, err := cli.newSyncers(inboxes, inbox)
+	syncers, stopSync, err := cli.newSyncers(inboxes, inbox, pw.mailOwner)
 	if err != nil {
 		return err
 	}
@@ -886,15 +920,16 @@ func (*ServeCmd) Run(cli *CLI) error {
 		slog.Warn("bounce-spoof guard disabled", "reason", "bounce-guard-enabled=false")
 	}
 	holdSpoof := cli.BounceGuardOnSpoof == "hold-for-human"
-	// The admin hold-for-human queue and the read face share one filter + owner +
-	// guard (ADR 0021/0024): the read face hides held/spoof mail, the admin surface
-	// decides it.
-	svc.SetInboundHolds(filters, cli.AgentUsername, guard, holdSpoof)
+	// The admin hold-for-human queue and the read face share one filter + mail-owner
+	// + guard (ADR 0021/0024/0027): the read face hides held/spoof mail, the admin
+	// surface decides it. The held queue is synced mail, keyed by the inbox
+	// mail-owner (per-inbox in multi-agent mode).
+	svc.SetInboundHolds(filters, pw.mailOwner, guard, holdSpoof)
 	imapSrv, err := listener.NewIMAPServer(listener.IMAPServerConfig{
 		Addr:          cli.IMAPAddr,
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
-	}, auth, inbox, imapContentFetch(syncers, inbox), imapKeywordWriter(syncers), filters, guard, holdSpoof)
+	}, auth, inbox, imapContentFetch(syncers, inbox), imapKeywordWriter(syncers), filters, guard, holdSpoof, pw.mailOwner)
 	if err != nil {
 		return err
 	}

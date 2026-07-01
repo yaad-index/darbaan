@@ -102,6 +102,13 @@ func Validate(agents []Agent, inboxNames map[string]bool) error {
 			return fmt.Errorf("agentcfg: duplicate agent name %q", name)
 		}
 		seen[name] = true
+		// An agent id and an inbox name share the store's owner namespace once mail
+		// is keyed by inbox name (ADR 0027 mail-owner decoupling): an agent named the
+		// same as an inbox would collide, so a co-reader could see that agent's
+		// private bounces. Reject the overlap.
+		if inboxNames[name] {
+			return fmt.Errorf("agentcfg: agent name %q collides with an inbox name", name)
+		}
 		// The password env binding is many-to-one (e.g. "a-b" and "a_b" both mangle
 		// to DARBAAN_AGENT_A_B_PASSWORD), so a collision would silently share one
 		// secret — reject it at load (ADR 0027).

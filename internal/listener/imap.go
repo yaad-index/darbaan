@@ -64,7 +64,11 @@ type IMAPServer struct {
 // The keys are the configured inboxes (ADR 0023); each is exposed as an IMAP
 // mailbox (the default inbox as INBOX). A single-inbox deploy passes one entry
 // keyed DefaultInbox.
-func NewIMAPServer(cfg IMAPServerConfig, auth *Auth, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter, filters map[string]*filter.Filter, guard *bounceguard.Guard, holdSpoof bool) (*IMAPServer, error) {
+// mailOwner returns an inbox's synced-mail store owner (ADR 0027): the inbox name
+// in multi-agent mode, so agents sharing an inbox read the same records. nil (the
+// single-agent / back-compat path) keys synced mail by the connecting agent, as
+// before.
+func NewIMAPServer(cfg IMAPServerConfig, auth *Auth, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter, filters map[string]*filter.Filter, guard *bounceguard.Guard, holdSpoof bool, mailOwner func(inbox string) string) (*IMAPServer, error) {
 	if cfg.TLSConfig == nil && !cfg.AllowInsecure {
 		return nil, errors.New("listener: IMAP TLS required (set TLSConfig, or AllowInsecure for local testing)")
 	}
@@ -76,7 +80,7 @@ func NewIMAPServer(cfg IMAPServerConfig, auth *Auth, store inbound.InboundStore,
 	}
 	srv := imapserver.New(&imapserver.Options{
 		NewSession: func(_ *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return &imapSession{auth: auth, store: store, fetch: fetch, writeKeywords: writeKeywords, filters: filters, guard: guard, holdSpoof: holdSpoof}, nil, nil
+			return &imapSession{auth: auth, store: store, fetch: fetch, writeKeywords: writeKeywords, filters: filters, guard: guard, holdSpoof: holdSpoof, mailOwner: mailOwner}, nil, nil
 		},
 		TLSConfig:    cfg.TLSConfig,
 		InsecureAuth: cfg.AllowInsecure,
@@ -94,8 +98,10 @@ func (s *IMAPServer) Serve(l net.Listener) error { return s.imap.Serve(l) }
 func (s *IMAPServer) Close() error { return s.imap.Close() }
 
 // imapSession is one IMAP connection, hard-scoped after Login to the
-// authenticated agent (owner). Every store access is owner-keyed, so a session
-// can only ever see the agent's own messages.
+// authenticated agent (ADR 0027). The read face is grant-gated (only inboxes the
+// agent may read) and, per selected inbox, unions the inbox's shared synced mail
+// (keyed by the inbox mail-owner) with the agent's own private bounces (keyed by
+// the agent), so a co-reader never sees another agent's bounce.
 type imapSession struct {
 	auth          *Auth
 	store         inbound.InboundStore
@@ -105,6 +111,7 @@ type imapSession struct {
 	guard         *bounceguard.Guard        // inbound bounce-spoof guard, ahead of the filter (nil = off; ADR 0024)
 	holdSpoof     bool                      // on_spoof=hold-for-human → held-semantics; false = hide
 	principal     *Principal                // the authenticated agent + its grants (ADR 0027)
+	mailOwner     func(inbox string) string // synced-mail owner key per inbox (ADR 0027); nil = key by the connecting agent
 	owner         string
 	selectedInbox string // the inbox name of the SELECTed mailbox (ADR 0023)
 	authed        bool
@@ -167,16 +174,42 @@ func (s *imapSession) mailboxNames() []string {
 	return names
 }
 
-// listAndFilter returns the owner's full message list and the filtered-visible
+// syncedOwner is the store owner key for an inbox's synced upstream mail
+// (ADR 0027): the inbox's mail-owner in multi-agent mode, or the connecting agent
+// when unset (single-agent / back-compat), where it coincides with s.owner.
+func (s *imapSession) syncedOwner(inbox string) string {
+	if s.mailOwner != nil {
+		return s.mailOwner(inbox)
+	}
+	return s.owner
+}
+
+// listAndFilter returns the inbox's full message list and the filtered-visible
 // subset (ADR 0021). The full list is kept so UIDNEXT can be derived from the
 // highest UID overall — deriving it from the visible subset would under-report
 // when the highest-UID messages are hidden, breaking client sync. allow is
 // visible; hide and undecided/rejected hold are omitted. Evaluated fresh each
 // call (no cache).
+//
+// The inbox's mail is the union of two owner key-spaces (ADR 0027): its synced
+// upstream mail (owned by the inbox's mail-owner, shared by every reader) and the
+// connecting agent's OWN bounces (owned by the agent, private to it). When the
+// two owners coincide (single-agent / back-compat) one List already holds both.
 func (s *imapSession) listAndFilter(inbox string) (full, visible []inbound.Message, err error) {
-	full, err = s.store.List(s.owner, inbox)
+	syncedOwner := s.syncedOwner(inbox)
+	full, err = s.store.List(syncedOwner, inbox)
 	if err != nil {
 		return nil, nil, err
+	}
+	if s.owner != syncedOwner {
+		bounces, berr := s.store.List(s.owner, inbox)
+		if berr != nil {
+			return nil, nil, berr
+		}
+		full = append(full, bounces...)
+		// Keep UIDs strictly ascending across the merged set (store ids are globally
+		// increasing), so the mailbox view stays well-ordered for the client.
+		sort.Slice(full, func(i, j int) bool { return uidOf(full[i]) < uidOf(full[j]) })
 	}
 	flt := s.filters[inbox] // per-inbox filter (ADR 0023); nil = allow-all
 	now := time.Now()
@@ -216,7 +249,7 @@ func (s *imapSession) listAndFilter(inbox string) (full, visible []inbound.Messa
 // it is logged and the message is hidden.
 func (s *imapSession) guardHides(m inbound.Message, inbox string) bool {
 	spoof, err := s.guard.Verdict(envelopeFromLocals(m), m.Raw, func() ([]byte, error) {
-		fm, e := s.fetch(s.owner, inbox, m.ID)
+		fm, e := s.fetch(m.Owner, inbox, m.ID)
 		return fm.Raw, e
 	})
 	if err != nil {
@@ -375,7 +408,7 @@ func (s *imapSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 			return
 		}
 		if markSeen && !m.Seen {
-			if err := s.store.SetSeen(s.owner, s.selectedInbox, m.ID, true); err != nil {
+			if err := s.store.SetSeen(m.Owner, s.selectedInbox, m.ID, true); err != nil {
 				ferr = err
 				return
 			}
@@ -408,7 +441,7 @@ func (s *imapSession) rawResolver(m inbound.Message) rawFunc {
 		if !done {
 			done = true
 			var full inbound.Message
-			if full, err = s.fetch(s.owner, s.selectedInbox, m.ID); err == nil {
+			if full, err = s.fetch(m.Owner, s.selectedInbox, m.ID); err == nil {
 				raw = full.Raw
 			}
 		}
@@ -427,7 +460,7 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 			return
 		}
 		if touchesSeen && m.Seen != seen {
-			if err := s.store.SetSeen(s.owner, s.selectedInbox, m.ID, seen); err != nil {
+			if err := s.store.SetSeen(m.Owner, s.selectedInbox, m.ID, seen); err != nil {
 				serr = err
 				return
 			}
@@ -438,7 +471,7 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 		if flags.Op == imap.StoreFlagsSet || len(kw) > 0 {
 			next, added, removed := applyKeywordOp(m.Keywords, flags.Op, kw)
 			if len(added) > 0 || len(removed) > 0 {
-				if _, err := s.store.SetKeywords(s.owner, s.selectedInbox, m.ID, next); err != nil {
+				if _, err := s.store.SetKeywords(m.Owner, s.selectedInbox, m.ID, next); err != nil {
 					serr = err
 					return
 				}
@@ -448,10 +481,10 @@ func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags
 				// Skip records with no upstream (locally-generated, e.g. bounces) —
 				// their labels are local-only, nothing to replicate.
 				if s.writeKeywords != nil && m.UpstreamUID != 0 {
-					if err := s.writeKeywords(s.owner, s.selectedInbox, m.ID, added, removed); err != nil {
+					if err := s.writeKeywords(m.Owner, s.selectedInbox, m.ID, added, removed); err != nil {
 						slog.Warn("imap keyword write-through deferred", "id", m.ID, "err", err)
 					} else {
-						_ = s.store.ClearKeywordsDirty(s.owner, s.selectedInbox, m.ID)
+						_ = s.store.ClearKeywordsDirty(m.Owner, s.selectedInbox, m.ID)
 					}
 				}
 			}
