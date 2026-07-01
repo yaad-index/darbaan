@@ -224,3 +224,25 @@ func TestUnknownStoreTypeErrors(t *testing.T) {
 	_, err = sluice.New("does-not-exist", "x.db", al)
 	require.Error(t, err)
 }
+
+type capturingAudit struct{ records []audit.Record }
+
+func (c *capturingAudit) Append(r audit.Record) error { c.records = append(c.records, r); return nil }
+func (c *capturingAudit) Verify() error               { return nil }
+func (c *capturingAudit) Close() error                { return nil }
+
+// ADR 0027: an enqueue audit row records the acting agent and the routed inbox.
+func TestEnqueueAuditRecordsAgentAndInbox(t *testing.T) {
+	cap := &capturingAudit{}
+	q, err := sluice.New("bbolt", filepath.Join(t.TempDir(), "s.db"), cap)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = q.Close() })
+
+	_, err = q.Enqueue(sluice.Submission{Agent: "agent-a", Inbox: "work", Raw: []byte("Subject: x\r\n\r\nb")})
+	require.NoError(t, err)
+
+	require.Len(t, cap.records, 1)
+	assert.Equal(t, "enqueue", cap.records[0].Event)
+	assert.Equal(t, "agent-a", cap.records[0].Agent)
+	assert.Equal(t, "work", cap.records[0].Inbox)
+}

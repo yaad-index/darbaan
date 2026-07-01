@@ -147,7 +147,7 @@ func (s *bboltStore) Enqueue(sub Submission) (Message, error) {
 	if err != nil {
 		return Message{}, fmt.Errorf("sluice: enqueue: %w", err)
 	}
-	s.writeAudit(audit.Record{Event: "enqueue", Agent: msg.Agent, MessageID: msg.ID})
+	s.writeAudit(audit.Record{Event: "enqueue", Agent: msg.Agent, Inbox: msg.Inbox, MessageID: msg.ID})
 	return msg, nil
 }
 
@@ -242,7 +242,7 @@ func (s *bboltStore) RecordSendAttempt(id string, sendErr error) (Message, error
 	if sendErr != nil {
 		detail = sendErr.Error()
 	}
-	s.writeAudit(audit.Record{Event: "send_attempt", Agent: out.Agent, MessageID: id, Detail: detail})
+	s.writeAudit(audit.Record{Event: "send_attempt", Agent: out.Agent, Inbox: out.Inbox, MessageID: id, Detail: detail})
 	return out, nil
 }
 
@@ -271,7 +271,7 @@ func (s *bboltStore) transitionFromPending(id, event, detail string, mutate func
 	if err != nil {
 		return Message{}, err
 	}
-	s.writeAudit(audit.Record{Event: event, Agent: out.Agent, MessageID: id, Detail: detail})
+	s.writeAudit(audit.Record{Event: event, Agent: out.Agent, Inbox: out.Inbox, MessageID: id, Detail: detail})
 	return out, nil
 }
 

@@ -71,3 +71,38 @@ agent-username: ""
 # Approval chains: ordered approver names. v1 ships the manual (human) approver.
 approval-strict: [manual]
 approval-light: [manual]
+
+# --- Multi-inbox + multi-agent (optional; ADR 0023 / ADR 0027) ---------------
+# The flat fields above define ONE inbox and ONE implicit agent. To front several
+# inboxes and/or several agent principals, add `inboxes:` and `agents:` lists.
+# Both are opt-in; omitting them keeps the single-agent behaviour above unchanged.
+#
+# Each inbox is a named mailbox with its own backend, send identity, and filter
+# (ADR 0023). Each agent is a login with a per-inbox grant list — {read, send}
+# per inbox — and its password comes from DARBAAN_AGENT_<NAME>_PASSWORD (name
+# uppercased, non-alphanumerics -> '_'), never inlined (ADR 0012). Sharing an
+# inbox = listing it under more than one agent; an inbox an agent is not granted
+# is invisible to it (privacy by omission). default_inbox is the inbox that agent
+# sees as IMAP INBOX and the target of its send catch-all; it must be a granted
+# inbox with read access. An agent name may not equal an inbox name.
+#
+# inboxes:
+#   - name: inbox-a
+#     identity: a@inbox-a.example      # the From/envelope Darbaan sends as
+#     backend: { imap_host: "imap.example:993", imap_username: "a@inbox-a.example" }
+#   - name: inbox-b
+#     identity: b@inbox-b.example
+#     backend: { imap_host: "imap.example:993", imap_username: "b@inbox-b.example" }
+#
+# agents:
+#   - name: agent-a
+#     # password from DARBAAN_AGENT_AGENT_A_PASSWORD
+#     default_inbox: inbox-a
+#     grants:
+#       - { inbox: inbox-a, access: [read, send] }
+#       - { inbox: inbox-b, access: [read] }       # read-only on the shared inbox
+#   - name: agent-b
+#     # password from DARBAAN_AGENT_AGENT_B_PASSWORD
+#     default_inbox: inbox-b
+#     grants:
+#       - { inbox: inbox-b, access: [read, send] }

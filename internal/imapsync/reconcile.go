@@ -221,6 +221,7 @@ func (s *Syncer) Reconcile(ctx context.Context, opts ReconcileOptions) (int, err
 			_ = opts.Audit.Append(audit.Record{
 				Event:     "retract",
 				Agent:     s.owner,
+				Inbox:     inbound.NormInbox(s.inbox),
 				MessageID: m.ID,
 				Detail:    fmt.Sprintf("inbox=%s upstream_uid=%d left source", inbound.NormInbox(s.inbox), m.UpstreamUID),
 			})
