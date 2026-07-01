@@ -30,6 +30,7 @@ import (
 	"github.com/alecthomas/kong"
 
 	"github.com/yaad-index/darbaan/internal/admin"
+	"github.com/yaad-index/darbaan/internal/agentcfg"
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
 	"github.com/yaad-index/darbaan/internal/bounceguard"
@@ -218,6 +219,47 @@ func (c *CLI) resolveInboxes() ([]inboxcfg.Inbox, error) {
 		return nil, err
 	}
 	return inboxes, nil
+}
+
+// resolvePrincipals resolves the configured agent principals (ADR 0027): the
+// `agents:` list, each a login with per-inbox grants and a password read from
+// DARBAAN_AGENT_<NAME>_PASSWORD (ADR 0012). With no `agents:` list it returns a
+// single implicit agent authenticated by DARBAAN_AGENT_PASS, granted every inbox
+// read+send — the back-compat single-agent path, unchanged. Grants are validated
+// here; their enforcement (read/send scoping) lands in a later increment.
+func (c *CLI) resolvePrincipals(inboxes []inboxcfg.Inbox) ([]listener.Principal, error) {
+	data, err := c.configBytes()
+	if err != nil {
+		return nil, err
+	}
+	agents, err := agentcfg.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(agents) == 0 {
+		pass := os.Getenv("DARBAAN_AGENT_PASS")
+		if c.AgentUsername == "" || pass == "" {
+			return nil, errors.New("set agent-username (config/flag/DARBAAN_AGENT_USERNAME) and DARBAAN_AGENT_PASS")
+		}
+		return []listener.Principal{{Name: c.AgentUsername, Password: pass}}, nil
+	}
+	inboxNames := make(map[string]bool, len(inboxes))
+	for _, in := range inboxes {
+		inboxNames[in.Name] = true
+	}
+	if err := agentcfg.Validate(agents, inboxNames); err != nil {
+		return nil, err
+	}
+	principals := make([]listener.Principal, 0, len(agents))
+	for _, a := range agents {
+		env := agentcfg.PasswordEnv(a.Name)
+		pass := os.Getenv(env)
+		if pass == "" {
+			return nil, fmt.Errorf("agent %q: set %s (the password is supplied out-of-band, never in config — ADR 0012)", a.Name, env)
+		}
+		principals = append(principals, listener.Principal{Name: a.Name, Password: pass})
+	}
+	return principals, nil
 }
 
 // openInbound opens the inbound (served mailbox) store per config.
@@ -663,17 +705,6 @@ func (*VersionCmd) Run() error {
 type ServeCmd struct{}
 
 func (*ServeCmd) Run(cli *CLI) error {
-	// The password is a secret supplied at startup, kept in memory only; full
-	// at-rest encryption (age) lands with the deployment/secrets component
-	// (ADR 0012). Config carries only the username reference, never the secret.
-	cred := listener.Credential{
-		Username: cli.AgentUsername,
-		Password: os.Getenv("DARBAAN_AGENT_PASS"),
-	}
-	if cred.Username == "" || cred.Password == "" {
-		return errors.New("set agent-username (config/flag/DARBAAN_AGENT_USERNAME) and DARBAAN_AGENT_PASS")
-	}
-
 	var tlsConfig *tls.Config
 	if cli.ListenerTLSCert != "" || cli.ListenerTLSKey != "" {
 		cert, err := tls.LoadX509KeyPair(cli.ListenerTLSCert, cli.ListenerTLSKey)
@@ -740,6 +771,18 @@ func (*ServeCmd) Run(cli *CLI) error {
 		filters[in.Name] = f
 	}
 
+	// Resolve the agent principals (ADR 0027): the `agents:` list, each a login
+	// with per-inbox grants and a password from DARBAAN_AGENT_<NAME>_PASSWORD; or,
+	// with no `agents:`, a single implicit agent (DARBAAN_AGENT_PASS) granted every
+	// inbox — the back-compat single-agent path. The secret is kept in memory only
+	// (ADR 0012). Grants are validated here; their enforcement lands in a later
+	// increment.
+	principals, err := cli.resolvePrincipals(inboxes)
+	if err != nil {
+		return err
+	}
+	auth := listener.NewAuth(principals)
+
 	// One upstream sender per inbox (ADR 0023): an approved message is delivered
 	// via the sender of the inbox it was submitted as. At N=1 this is the legacy
 	// sender under the default inbox.
@@ -771,7 +814,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 		Domain:        cli.ListenerDomain,
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
-	}, cred, q, route)
+	}, auth, q, route)
 	if err != nil {
 		return err
 	}
@@ -834,7 +877,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 		Addr:          cli.IMAPAddr,
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
-	}, cred, inbox, imapContentFetch(syncers, inbox), imapKeywordWriter(syncers), filters, guard, holdSpoof)
+	}, auth, inbox, imapContentFetch(syncers, inbox), imapKeywordWriter(syncers), filters, guard, holdSpoof)
 	if err != nil {
 		return err
 	}
