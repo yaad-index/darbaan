@@ -857,8 +857,10 @@ func (*ServeCmd) Run(cli *CLI) error {
 	// (outbound trap) and IMAP read (the agent reads its bounces). The submission
 	// face routes each From to an inbox (ADR 0023): matched Identity → that inbox,
 	// else the default catch-all, else refused at MAIL FROM.
-	route := func(from string) (string, bool) {
-		return inboxcfg.Route(inboxes, from, inbound.DefaultInbox)
+	// The catch-all target is chosen per-agent by the submission face (ADR 0027):
+	// the connecting agent's default_inbox, or the global default at N=1.
+	route := func(from, catchAll string) (string, bool) {
+		return inboxcfg.Route(inboxes, from, catchAll)
 	}
 	smtpSrv, err := listener.NewServer(listener.ServerConfig{
 		Addr:          cli.ListenerAddr,

@@ -65,6 +65,75 @@ func startServerRoute(t *testing.T, cfg listener.ServerConfig, q listener.Enqueu
 	return l.Addr().String()
 }
 
+func startServerAuth(t *testing.T, cfg listener.ServerConfig, q listener.Enqueuer, route listener.Router, auth *listener.Auth) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv, err := listener.NewServer(cfg, auth, q, route)
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return l.Addr().String()
+}
+
+// ADR 0027 send-scoping: an agent may originate mail only as an inbox it has send
+// on; a read-only inbox is rejected at MAIL FROM (fail-closed). An unmatched From
+// routes to the agent's own default_inbox (per-agent catch-all).
+func TestSubmitSendScoping(t *testing.T) {
+	q := newSluice(t)
+	route := func(from, catchAll string) (string, bool) {
+		switch from {
+		case "work@x.test":
+			return "work", true
+		case "personal@x.test":
+			return "personal", true
+		}
+		if catchAll != "" {
+			return catchAll, true // per-agent catch-all
+		}
+		return "", false
+	}
+	// agent-a reads work+personal but may send only as work; default_inbox = work.
+	auth := listener.NewAuth([]listener.Principal{{
+		Name: "agent-a", Password: "pw", DefaultInbox: "work",
+		Reads: map[string]bool{"work": true, "personal": true},
+		Sends: map[string]bool{"work": true},
+	}})
+	addr := startServerAuth(t, listener.ServerConfig{
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{selfSigned(t)}},
+	}, q, route, auth)
+
+	dial := func() *smtp.Client {
+		c, err := smtp.DialStartTLS(addr, &tls.Config{InsecureSkipVerify: true})
+		require.NoError(t, err)
+		require.NoError(t, c.Auth(sasl.NewPlainClient("", "agent-a", "pw")))
+		return c
+	}
+
+	// A sendable identity is accepted.
+	c := dial()
+	require.NoError(t, c.Mail("work@x.test", nil))
+	_ = c.Close()
+
+	// An identity the agent may read but not send is rejected at MAIL FROM.
+	c = dial()
+	require.Error(t, c.Mail("personal@x.test", nil), "read-only inbox cannot originate mail")
+	_ = c.Close()
+
+	// An unmatched From routes to the agent's default_inbox (work), which it may
+	// send as → accepted and stamped with that inbox.
+	c = dial()
+	const raw = "From: stranger@elsewhere.test\r\nTo: d@y.test\r\n\r\nbody\r\n"
+	require.NoError(t, c.SendMail("stranger@elsewhere.test", []string{"d@y.test"}, strings.NewReader(raw)))
+	_ = c.Quit()
+	metas, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, metas, 1)
+	full, err := q.Get(metas[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, "work", full.Inbox, "unmatched From routed to the agent's default inbox")
+}
+
 func selfSigned(t *testing.T) tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -121,7 +190,7 @@ func TestSubmitOverTLSEnqueuesOnePending(t *testing.T) {
 // at MAIL FROM.
 func TestSubmitRoutesFromToInbox(t *testing.T) {
 	q := newSluice(t)
-	route := func(from string) (string, bool) {
+	route := func(from, _ string) (string, bool) {
 		if from == "work@company.test" {
 			return "work", true
 		}
