@@ -11,6 +11,7 @@ import (
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 
+	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
@@ -21,10 +22,12 @@ type Enqueuer interface {
 }
 
 // Router resolves which inbox an authenticated submission's From routes to (ADR
-// 0023), reporting false when the From matches no inbox and there is no default —
-// the submission is then refused at MAIL FROM. nil routes every From to the
-// default inbox (single-inbox / back-compat).
-type Router func(from string) (inbox string, ok bool)
+// 0023): the inbox whose identity matches From, else the catchAll inbox if it
+// exists (the catch-all target — the connecting agent's default_inbox in
+// multi-agent mode, ADR 0027, or the global default at N=1), else false — the
+// submission is then refused at MAIL FROM. nil routes every From to the default
+// inbox (single-inbox / back-compat).
+type Router func(from, catchAll string) (inbox string, ok bool)
 
 // Backend is the go-smtp backend for the submission face.
 type Backend struct {
@@ -41,11 +44,11 @@ func NewBackend(auth *Auth, queue Enqueuer, route Router) *Backend {
 }
 
 // resolveInbox routes a From to its inbox (ADR 0023); ok=false means refuse.
-func (b *Backend) resolveInbox(from string) (string, bool) {
+func (b *Backend) resolveInbox(from, catchAll string) (string, bool) {
 	if b.route == nil {
 		return "", true // back-compat: any From → default inbox
 	}
-	return b.route(from)
+	return b.route(from, catchAll)
 }
 
 // NewSession starts a new SMTP session.
@@ -55,12 +58,13 @@ func (b *Backend) NewSession(_ *smtp.Conn) (smtp.Session, error) {
 
 // session implements smtp.Session and smtp.AuthSession for one connection.
 type session struct {
-	backend *Backend
-	authed  bool
-	agent   string // the authenticated agent's name, stamped on the submission
-	from    string
-	inbox   string // the inbox From routed to (ADR 0023)
-	rcpt    []string
+	backend   *Backend
+	authed    bool
+	principal *Principal // the authenticated agent + its grants (ADR 0027)
+	agent     string     // the authenticated agent's name, stamped on the submission
+	from      string
+	inbox     string // the inbox From routed to (ADR 0023)
+	rcpt      []string
 }
 
 func (s *session) AuthMechanisms() []string { return []string{sasl.Plain} }
@@ -74,6 +78,7 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 		if !ok {
 			return smtp.ErrAuthFailed
 		}
+		s.principal = p
 		s.agent = p.Name
 		s.authed = true
 		return nil
@@ -84,14 +89,31 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 	if !s.authed {
 		return smtp.ErrAuthRequired
 	}
-	// Route the From to an inbox (ADR 0023); refuse a From that matches no inbox
-	// and has no default catch-all, fail-fast at MAIL FROM.
-	inbox, ok := s.backend.resolveInbox(from)
+	// Route the From to an inbox (ADR 0023): its matching identity, else the
+	// catch-all — the connecting agent's default_inbox (per-agent, ADR 0027), or
+	// the global default at N=1 (empty DefaultInbox). Refuse a From that matches no
+	// inbox and has no catch-all, fail-fast at MAIL FROM.
+	catchAll := inbound.DefaultInbox
+	if s.principal != nil && s.principal.DefaultInbox != "" {
+		catchAll = s.principal.DefaultInbox
+	}
+	inbox, ok := s.backend.resolveInbox(from, catchAll)
 	if !ok {
 		return &smtp.SMTPError{
 			Code:         550,
 			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
 			Message:      "sender address is not configured for any inbox",
+		}
+	}
+	// Send-scoping (ADR 0027): the connecting agent must be granted send on the
+	// resolved inbox. A read-only grant cannot originate mail — reject at submit,
+	// fail-closed (ADR 0003), before the message is ever trapped. An unrestricted
+	// principal (single-agent / back-compat) may send as any inbox.
+	if !s.principal.CanSend(inbox) {
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+			Message:      "not authorized to send as this inbox",
 		}
 	}
 	s.from = from
