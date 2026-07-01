@@ -35,7 +35,8 @@ func TestDisplaySubject(t *testing.T) {
 }
 
 func TestDecisionKeyboard(t *testing.T) {
-	kb := decisionKeyboard("42")
+	// A single identity (N=1) omits Change: plain Approve + the two rejects.
+	kb := (&Client{identities: []admin.InboxIdentity{{Name: "default", Identity: "d@x"}}}).decisionKeyboard("42")
 	var labels, data []string
 	for _, row := range kb.InlineKeyboard {
 		for _, b := range row {
@@ -43,10 +44,19 @@ func TestDecisionKeyboard(t *testing.T) {
 			data = append(data, b.CallbackData)
 		}
 	}
-	// All three decision buttons, each carrying its action + the message id.
 	assert.Len(t, labels, 3)
 	assert.Equal(t, []string{"approve:42", "reject_perm:42", "reject_retry:42"}, data)
 	assert.Contains(t, strings.Join(labels, "|"), "Approve")
+
+	// Two identities → a Change sender button appears.
+	kb2 := (&Client{identities: []admin.InboxIdentity{{Name: "a", Identity: "a@x"}, {Name: "b", Identity: "b@x"}}}).decisionKeyboard("42")
+	var data2 []string
+	for _, row := range kb2.InlineKeyboard {
+		for _, b := range row {
+			data2 = append(data2, b.CallbackData)
+		}
+	}
+	assert.Contains(t, data2, "change:42")
 }
 
 func TestDecisionResult(t *testing.T) {

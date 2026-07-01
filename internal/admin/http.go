@@ -33,7 +33,11 @@ func NewServer(addr, token string, svc *Service) (*Server, error) {
 	mux.HandleFunc("GET /queue", s.auth(s.handleList))
 	mux.HandleFunc("GET /queue/{id}", s.auth(s.handleShow))
 	mux.HandleFunc("POST /queue/{id}/approve", s.auth(s.handleApprove))
+	mux.HandleFunc("POST /queue/{id}/approve-as/{inbox}", s.auth(s.handleApproveAs))
 	mux.HandleFunc("POST /queue/{id}/reject", s.auth(s.handleReject))
+
+	// Configured inbox identities for the Change-sender picker (ADR 0023 slice 5).
+	mux.HandleFunc("GET /inboxes", s.auth(s.handleInboxes))
 
 	// Inbound hold-for-human queue (ADR 0021): expose = show to the agent, drop =
 	// keep hidden.
@@ -100,6 +104,19 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	out, err := s.svc.ApproveID(r.Context(), r.PathValue("id"))
 	writeAction(w, out, err)
+}
+
+func (s *Server) handleApproveAs(w http.ResponseWriter, r *http.Request) {
+	out, err := s.svc.ApproveAs(r.Context(), r.PathValue("id"), r.PathValue("inbox"))
+	if errors.Is(err, ErrUnknownInbox) {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeAction(w, out, err)
+}
+
+func (s *Server) handleInboxes(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.svc.Inboxes())
 }
 
 func (s *Server) handleHeldList(w http.ResponseWriter, _ *http.Request) {

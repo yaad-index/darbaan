@@ -89,6 +89,30 @@ func (c *Client) Approve(ctx context.Context, id string) (Outcome, error) {
 	return c.action(ctx, "/queue/"+id+"/approve", nil)
 }
 
+// ApproveAs approves a held message and sends it from the given inbox's identity
+// (ADR 0023 slice 5).
+func (c *Client) ApproveAs(ctx context.Context, id, inbox string) (Outcome, error) {
+	return c.action(ctx, "/queue/"+id+"/approve-as/"+inbox, nil)
+}
+
+// Inboxes lists the configured inbox identities for the Change-sender picker
+// (ADR 0023 slice 5).
+func (c *Client) Inboxes(ctx context.Context) ([]InboxIdentity, error) {
+	resp, err := c.request(ctx, http.MethodGet, "/inboxes", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errorFrom(resp)
+	}
+	var out []InboxIdentity
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Reject rejects a held message with a reason.
 func (c *Client) Reject(ctx context.Context, id, reason string, retryable bool) (Outcome, error) {
 	body, _ := json.Marshal(map[string]any{"reason": reason, "retryable": retryable})
