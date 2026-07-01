@@ -11,9 +11,9 @@ import (
 func TestSingleAuth(t *testing.T) {
 	a := listener.SingleAuth("agent", "pw")
 
-	name, ok := a.Verify("agent", "pw")
+	p, ok := a.Verify("agent", "pw")
 	assert.True(t, ok)
-	assert.Equal(t, "agent", name)
+	assert.Equal(t, "agent", p.Name)
 
 	_, ok = a.Verify("agent", "wrong")
 	assert.False(t, ok, "wrong password")
@@ -30,13 +30,13 @@ func TestAuthPerAgent(t *testing.T) {
 		{Name: "agent-b", Password: "pw-b"},
 	})
 
-	name, ok := a.Verify("agent-a", "pw-a")
+	p, ok := a.Verify("agent-a", "pw-a")
 	assert.True(t, ok)
-	assert.Equal(t, "agent-a", name)
+	assert.Equal(t, "agent-a", p.Name)
 
-	name, ok = a.Verify("agent-b", "pw-b")
+	p, ok = a.Verify("agent-b", "pw-b")
 	assert.True(t, ok)
-	assert.Equal(t, "agent-b", name)
+	assert.Equal(t, "agent-b", p.Name)
 
 	_, ok = a.Verify("agent-a", "pw-b")
 	assert.False(t, ok, "agent-b's password must not authenticate agent-a")

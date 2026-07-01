@@ -64,6 +64,71 @@ func startIMAPMulti(t *testing.T, store inbound.InboundStore, filters map[string
 	return l.Addr().String()
 }
 
+func startIMAPAuth(t *testing.T, store inbound.InboundStore, filters map[string]*filter.Filter, auth *listener.Auth) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
+		auth, store, nil, nil, filters, nil, false)
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return l.Addr().String()
+}
+
+// ADR 0027 read-scoping: LIST returns only the inboxes the agent has read on, the
+// agent's default_inbox is exposed as INBOX, and SELECT/STATUS on an ungranted
+// inbox is indistinguishable from a non-existent mailbox (privacy by omission).
+func TestIMAPReadScoping(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	// One record in each of three inboxes, all owned by the connecting agent (no
+	// owner decoupling in this slice).
+	for _, in := range []string{inbound.DefaultInbox, "work", "personal"} {
+		_, err = store.Add(inbound.Delivery{Owner: "agent-a", Inbox: in, Subject: in, Raw: []byte("Subject: " + in + "\r\n\r\nx")})
+		require.NoError(t, err)
+	}
+
+	// agent-a reads work + personal (not the default inbox) and sees work as INBOX.
+	auth := listener.NewAuth([]listener.Principal{{
+		Name: "agent-a", Password: "pw", DefaultInbox: "work",
+		Reads: map[string]bool{"work": true, "personal": true},
+		Sends: map[string]bool{"work": true},
+	}})
+	filters := map[string]*filter.Filter{inbound.DefaultInbox: nil, "work": nil, "personal": nil}
+	c, err := imapclient.DialInsecure(startIMAPAuth(t, store, filters, auth), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent-a", "pw").Wait())
+
+	boxes, err := c.List("", "*", nil).Collect()
+	require.NoError(t, err)
+	names := map[string]bool{}
+	for _, b := range boxes {
+		names[b.Mailbox] = true
+	}
+	assert.Equal(t, map[string]bool{"INBOX": true, "personal": true}, names,
+		"LIST shows only granted inboxes; work (the default_inbox) is exposed as INBOX")
+
+	// INBOX resolves to the agent's default_inbox (work); the other granted inbox
+	// is reachable by name.
+	selInbox, err := c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1), selInbox.NumMessages)
+	_, err = c.Select("personal", nil).Wait()
+	require.NoError(t, err)
+
+	// The ungranted default inbox is indistinguishable from non-existent, and the
+	// default_inbox is only reachable as INBOX, never by its own name.
+	_, err = c.Select("default", nil).Wait()
+	require.Error(t, err, "ungranted inbox is no-such-mailbox")
+	_, err = c.Select("work", nil).Wait()
+	require.Error(t, err, "default_inbox is only reachable as INBOX")
+	_, err = c.Status("default", &imap.StatusOptions{NumMessages: true}).Wait()
+	require.Error(t, err, "STATUS on an ungranted inbox is no-such-mailbox")
+}
+
 // ADR 0023: each configured inbox is a named IMAP mailbox (the default inbox as
 // INBOX); SELECT serves that inbox's records, isolated from the others.
 func TestIMAPMultiInbox(t *testing.T) {

@@ -104,37 +104,64 @@ type imapSession struct {
 	filters       map[string]*filter.Filter // per-inbox serve-time filter (ADR 0021/0022/0023)
 	guard         *bounceguard.Guard        // inbound bounce-spoof guard, ahead of the filter (nil = off; ADR 0024)
 	holdSpoof     bool                      // on_spoof=hold-for-human → held-semantics; false = hide
+	principal     *Principal                // the authenticated agent + its grants (ADR 0027)
 	owner         string
 	selectedInbox string // the inbox name of the SELECTed mailbox (ADR 0023)
 	authed        bool
 	selected      []inbound.Message // metadata snapshot taken at Select (no content)
 }
 
-// mailboxName maps an inbox name to its IMAP mailbox name: the default inbox is
-// exposed as INBOX (back-compat), every other inbox by its own name (ADR 0023).
-func mailboxName(inbox string) string {
-	if inbox == inbound.DefaultInbox {
+// defaultInbox is the inbox this session sees as IMAP INBOX: the connecting
+// agent's configured default_inbox (ADR 0027), or the global default inbox for an
+// unrestricted single-agent session (back-compat).
+func (s *imapSession) defaultInbox() string {
+	if s.principal != nil && s.principal.DefaultInbox != "" {
+		return s.principal.DefaultInbox
+	}
+	return inbound.DefaultInbox
+}
+
+// canRead reports whether the connecting agent may read the inbox (ADR 0027). An
+// unrestricted principal (single-agent / back-compat) may read every inbox.
+func (s *imapSession) canRead(inbox string) bool {
+	return s.principal.CanRead(inbox)
+}
+
+// mailboxName maps an inbox name to its IMAP mailbox name for THIS session: the
+// connecting agent's default_inbox is exposed as INBOX, every other inbox by its
+// own name (per-principal naming, ADR 0027; the single global default at N=1).
+func (s *imapSession) mailboxName(inbox string) string {
+	if inbox == s.defaultInbox() {
 		return imapMailbox
 	}
 	return inbox
 }
 
-// resolveMailbox maps an IMAP mailbox name back to a configured inbox name,
-// reporting whether it exists.
+// resolveMailbox maps an IMAP mailbox name back to a configured inbox name the
+// connecting agent may read, reporting whether it exists. An inbox the agent
+// lacks read on is reported as non-existent — absence is indistinguishable from
+// non-existence (privacy by omission, ADR 0027).
 func (s *imapSession) resolveMailbox(mailbox string) (string, bool) {
 	for inbox := range s.filters {
-		if mailboxName(inbox) == mailbox {
+		if !s.canRead(inbox) {
+			continue
+		}
+		if s.mailboxName(inbox) == mailbox {
 			return inbox, true
 		}
 	}
 	return "", false
 }
 
-// mailboxNames returns the exposed IMAP mailbox names, sorted for stable LIST.
+// mailboxNames returns the IMAP mailbox names the connecting agent may read,
+// sorted for stable LIST (ADR 0027 read-scoping).
 func (s *imapSession) mailboxNames() []string {
 	names := make([]string, 0, len(s.filters))
 	for inbox := range s.filters {
-		names = append(names, mailboxName(inbox))
+		if !s.canRead(inbox) {
+			continue
+		}
+		names = append(names, s.mailboxName(inbox))
 	}
 	sort.Strings(names)
 	return names
@@ -232,11 +259,12 @@ func uidNext(full []inbound.Message) imap.UID {
 func (s *imapSession) Close() error { return nil }
 
 func (s *imapSession) Login(username, password string) error {
-	name, ok := s.auth.Verify(username, password)
+	p, ok := s.auth.Verify(username, password)
 	if !ok {
 		return imapserver.ErrAuthFailed
 	}
-	s.owner = name
+	s.principal = p
+	s.owner = p.Name
 	s.authed = true
 	return nil
 }

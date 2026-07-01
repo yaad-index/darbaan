@@ -70,11 +70,11 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 		return nil, smtp.ErrAuthUnsupported
 	}
 	return sasl.NewPlainServer(func(_, username, password string) error {
-		name, ok := s.backend.auth.Verify(username, password)
+		p, ok := s.backend.auth.Verify(username, password)
 		if !ok {
 			return smtp.ErrAuthFailed
 		}
-		s.agent = name
+		s.agent = p.Name
 		s.authed = true
 		return nil
 	}), nil
