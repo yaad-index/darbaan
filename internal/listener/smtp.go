@@ -1,7 +1,6 @@
 package listener
 
 import (
-	"crypto/subtle"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -14,14 +13,6 @@ import (
 
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
-
-// Credential is a single agent's Darbaan SMTP credential. The agent
-// authenticates to Darbaan with this and never holds upstream credentials
-// (ADR 0002). v1 is single-agent; the mechanism generalizes to many (ADR 0010).
-type Credential struct {
-	Username string
-	Password string
-}
 
 // Enqueuer is the sink an authenticated submission is trapped into. The sluice
 // implements it; the SMTP face never sends upstream (ADR 0003).
@@ -37,16 +28,16 @@ type Router func(from string) (inbox string, ok bool)
 
 // Backend is the go-smtp backend for the submission face.
 type Backend struct {
-	cred  Credential
+	auth  *Auth
 	queue Enqueuer
 	route Router
 }
 
-// NewBackend builds a Backend that authenticates against cred, routes each
+// NewBackend builds a Backend that authenticates against auth, routes each
 // submission's From to an inbox via route (nil = always the default inbox), and
 // traps every accepted submission into queue.
-func NewBackend(cred Credential, queue Enqueuer, route Router) *Backend {
-	return &Backend{cred: cred, queue: queue, route: route}
+func NewBackend(auth *Auth, queue Enqueuer, route Router) *Backend {
+	return &Backend{auth: auth, queue: queue, route: route}
 }
 
 // resolveInbox routes a From to its inbox (ADR 0023); ok=false means refuse.
@@ -66,6 +57,7 @@ func (b *Backend) NewSession(_ *smtp.Conn) (smtp.Session, error) {
 type session struct {
 	backend *Backend
 	authed  bool
+	agent   string // the authenticated agent's name, stamped on the submission
 	from    string
 	inbox   string // the inbox From routed to (ADR 0023)
 	rcpt    []string
@@ -78,10 +70,11 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 		return nil, smtp.ErrAuthUnsupported
 	}
 	return sasl.NewPlainServer(func(_, username, password string) error {
-		if !constEqual(username, s.backend.cred.Username) ||
-			!constEqual(password, s.backend.cred.Password) {
+		name, ok := s.backend.auth.Verify(username, password)
+		if !ok {
 			return smtp.ErrAuthFailed
 		}
+		s.agent = name
 		s.authed = true
 		return nil
 	}), nil
@@ -126,7 +119,7 @@ func (s *session) Data(r io.Reader) error {
 		return err
 	}
 	if _, err := s.backend.queue.Enqueue(sluice.Submission{
-		Agent: s.backend.cred.Username,
+		Agent: s.agent,
 		Inbox: s.inbox,
 		From:  s.from,
 		Rcpt:  s.rcpt,
@@ -144,10 +137,6 @@ func (s *session) Reset() {
 }
 
 func (s *session) Logout() error { return nil }
-
-func constEqual(a, b string) bool {
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
-}
 
 // ServerConfig configures the SMTP submission listener.
 type ServerConfig struct {
@@ -168,11 +157,11 @@ type Server struct {
 // start a plaintext listener that would carry credentials in the clear unless
 // AllowInsecure is explicitly set (local/testing). route maps each submission's
 // From to an inbox (ADR 0023; nil = always the default inbox).
-func NewServer(cfg ServerConfig, cred Credential, queue Enqueuer, route Router) (*Server, error) {
+func NewServer(cfg ServerConfig, auth *Auth, queue Enqueuer, route Router) (*Server, error) {
 	if cfg.TLSConfig == nil && !cfg.AllowInsecure {
 		return nil, errors.New("listener: TLS required (set TLSConfig, or AllowInsecure for local testing)")
 	}
-	srv := smtp.NewServer(NewBackend(cred, queue, route))
+	srv := smtp.NewServer(NewBackend(auth, queue, route))
 	srv.Addr = cfg.Addr
 	srv.Domain = cfg.Domain
 	srv.TLSConfig = cfg.TLSConfig

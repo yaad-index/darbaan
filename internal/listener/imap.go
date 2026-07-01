@@ -64,7 +64,7 @@ type IMAPServer struct {
 // The keys are the configured inboxes (ADR 0023); each is exposed as an IMAP
 // mailbox (the default inbox as INBOX). A single-inbox deploy passes one entry
 // keyed DefaultInbox.
-func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter, filters map[string]*filter.Filter, guard *bounceguard.Guard, holdSpoof bool) (*IMAPServer, error) {
+func NewIMAPServer(cfg IMAPServerConfig, auth *Auth, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter, filters map[string]*filter.Filter, guard *bounceguard.Guard, holdSpoof bool) (*IMAPServer, error) {
 	if cfg.TLSConfig == nil && !cfg.AllowInsecure {
 		return nil, errors.New("listener: IMAP TLS required (set TLSConfig, or AllowInsecure for local testing)")
 	}
@@ -76,7 +76,7 @@ func NewIMAPServer(cfg IMAPServerConfig, cred Credential, store inbound.InboundS
 	}
 	srv := imapserver.New(&imapserver.Options{
 		NewSession: func(_ *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return &imapSession{cred: cred, store: store, fetch: fetch, writeKeywords: writeKeywords, filters: filters, guard: guard, holdSpoof: holdSpoof}, nil, nil
+			return &imapSession{auth: auth, store: store, fetch: fetch, writeKeywords: writeKeywords, filters: filters, guard: guard, holdSpoof: holdSpoof}, nil, nil
 		},
 		TLSConfig:    cfg.TLSConfig,
 		InsecureAuth: cfg.AllowInsecure,
@@ -97,7 +97,7 @@ func (s *IMAPServer) Close() error { return s.imap.Close() }
 // authenticated agent (owner). Every store access is owner-keyed, so a session
 // can only ever see the agent's own messages.
 type imapSession struct {
-	cred          Credential
+	auth          *Auth
 	store         inbound.InboundStore
 	fetch         ContentFetch              // resolves message content on demand (per-FETCH)
 	writeKeywords KeywordWriter             // replicates a keyword change upstream (nil = local-only)
@@ -232,10 +232,11 @@ func uidNext(full []inbound.Message) imap.UID {
 func (s *imapSession) Close() error { return nil }
 
 func (s *imapSession) Login(username, password string) error {
-	if !constEqual(username, s.cred.Username) || !constEqual(password, s.cred.Password) {
+	name, ok := s.auth.Verify(username, password)
+	if !ok {
 		return imapserver.ErrAuthFailed
 	}
-	s.owner = username
+	s.owner = name
 	s.authed = true
 	return nil
 }

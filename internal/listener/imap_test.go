@@ -45,7 +45,7 @@ func startIMAPFull(t *testing.T, store inbound.InboundStore, fetch listener.Cont
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		listener.Credential{Username: "agent", Password: "pw"}, store, fetch, wk, map[string]*filter.Filter{inbound.DefaultInbox: flt}, nil, false)
+		listener.SingleAuth("agent", "pw"), store, fetch, wk, map[string]*filter.Filter{inbound.DefaultInbox: flt}, nil, false)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -57,7 +57,7 @@ func startIMAPMulti(t *testing.T, store inbound.InboundStore, filters map[string
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		listener.Credential{Username: "agent", Password: "pw"}, store, nil, nil, filters, nil, false)
+		listener.SingleAuth("agent", "pw"), store, nil, nil, filters, nil, false)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -565,6 +565,6 @@ func TestIMAPBadAuthRejected(t *testing.T) {
 
 func TestIMAPRequiresTLS(t *testing.T) {
 	_, err := listener.NewIMAPServer(listener.IMAPServerConfig{},
-		listener.Credential{Username: "agent", Password: "pw"}, seedInbound(t), nil, nil, nil, nil, false)
+		listener.SingleAuth("agent", "pw"), seedInbound(t), nil, nil, nil, nil, false)
 	require.Error(t, err)
 }

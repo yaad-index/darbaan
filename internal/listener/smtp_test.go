@@ -24,7 +24,12 @@ import (
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
-var testCred = listener.Credential{Username: "agent", Password: "s3cret"}
+const (
+	testUser = "agent"
+	testPass = "s3cret"
+)
+
+var testAuth = listener.SingleAuth(testUser, testPass)
 
 func newSluice(t *testing.T) sluice.MessageStore {
 	t.Helper()
@@ -42,7 +47,7 @@ func startServer(t *testing.T, cfg listener.ServerConfig, q listener.Enqueuer) s
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	srv, err := listener.NewServer(cfg, testCred, q, nil)
+	srv, err := listener.NewServer(cfg, testAuth, q, nil)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -53,7 +58,7 @@ func startServerRoute(t *testing.T, cfg listener.ServerConfig, q listener.Enqueu
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	srv, err := listener.NewServer(cfg, testCred, q, route)
+	srv, err := listener.NewServer(cfg, testAuth, q, route)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -92,7 +97,7 @@ func TestSubmitOverTLSEnqueuesOnePending(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = c.Close() }()
 
-	require.NoError(t, c.Auth(sasl.NewPlainClient("", testCred.Username, testCred.Password)))
+	require.NoError(t, c.Auth(sasl.NewPlainClient("", testUser, testPass)))
 
 	const raw = "From: agent@local\r\nTo: dest@example.test\r\nSubject: Trapped\r\n\r\nbody-marker-42\r\n"
 	require.NoError(t, c.SendMail("agent@local", []string{"dest@example.test"}, strings.NewReader(raw)))
@@ -102,7 +107,7 @@ func TestSubmitOverTLSEnqueuesOnePending(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, metas, 1)
 	assert.Equal(t, sluice.StatusPending, metas[0].Status)
-	assert.Equal(t, testCred.Username, metas[0].Agent)
+	assert.Equal(t, testUser, metas[0].Agent)
 
 	full, err := q.Get(metas[0].ID)
 	require.NoError(t, err)
@@ -129,7 +134,7 @@ func TestSubmitRoutesFromToInbox(t *testing.T) {
 	c, err := smtp.DialStartTLS(addr, &tls.Config{InsecureSkipVerify: true})
 	require.NoError(t, err)
 	defer func() { _ = c.Close() }()
-	require.NoError(t, c.Auth(sasl.NewPlainClient("", testCred.Username, testCred.Password)))
+	require.NoError(t, c.Auth(sasl.NewPlainClient("", testUser, testPass)))
 
 	// Matched From → the routed inbox is stamped on the queued message.
 	const raw = "From: work@company.test\r\nTo: d@x.test\r\nSubject: s\r\n\r\nbody\r\n"
@@ -172,14 +177,14 @@ func TestBadCredentialRejected(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = c.Close() }()
 
-	require.Error(t, c.Auth(sasl.NewPlainClient("", testCred.Username, "wrong")))
+	require.Error(t, c.Auth(sasl.NewPlainClient("", testUser, "wrong")))
 }
 
 func TestNewServerRequiresTLS(t *testing.T) {
 	q := newSluice(t)
-	_, err := listener.NewServer(listener.ServerConfig{}, testCred, q, nil)
+	_, err := listener.NewServer(listener.ServerConfig{}, testAuth, q, nil)
 	require.Error(t, err)
 
-	_, err = listener.NewServer(listener.ServerConfig{AllowInsecure: true}, testCred, q, nil)
+	_, err = listener.NewServer(listener.ServerConfig{AllowInsecure: true}, testAuth, q, nil)
 	require.NoError(t, err)
 }
