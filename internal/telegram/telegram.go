@@ -40,6 +40,11 @@ const (
 	// drop = keep hidden.
 	cbExpose = "expose:"
 	cbDrop   = "drop:"
+	// Change-sender (ADR 0023 slice 5, #139): change opens the identity picker,
+	// approve_as approves-and-sends from a chosen inbox, back returns to Approve.
+	cbChange     = "change:"
+	cbApproveAs  = "approve_as:"
+	cbChangeBack = "chg_back:"
 )
 
 // Client is the Telegram approval interface.
@@ -50,6 +55,11 @@ type Client struct {
 	pollInterval time.Duration
 
 	logger *slog.Logger // structured logger; defaults to slog.Default(), injectable via SetLogger
+
+	// identities are the configured inbox send identities (ADR 0023 slice 5),
+	// fetched from serve at startup; the Change-sender picker offers them. Read-only
+	// after Run's initial fetch, so no lock is needed.
+	identities []admin.InboxIdentity
 
 	mu          sync.Mutex
 	posted      map[string]bool     // sluice message ids already sent to the operator
@@ -116,6 +126,11 @@ func New(token string, operatorID int64, pollInterval time.Duration, adminClient
 	// Inbound hold-for-human decisions (ADR 0021).
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbExpose, bot.MatchTypePrefix, c.handleExpose)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbDrop, bot.MatchTypePrefix, c.handleDrop)
+	// Change-sender picker (ADR 0023 slice 5). Prefixes are non-overlapping:
+	// "approve_as:" is not prefixed by "approve:", "chg_back:" not by "change:".
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbApproveAs, bot.MatchTypePrefix, c.handleApproveAs)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbChangeBack, bot.MatchTypePrefix, c.handleChangeBack)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbChange, bot.MatchTypePrefix, c.handleChange)
 	// The reason force-reply arrives as a normal reply message, not a callback.
 	b.RegisterHandlerMatchFunc(isReply, c.handleReasonReply)
 	return c, nil
@@ -129,6 +144,14 @@ func (c *Client) Run(ctx context.Context) error {
 		return fmt.Errorf("telegram: connect: %w", err)
 	}
 	c.logger.Info("telegram client ready", "bot", me.Username, "operator", c.operatorID, "poll_interval", c.pollInterval.String())
+
+	// Fetch the configured inbox identities for the Change-sender picker (ADR 0023
+	// slice 5); best-effort — without them the gate simply omits Change.
+	if ids, ierr := c.admin.Inboxes(ctx); ierr != nil {
+		c.logger.Warn("telegram fetch inbox identities failed; change-sender disabled", "err", ierr)
+	} else {
+		c.identities = ids
+	}
 
 	go c.pollLoop(ctx)
 	c.bot.Start(ctx) // long-poll loop; returns when ctx is cancelled
@@ -209,7 +232,7 @@ func (c *Client) notify(ctx context.Context, m sluice.Meta) error {
 	sent, err := c.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      c.operatorID,
 		Text:        text,
-		ReplyMarkup: decisionKeyboard(m.ID),
+		ReplyMarkup: c.decisionKeyboard(m.ID),
 	})
 	if err != nil {
 		return err
@@ -413,18 +436,36 @@ func attachmentsLine(atts []attachment) string {
 	return "attachments: " + strings.Join(parts, ", ")
 }
 
-// decisionKeyboard lays in all three decision buttons; the callback data carries
-// the action + message id (handled by handleApprove / handleReject*).
-func decisionKeyboard(id string) models.InlineKeyboardMarkup {
-	return models.InlineKeyboardMarkup{
-		InlineKeyboard: [][]models.InlineKeyboardButton{
-			{{Text: "Approve", CallbackData: cbApprove + id}},
-			{
-				{Text: "Reject (permanent)", CallbackData: cbRejectPerm + id},
-				{Text: "Reject (retryable)", CallbackData: cbRejectRetry + id},
-			},
-		},
+// decisionKeyboard lays in the decision buttons; the callback data carries the
+// action + message id (handled by handleApprove / handleReject*). Change-sender
+// is offered only when there is more than one identity to pick from (N=1 → plain
+// Approve, ADR 0023 slice 5).
+func (c *Client) decisionKeyboard(id string) models.InlineKeyboardMarkup {
+	rows := [][]models.InlineKeyboardButton{
+		{{Text: "Approve", CallbackData: cbApprove + id}},
 	}
+	if len(c.identities) >= 2 {
+		rows = append(rows, []models.InlineKeyboardButton{{Text: "Change sender", CallbackData: cbChange + id}})
+	}
+	rows = append(rows, []models.InlineKeyboardButton{
+		{Text: "Reject (permanent)", CallbackData: cbRejectPerm + id},
+		{Text: "Reject (retryable)", CallbackData: cbRejectRetry + id},
+	})
+	return models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// identityKeyboard is the Change-sender picker: one button per configured inbox
+// identity (approve-and-send as that identity), plus a Back to the decision
+// buttons (ADR 0023 slice 5).
+func (c *Client) identityKeyboard(id string) models.InlineKeyboardMarkup {
+	rows := make([][]models.InlineKeyboardButton, 0, len(c.identities)+1)
+	for _, in := range c.identities {
+		rows = append(rows, []models.InlineKeyboardButton{
+			{Text: in.Identity, CallbackData: cbApproveAs + in.Name + ":" + id},
+		})
+	}
+	rows = append(rows, []models.InlineKeyboardButton{{Text: "« Back", CallbackData: cbChangeBack + id}})
+	return models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 // handleApprove is the [Approve] button callback: verify the operator, approve
@@ -441,6 +482,75 @@ func (c *Client) handleApprove(ctx context.Context, b *bot.Bot, update *models.U
 	}
 	out, err := c.admin.Approve(ctx, id)
 	c.finishDecision(ctx, b, cq, "Approved", id, out, err)
+}
+
+// handleChange swaps the decision keyboard for the identity picker so the
+// operator can approve-and-send from a chosen inbox (ADR 0023 slice 5).
+func (c *Client) handleChange(ctx context.Context, b *bot.Bot, update *models.Update) {
+	cq := update.CallbackQuery
+	if !c.isOperator(cq) {
+		c.denyCallback(ctx, b, cq)
+		return
+	}
+	id := strings.TrimPrefix(cq.Data, cbChange)
+	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cq.ID})
+	if msg := cq.Message.Message; msg != nil {
+		_, _ = b.EditMessageReplyMarkup(ctx, &bot.EditMessageReplyMarkupParams{
+			ChatID:      msg.Chat.ID,
+			MessageID:   msg.ID,
+			ReplyMarkup: c.identityKeyboard(id),
+		})
+	}
+}
+
+// handleChangeBack restores the decision keyboard from the identity picker.
+func (c *Client) handleChangeBack(ctx context.Context, b *bot.Bot, update *models.Update) {
+	cq := update.CallbackQuery
+	if !c.isOperator(cq) {
+		c.denyCallback(ctx, b, cq)
+		return
+	}
+	id := strings.TrimPrefix(cq.Data, cbChangeBack)
+	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cq.ID})
+	if msg := cq.Message.Message; msg != nil {
+		_, _ = b.EditMessageReplyMarkup(ctx, &bot.EditMessageReplyMarkupParams{
+			ChatID:      msg.Chat.ID,
+			MessageID:   msg.ID,
+			ReplyMarkup: c.decisionKeyboard(id),
+		})
+	}
+}
+
+// handleApproveAs is an identity-picker button: approve-and-send the message from
+// the chosen inbox's identity (ADR 0023 slice 5).
+func (c *Client) handleApproveAs(ctx context.Context, b *bot.Bot, update *models.Update) {
+	cq := update.CallbackQuery
+	if !c.isOperator(cq) {
+		c.denyCallback(ctx, b, cq)
+		return
+	}
+	inbox, id, ok := parseApproveAs(cq.Data)
+	if !ok {
+		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cq.ID})
+		return
+	}
+	if !c.guardPending(ctx, b, cq, id) {
+		return
+	}
+	out, err := c.admin.ApproveAs(ctx, id, inbox)
+	c.finishDecision(ctx, b, cq, "Approved", id, out, err)
+}
+
+// parseApproveAs splits an approve_as callback ("approve_as:<inbox>:<id>") into
+// its inbox and (numeric) id. The id is the final ":"-separated field, so an
+// inbox name containing ":" is still handled.
+func parseApproveAs(data string) (inbox, id string, ok bool) {
+	rest := strings.TrimPrefix(data, cbApproveAs)
+	i := strings.LastIndex(rest, ":")
+	if i < 0 {
+		return "", "", false
+	}
+	return rest[:i], rest[i+1:], true
 }
 
 // guardPending pre-checks a tapped message's status so a stale duplicate tap is

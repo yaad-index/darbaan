@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -31,16 +32,17 @@ type Signer interface {
 
 // Service runs the approval orchestration against the stores serve owns.
 type Service struct {
-	store     sluice.MessageStore
-	inbox     inbound.InboundStore
-	senders   map[string]backend.Sender // per-inbox upstream sender (ADR 0023), keyed by inbox name
-	signer    Signer
-	router    *policy.Router
-	domain    string
-	filters   map[string]*filter.Filter // per-inbox filter for the hold-for-human queue (ADR 0021/0023)
-	owner     string                    // the agent whose inbound mailbox the holds belong to
-	guard     *bounceguard.Guard        // inbound bounce-spoof guard (ADR 0024; nil = off)
-	holdSpoof bool                      // on_spoof=hold-for-human → spoofs join the held queue
+	store      sluice.MessageStore
+	inbox      inbound.InboundStore
+	senders    map[string]backend.Sender // per-inbox upstream sender (ADR 0023), keyed by inbox name
+	identities map[string]string         // per-inbox send identity (ADR 0023 slice 5), keyed by inbox name; for ApproveAs
+	signer     Signer
+	router     *policy.Router
+	domain     string
+	filters    map[string]*filter.Filter // per-inbox filter for the hold-for-human queue (ADR 0021/0023)
+	owner      string                    // the agent whose inbound mailbox the holds belong to
+	guard      *bounceguard.Guard        // inbound bounce-spoof guard (ADR 0024; nil = off)
+	holdSpoof  bool                      // on_spoof=hold-for-human → spoofs join the held queue
 
 	// Reconcile controls (ADR 0026), wired by serve over its per-inbox syncers;
 	// nil when no inbox has an upstream (nothing to reconcile).
@@ -289,8 +291,28 @@ func (s *Service) decide(ctx context.Context, id string, human approver.Verdict)
 	}
 }
 
-// ApproveID approves a held message: commit, then send (downstream of commit).
+// ApproveID approves a held message and sends it as submitted, via its stamped
+// inbox's sender (ADR 0023). ApproveAs sends it from a chosen inbox's identity.
 func (s *Service) ApproveID(ctx context.Context, id string) (Outcome, error) {
+	return s.approve(ctx, id, "")
+}
+
+// ApproveAs approves a held message and sends it from asInbox's identity (ADR
+// 0023 slice 5, #139): the envelope MAIL FROM and the From header are rewritten
+// to that inbox's identity and the send is routed through that inbox's Sender.
+// asInbox must be a configured inbox that has an identity. The persisted record
+// keeps the message as submitted (send-time rewrite only); the chosen identity is
+// recorded in a structured log event.
+func (s *Service) ApproveAs(ctx context.Context, id, asInbox string) (Outcome, error) {
+	return s.approve(ctx, id, asInbox)
+}
+
+// approve commits the approve verdict, then sends downstream of the commit. When
+// asInbox is empty the message is sent as-stamped via its own inbox's sender;
+// otherwise its From (envelope + header) is rewritten to asInbox's identity and
+// it is sent via asInbox's sender — the send-time rewrite never mutates the
+// stored record.
+func (s *Service) approve(ctx context.Context, id, asInbox string) (Outcome, error) {
 	m, err := s.decide(ctx, id, approver.Verdict{Disposition: approver.Approve})
 	if err != nil {
 		return Outcome{}, err
@@ -300,16 +322,37 @@ func (s *Service) ApproveID(ctx context.Context, id string) (Outcome, error) {
 	}
 	out := Outcome{ID: m.ID, Status: string(sluice.StatusApproved), Detail: fmt.Sprintf("approved by %s", m.DecidedBy)}
 
-	sendErr := s.senderFor(m.Inbox).Send(ctx, m) // deliver via the message's inbox's sender (ADR 0023)
+	sendInbox, sendMsg := m.Inbox, m
+	var identity string
+	if asInbox != "" {
+		identity = s.identities[inbound.NormInbox(asInbox)]
+		if identity == "" {
+			return Outcome{}, fmt.Errorf("%w: %q", ErrUnknownInbox, asInbox)
+		}
+		rewritten, rwErr := rewriteFrom(sendBody(m), identity)
+		if rwErr != nil {
+			return Outcome{}, fmt.Errorf("admin: rewrite From to %q: %w", identity, rwErr)
+		}
+		sendInbox = asInbox
+		sendMsg.From = identity      // envelope MAIL FROM
+		sendMsg.Released = rewritten // the sender prefers Released over Raw (send-time only)
+		slog.Info("approved-as", "message_id", m.ID, "inbox", inbound.NormInbox(asInbox), "identity", identity)
+	}
+
+	sendErr := s.senderFor(sendInbox).Send(ctx, sendMsg)
 	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr)
 	if rerr != nil {
 		return Outcome{}, rerr
 	}
 	out.Status = string(final.Status)
 
+	sentDetail := "approved and sent upstream"
+	if identity != "" {
+		sentDetail = "approved and sent upstream as " + identity
+	}
 	switch {
 	case sendErr == nil:
-		out.Detail = "approved and sent upstream"
+		out.Detail = sentDetail
 	case isSendPending(sendErr):
 		out.Detail = "approved; no real Sender configured — nothing left Darbaan"
 	case backend.IsPermanent(sendErr):

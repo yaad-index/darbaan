@@ -749,6 +749,16 @@ func (*ServeCmd) Run(cli *CLI) error {
 	}
 	svc.SetSenders(senders)
 
+	// The configured inbox send identities feed the Change-sender picker + the
+	// ApproveAs From-rewrite (ADR 0023 slice 5). Only inboxes with an identity.
+	identities := make(map[string]string, len(inboxes))
+	for _, in := range inboxes {
+		if in.Identity != "" {
+			identities[in.Name] = in.Identity
+		}
+	}
+	svc.SetInboxIdentities(identities)
+
 	// One local service hosts both agent faces (ADR 0001): SMTP submission
 	// (outbound trap) and IMAP read (the agent reads its bounces). The submission
 	// face routes each From to an inbox (ADR 0023): matched Identity → that inbox,
