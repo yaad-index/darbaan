@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.0](https://github.com/yaad-index/darbaan/compare/v0.7.0...v0.8.0) (2026-07-01)
+
+
+### Features
+
+* **agents:** audit inbox + docs + finalize ADR 0027 (slice 4) ([#167](https://github.com/yaad-index/darbaan/issues/167)) ([458f305](https://github.com/yaad-index/darbaan/commit/458f30575b8fd2d4febad0c410d95abc72341572))
+* **agents:** IMAP read-scoping + per-agent INBOX (ADR 0027 slice 2a) ([#164](https://github.com/yaad-index/darbaan/issues/164)) ([803afc1](https://github.com/yaad-index/darbaan/commit/803afc195926d9707db9d3b1d193024f0d43f114))
+* **agents:** multi-agent config schema + per-agent auth (ADR 0027 slice 1) ([#162](https://github.com/yaad-index/darbaan/issues/162)) ([3138352](https://github.com/yaad-index/darbaan/commit/3138352fbf4e610fa6fa4b974b878ad0fae0f16b))
+* **agents:** principal/mail-owner decoupling + bounce two-key-space (ADR 0027 slice 2b) ([#165](https://github.com/yaad-index/darbaan/issues/165)) ([1b187b4](https://github.com/yaad-index/darbaan/commit/1b187b49152a2d88c9477020251b14f9e9377520))
+* **agents:** SMTP send-scoping + per-agent send catch-all (ADR 0027 slice 3) ([#166](https://github.com/yaad-index/darbaan/issues/166)) ([ce7ae4f](https://github.com/yaad-index/darbaan/commit/ce7ae4fbc1b666cec51732c284753ea8b41e2a6a))
+
 ## [0.7.0](https://github.com/yaad-index/darbaan/compare/v0.6.0...v0.7.0) (2026-07-01)
 
 
