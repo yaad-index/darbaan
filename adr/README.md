@@ -5,7 +5,9 @@ its context, the decision, and the consequences. ADRs are immutable once
 Accepted — to change one, add a new ADR that supersedes it.
 
 These records (0001–0016) capture the v1 design, locked 2026-06-25 and amended
-through 2026-06-26 (maintainer review).
+through 2026-06-26 (maintainer review). Later records (0017–0027) extend it —
+labeling, the inbound filter, multi-inbox, reconciliation, and multi-agent
+tenancy.
 
 | ADR | Title |
 |---|---|
@@ -29,3 +31,11 @@ through 2026-06-26 (maintainer review).
 | [0017](0017-interfaces-as-clients-over-local-api.md) | Admin and approval interfaces are separate host processes over the local API |
 | [0018](0018-tiered-storage-metadata-kv-content-filesystem.md) | Tiered storage: metadata in the KV store, message content on the filesystem |
 | [0019](0019-inbound-sync-store-canonical-lazy-no-filter.md) | Inbound mailbox sync: store-canonical incremental pull, lazy content, no filter (v1) |
+| [0020](0020-agent-labeling-gmail-x-gm-labels.md) | Agent labeling via IMAP keywords (with Gmail X-GM-LABELS mapping) |
+| [0021](0021-inbound-filter-rule-schema-serve-time.md) | Inbound filter: rule schema, operators, and serve-time evaluation |
+| [0022](0022-per-inbox-default-visibility.md) | Per-inbox default visibility: match-only rules over a default disposition |
+| [0023](0023-multi-inbox.md) | Multi-inbox: N inboxes in one Darbaan, each with its own backend, filters, visibility, and identity |
+| [0024](0024-inbound-bounce-spoof-guard.md) | Inbound bounce-spoof guard: hide unsigned DSN-shaped mail by default |
+| [0025](0025-approval-gate-long-body-fidelity.md) | Approval gate: full-body fidelity for long messages (.txt attachment) |
+| [0026](0026-upstream-reconciliation-retract-local-copy.md) | Upstream reconciliation: retract the local copy when a message leaves the source |
+| [0027](0027-multi-agent-tenancy.md) | Multi-agent tenancy: per-agent logins, grants, and per-principal mailbox naming |

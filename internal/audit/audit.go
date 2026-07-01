@@ -16,10 +16,13 @@ import (
 	"sort"
 )
 
-// Record is the caller-supplied content of an audit entry.
+// Record is the caller-supplied content of an audit entry. Agent + Inbox are the
+// acting principal and the inbox it acted as (ADR 0027): every row answers "which
+// agent did what, as which inbox".
 type Record struct {
 	Event     string `json:"event"`
 	Agent     string `json:"agent"`
+	Inbox     string `json:"inbox,omitempty"` // the inbox the action was scoped to (ADR 0023/0027)
 	MessageID string `json:"message_id"`
 	Detail    string `json:"detail,omitempty"` // e.g. reject reason, send-attempt result
 }

@@ -57,6 +57,23 @@ func TestBboltTamperDetected(t *testing.T) {
 	require.Error(t, l.Verify())
 }
 
+// ADR 0027: an audit entry records both the acting agent and the inbox it acted
+// as; both persist through the hash-chained entry.
+func TestBboltRecordsAgentAndInbox(t *testing.T) {
+	l := newBboltLog(t)
+	require.NoError(t, l.Append(Record{Event: "enqueue", Agent: "agent-a", Inbox: "work", MessageID: "1"}))
+	require.NoError(t, l.Verify())
+
+	var got Entry
+	bl := l.(*bboltLog)
+	require.NoError(t, bl.db.View(func(tx *bbolt.Tx) error {
+		_, v := tx.Bucket(bucketName).Cursor().First()
+		return json.Unmarshal(v, &got)
+	}))
+	require.Equal(t, "agent-a", got.Record.Agent)
+	require.Equal(t, "work", got.Record.Inbox)
+}
+
 func TestUnknownTypeErrors(t *testing.T) {
 	_, err := New("does-not-exist", "")
 	require.Error(t, err)

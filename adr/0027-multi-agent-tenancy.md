@@ -1,6 +1,6 @@
 # ADR 0027: Multi-agent tenancy — per-agent logins, grants, and per-principal mailbox naming
 
-**Status:** Proposed (2026-07-01)
+**Status:** Accepted (2026-07-01)
 
 ## Context
 
@@ -223,12 +223,14 @@ Fresh deployments and the single-agent path never hit this.
 
 ### Audit
 
-ADR 0023 pre-provisioned the audit schema with an inbox id; ADR 0011's log gains
-the **acting agent id** alongside it, so every held/approved/sent/rejected row
-records *which principal* acted, not just which inbox. The **implicit agent's id
-is the configured agent username** (the value SMTP already stamps as the
-submission `Agent` today), so audit rows are consistent across the upgrade rather
-than switching to a synthetic sentinel.
+ADR 0011's audit `Record` already carries the acting **agent id**, written on
+enqueue / send-attempt / verdict — and once authentication resolves the login to
+an agent (above), that id is the authenticated principal, so "which agent acted"
+is already recorded. This ADR adds the **inbox id** alongside it, so every row
+records *which agent acted, as which inbox* — the full tuple for a multi-agent
+deployment. The implicit agent's id is the configured agent username (the value
+SMTP already stamps as the submission `Agent`), so rows stay consistent across the
+upgrade rather than switching to a synthetic sentinel.
 
 ## Boundaries / non-goals
 
