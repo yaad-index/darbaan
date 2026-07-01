@@ -40,7 +40,7 @@ type Service struct {
 	router     *policy.Router
 	domain     string
 	filters    map[string]*filter.Filter // per-inbox filter for the hold-for-human queue (ADR 0021/0023)
-	owner      string                    // the agent whose inbound mailbox the holds belong to
+	mailOwner  func(inbox string) string // synced-mail owner key per inbox (ADR 0027); nil until wired
 	guard      *bounceguard.Guard        // inbound bounce-spoof guard (ADR 0024; nil = off)
 	holdSpoof  bool                      // on_spoof=hold-for-human → spoofs join the held queue
 
@@ -129,12 +129,21 @@ func (s *Service) senderFor(inbox string) backend.Sender {
 }
 
 // SetInboundHolds wires the inbound hold-for-human queue (ADR 0021/0023): the
-// per-inbox filters that decide which synced messages are held, the agent (owner)
-// they belong to, and the bounce-spoof guard (ADR 0024). When the guard is set
-// with holdSpoof, spoof candidates also join the held queue. Without filters,
-// HeldList is empty.
-func (s *Service) SetInboundHolds(filters map[string]*filter.Filter, owner string, guard *bounceguard.Guard, holdSpoof bool) {
-	s.filters, s.owner, s.guard, s.holdSpoof = filters, owner, guard, holdSpoof
+// per-inbox filters that decide which synced messages are held, the per-inbox
+// mail-owner key their records live under (ADR 0027), and the bounce-spoof guard
+// (ADR 0024). When the guard is set with holdSpoof, spoof candidates also join the
+// held queue. Without filters, HeldList is empty.
+func (s *Service) SetInboundHolds(filters map[string]*filter.Filter, mailOwner func(inbox string) string, guard *bounceguard.Guard, holdSpoof bool) {
+	s.filters, s.mailOwner, s.guard, s.holdSpoof = filters, mailOwner, guard, holdSpoof
+}
+
+// inboxOwner is the store owner key for an inbox's held (synced) mail (ADR 0027):
+// the inbox mail-owner in multi-agent mode, else the single implicit agent.
+func (s *Service) inboxOwner(inbox string) string {
+	if s.mailOwner != nil {
+		return s.mailOwner(inbox)
+	}
+	return ""
 }
 
 // HeldList returns the inbound messages held for a human decision with no
@@ -148,7 +157,7 @@ func (s *Service) HeldList() ([]inbound.Message, error) {
 	now := time.Now()
 	var held []inbound.Message
 	for _, inbox := range s.inboxNames() {
-		msgs, err := s.inbox.List(s.owner, inbox)
+		msgs, err := s.inbox.List(s.inboxOwner(inbox), inbox)
 		if err != nil {
 			return nil, err
 		}
@@ -189,7 +198,7 @@ func (s *Service) guardHoldsSpoof(m inbound.Message, inbox string) bool {
 	// the two stay consistent. The error rides along with spoof=true; the read
 	// face logs it.
 	spoof, _ := s.guard.Verdict(envelopeFromLocals(m), m.Raw, func() ([]byte, error) {
-		fm, e := s.inbox.Get(s.owner, inbox, m.ID)
+		fm, e := s.inbox.Get(s.inboxOwner(inbox), inbox, m.ID)
 		return fm.Raw, e
 	})
 	return spoof
@@ -224,7 +233,7 @@ func (s *Service) DropHeld(id string) (inbound.Message, error) {
 // ErrNotFound. Returns ErrNotFound if no inbox holds it.
 func (s *Service) setHold(id, decision string) (inbound.Message, error) {
 	for _, inbox := range s.inboxNames() {
-		m, err := s.inbox.SetHoldDecision(s.owner, inbox, id, decision)
+		m, err := s.inbox.SetHoldDecision(s.inboxOwner(inbox), inbox, id, decision)
 		if err == nil {
 			return m, nil
 		}
@@ -408,7 +417,7 @@ func (s *Service) deliverBounce(m sluice.Message, reason string, retryable bool)
 		return fmt.Errorf("sign: %w", err)
 	}
 	if _, err := s.inbox.Add(inbound.Delivery{
-		Owner: b.Owner, From: b.From, To: b.To, Subject: b.Subject, Raw: signed,
+		Owner: b.Owner, Inbox: b.Inbox, From: b.From, To: b.To, Subject: b.Subject, Raw: signed,
 	}); err != nil {
 		return fmt.Errorf("store: %w", err)
 	}

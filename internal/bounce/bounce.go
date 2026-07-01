@@ -19,7 +19,8 @@ import (
 
 // Bounce is a generated DSN bounce, ready to deliver into the agent's mailbox.
 type Bounce struct {
-	Owner   string // the agent whose send was rejected (mailbox owner)
+	Owner   string // the agent whose send was rejected (ADR 0027: keys the bounce private to its originator)
+	Inbox   string // the inbox the failed submission was for, so the bounce surfaces in that inbox's view (ADR 0027)
 	From    string // MAILER-DAEMON@<domain>
 	To      string // the original submitter
 	Subject string
@@ -80,7 +81,7 @@ func Generate(orig sluice.Message, reason string, retryable bool, domain string)
 		return Bounce{}, fmt.Errorf("bounce: close: %w", err)
 	}
 
-	return Bounce{Owner: orig.Agent, From: from, To: to, Subject: subject, Raw: buf.Bytes()}, nil
+	return Bounce{Owner: orig.Agent, Inbox: orig.Inbox, From: from, To: to, Subject: subject, Raw: buf.Bytes()}, nil
 }
 
 func writeText(mw *message.Writer, domain, reason, disposition, status string, retryable bool) error {

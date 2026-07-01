@@ -190,3 +190,11 @@ func TestDefaultInboxErrors(t *testing.T) {
 		})
 	}
 }
+
+// ADR 0027: an agent named the same as an inbox collides in the store owner
+// namespace once mail is keyed by inbox name, so it is rejected.
+func TestValidateAgentInboxNameCollision(t *testing.T) {
+	agents := []agentcfg.Agent{{Name: "work", DefaultInbox: "work", Grants: []agentcfg.Grant{{Inbox: "work", Access: []string{"read"}}}}}
+	err := agentcfg.Validate(agents, inboxSet("work"))
+	require.ErrorContains(t, err, "collides with an inbox name")
+}

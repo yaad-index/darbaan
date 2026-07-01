@@ -177,6 +177,14 @@ type InboundStore interface {
 	// have no upstream and are never reconciled. Returns ErrNotFound if the
 	// (owner, inbox) has no such message.
 	RemoveSynced(owner, inbox, id string) error
+	// RekeyOwnersToInbox rewrites every synced record's owner key to its inbox name
+	// (ADR 0027 mail-owner decoupling), so several agents sharing an inbox key into
+	// the same records. Locally-generated records (UpstreamUID == 0, e.g. bounces)
+	// keep their originating-agent owner and are never rekeyed — a bounce stays
+	// private to its originator. It is idempotent (a record already inbox-owned is
+	// skipped) and returns the number of records rewritten. Multi-agent deployments
+	// run it once at startup; the single-agent path never calls it.
+	RekeyOwnersToInbox() (int, error)
 	// Close releases the underlying resources.
 	Close() error
 }

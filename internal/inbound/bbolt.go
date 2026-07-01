@@ -366,6 +366,65 @@ func (s *bboltStore) RemoveSynced(owner, inbox, id string) error {
 	return nil
 }
 
+// RekeyOwnersToInbox rewrites every synced record's owner key to its inbox name
+// (ADR 0027). Bounces and other locally-generated records (UpstreamUID == 0) are
+// left keyed to their originating agent — private to it. The synced dedup index
+// moves with each record so a later re-sync still dedups. Idempotent: a record
+// already inbox-owned is skipped.
+func (s *bboltStore) RekeyOwnersToInbox() (int, error) {
+	type item struct {
+		key []byte
+		rec stored
+	}
+	n := 0
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		inb := tx.Bucket(bucketInbound)
+		idx := tx.Bucket(bucketSynced)
+		// Collect first (copying keys); mutating a bucket during its own ForEach is
+		// unsafe.
+		var work []item
+		if err := inb.ForEach(func(k, v []byte) error {
+			var rec stored
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return err
+			}
+			if rec.UpstreamUID == 0 {
+				return nil // locally-generated (e.g. bounce): keep the originating owner
+			}
+			if rec.Owner == NormInbox(rec.Inbox) {
+				return nil // already inbox-owned
+			}
+			kc := make([]byte, len(k))
+			copy(kc, k)
+			work = append(work, item{key: kc, rec: rec})
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, w := range work {
+			want := NormInbox(w.rec.Inbox)
+			oldIdx := syncedKey(w.rec.Owner, w.rec.Inbox, w.rec.UIDValidity, w.rec.UpstreamUID)
+			newIdx := syncedKey(want, w.rec.Inbox, w.rec.UIDValidity, w.rec.UpstreamUID)
+			if err := idx.Delete(oldIdx); err != nil {
+				return err
+			}
+			if err := idx.Put(newIdx, w.key); err != nil {
+				return err
+			}
+			w.rec.Owner = want
+			if err := putStored(tx, w.key, w.rec); err != nil {
+				return err
+			}
+			n++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("inbound: rekey owners: %w", err)
+	}
+	return n, nil
+}
+
 // SetKeywords replaces the owner's message's keyword set (ADR 0020) and marks it
 // dirty for upstream reconcile. The local store is canonical; the returned
 // message carries the new keywords (without content). Metadata-only write.
