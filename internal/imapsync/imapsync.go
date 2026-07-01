@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -30,6 +30,7 @@ type Syncer struct {
 	state      StateStore
 	maxAge     time.Duration  // recency cutoff; 0 = no cutoff (ADR 0008)
 	labelStore LabelStoreFunc // Gmail X-GM-LABELS writer; nil = plain keywords only (ADR 0020)
+	logger     *slog.Logger   // structured logger; defaults to slog.Default(), injectable via SetLogger
 }
 
 // SetLabelStore installs the Gmail X-GM-LABELS label writer (ADR 0020 20c). When
@@ -37,11 +38,20 @@ type Syncer struct {
 // (capability-gated) and falls back to plain keywords elsewhere.
 func (s *Syncer) SetLabelStore(fn LabelStoreFunc) { s.labelStore = fn }
 
+// SetLogger injects the structured logger for this syncer (ADR 0026 #151). serve
+// passes a per-inbox logger (logger.With("inbox", name)) so every sync/reconcile
+// record is tagged with its inbox; unset falls back to slog.Default().
+func (s *Syncer) SetLogger(l *slog.Logger) {
+	if l != nil {
+		s.logger = l
+	}
+}
+
 // New builds a Syncer. owner is the agent the synced mail belongs to; inbox is the
 // named inbox this syncer feeds (ADR 0023; empty reads as DefaultInbox). maxAge is
 // the recency cutoff for the initial/full sync (0 = pull everything).
 func New(dial DialFunc, mailbox, owner, inbox string, store inbound.InboundStore, state StateStore, maxAge time.Duration) *Syncer {
-	return &Syncer{dial: dial, mailbox: mailbox, owner: owner, inbox: inbox, store: store, state: state, maxAge: maxAge}
+	return &Syncer{dial: dial, mailbox: mailbox, owner: owner, inbox: inbox, store: store, state: state, maxAge: maxAge, logger: slog.Default()}
 }
 
 // stateKey is the sync-cursor key for this syncer's inbox. The default inbox uses
@@ -380,7 +390,7 @@ func (s *Syncer) WriteKeywords(owner, inbox, id string, add, remove []string) er
 func (s *Syncer) reconcileKeywords() {
 	dirty, err := s.store.DirtyKeywords(s.owner, s.inbox)
 	if err != nil {
-		log.Printf("darbaan: keyword reconcile list: %v", err)
+		s.logger.Warn("keyword reconcile: list dirty failed", "err", err)
 		return
 	}
 	for _, m := range dirty {
@@ -389,11 +399,11 @@ func (s *Syncer) reconcileKeywords() {
 		// upstream). Deliberate — acceptable for the add-dominated labeling flow;
 		// the deferred convergent read-side / go-imap upstream swap cleans it up.
 		if err := s.WriteKeywords(s.owner, s.inbox, m.ID, m.Keywords, nil); err != nil {
-			log.Printf("darbaan: keyword reconcile %s deferred: %v", m.ID, err)
+			s.logger.Warn("keyword reconcile deferred", "id", m.ID, "err", err)
 			continue
 		}
 		if err := s.store.ClearKeywordsDirty(s.owner, s.inbox, m.ID); err != nil {
-			log.Printf("darbaan: keyword reconcile clear %s: %v", m.ID, err)
+			s.logger.Warn("keyword reconcile: clear dirty failed", "id", m.ID, "err", err)
 		}
 	}
 }

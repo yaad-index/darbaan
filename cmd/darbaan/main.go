@@ -16,7 +16,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -98,6 +98,9 @@ type CLI struct {
 	ApprovalStrict []string `name:"approval-strict" default:"manual" help:"Approver chain for the strict path."`
 	ApprovalLight  []string `name:"approval-light" default:"manual" help:"Approver chain for the light path."`
 
+	LogLevel  string `name:"log-level" default:"info" enum:"debug,info,warn,error" help:"Log verbosity."`
+	LogFormat string `name:"log-format" default:"text" enum:"text,json" help:"Log handler: text (human-readable) or json (structured ingest)."`
+
 	Serve      ServeCmd      `cmd:"" help:"Run the SMTP + IMAP faces and the admin API."`
 	Queue      QueueCmd      `cmd:"" help:"Inspect and decide held messages (via the running serve's admin API)."`
 	Holds      HoldsCmd      `cmd:"" help:"Inspect and decide inbound messages held for a human (ADR 0021)."`
@@ -116,7 +119,28 @@ func main() {
 	}
 	ctx, err := parser.Parse(os.Args[1:])
 	parser.FatalIfErrorf(err)
+	parser.FatalIfErrorf(cli.setupLogging())
 	ctx.FatalIfErrorf(ctx.Run(&cli))
+}
+
+// setupLogging builds the structured logger from --log-level/--log-format and
+// installs it as the slog default, so every subcommand (and every component that
+// falls back to slog.Default()) logs through it.
+func (c *CLI) setupLogging() error {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(c.LogLevel)); err != nil {
+		return fmt.Errorf("log-level: %w", err)
+	}
+	opts := &slog.HandlerOptions{Level: level}
+	var h slog.Handler
+	switch c.LogFormat {
+	case "json":
+		h = slog.NewJSONHandler(os.Stderr, opts)
+	default: // "text"
+		h = slog.NewTextHandler(os.Stderr, opts)
+	}
+	slog.SetDefault(slog.New(h))
+	return nil
 }
 
 func (c *CLI) router() *policy.Router {
@@ -306,6 +330,9 @@ func (cli *CLI) newSyncers(inboxes []inboxcfg.Inbox, store inbound.InboundStore)
 		pass := inboxIMAPPassword(in.Name)
 		dial := imapsync.Dialer(in.Backend.IMAPHost, in.Backend.IMAPUsername, pass)
 		syn := imapsync.New(dial, mailbox, cli.AgentUsername, in.Name, store, state, maxAge)
+		// Per-inbox structured logger (#151): every sync/reconcile record this
+		// syncer emits is tagged with its inbox.
+		syn.SetLogger(slog.Default().With("inbox", in.Name))
 		// Gmail label write-through (ADR 0020 20c): capability-gated, harmless on a
 		// non-Gmail backend (reports not-supported → WriteKeywords uses plain keywords).
 		syn.SetLabelStore(imapsync.RawGmailLabelStore(in.Backend.IMAPHost, in.Backend.IMAPUsername, pass, mailbox))
@@ -372,28 +399,28 @@ func imapKeywordWriter(syncers map[string]*imapsync.Syncer) listener.KeywordWrit
 // cancelled. Sync errors are logged, never fatal — a flaky or unreachable
 // upstream must not take down serve.
 func (cli *CLI) runSyncLoop(ctx context.Context, inbox string, syncer *imapsync.Syncer) {
-	fmt.Fprintf(os.Stderr, "darbaan: inbound sync for inbox %q every %s\n", inbox, cli.InboundIMAPPollInterval)
+	slog.Info("inbound sync loop started", "inbox", inbox, "interval", cli.InboundIMAPPollInterval.String())
 	t := time.NewTicker(cli.InboundIMAPPollInterval)
 	defer t.Stop()
-	runSync(ctx, syncer) // initial pull at startup
+	runSync(ctx, inbox, syncer) // initial pull at startup
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			runSync(ctx, syncer)
+			runSync(ctx, inbox, syncer)
 		}
 	}
 }
 
-func runSync(ctx context.Context, s *imapsync.Syncer) {
+func runSync(ctx context.Context, inbox string, s *imapsync.Syncer) {
 	n, err := s.Sync(ctx)
 	if err != nil {
-		log.Printf("darbaan: inbound sync: %v", err)
+		slog.Error("inbound sync failed", "inbox", inbox, "err", err)
 		return
 	}
 	if n > 0 {
-		log.Printf("darbaan: inbound sync pulled %d new message(s)", n)
+		slog.Info("inbound sync pulled messages", "inbox", inbox, "count", n)
 	}
 }
 
@@ -447,7 +474,7 @@ func reconcileTargets(inboxes []inboxcfg.Inbox, syncers map[string]*imapsync.Syn
 // cancelled (ADR 0026). Like the sync loop, errors are logged, never fatal — a
 // flaky upstream or a held cap must not take down serve.
 func (cli *CLI) runReconcileLoop(ctx context.Context, t reconcileTarget) {
-	fmt.Fprintf(os.Stderr, "darbaan: reconcile for inbox %q every %s\n", t.inbox, t.interval)
+	slog.Info("reconcile loop started", "inbox", t.inbox, "interval", t.interval.String())
 	tk := time.NewTicker(t.interval)
 	defer tk.Stop()
 	runReconcile(ctx, t) // initial pass at startup
@@ -465,11 +492,13 @@ func runReconcile(ctx context.Context, t reconcileTarget) {
 	n, err := t.syncer.Reconcile(ctx, t.opts)
 	switch {
 	case errors.Is(err, imapsync.ErrReconcileHeld):
-		log.Printf("darbaan: reconcile for inbox %q HELD by the safety cap; awaiting operator release", t.inbox)
+		// The syncer logs the "reconcile held" event once on the transition; this
+		// per-cycle line stays at debug so a held inbox does not spam the log.
+		slog.Debug("reconcile still held", "inbox", t.inbox)
 	case err != nil:
-		log.Printf("darbaan: reconcile for inbox %q: %v", t.inbox, err)
+		slog.Error("reconcile failed", "inbox", t.inbox, "err", err)
 	case n > 0:
-		log.Printf("darbaan: reconcile for inbox %q retracted %d message(s)", t.inbox, n)
+		slog.Info("reconcile retracted messages", "inbox", t.inbox, "count", n)
 	}
 }
 
@@ -547,6 +576,7 @@ func (*TelegramCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
+	tc.SetLogger(slog.Default().With("component", "telegram"))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return tc.Run(ctx)
@@ -783,7 +813,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 	if cli.BounceGuardEnabled {
 		guard = bounceguard.New(sgn.Verify)
 	} else {
-		fmt.Fprintln(os.Stderr, "darbaan: bounce-spoof guard DISABLED (bounce-guard-enabled=false)")
+		slog.Warn("bounce-spoof guard disabled", "reason", "bounce-guard-enabled=false")
 	}
 	holdSpoof := cli.BounceGuardOnSpoof == "hold-for-human"
 	// The admin hold-for-human queue and the read face share one filter + owner +
@@ -805,7 +835,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 	// Run one sync poll loop per inbox with an upstream (shared shutdown ctx;
 	// errors logged, never fatal).
 	if len(syncers) == 0 {
-		fmt.Fprintln(os.Stderr, "darbaan: inbound sync disabled (no inbox has an upstream configured)")
+		slog.Info("inbound sync disabled", "reason", "no inbox has an upstream configured")
 	}
 	for name, syn := range syncers {
 		go cli.runSyncLoop(ctx, name, syn)
@@ -817,7 +847,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 	for _, in := range inboxes {
 		if in.ReconcileEnabled {
 			if _, ok := syncers[in.Name]; !ok {
-				fmt.Fprintf(os.Stderr, "darbaan: reconcile enabled for inbox %q but it has no upstream — not running\n", in.Name)
+				slog.Warn("reconcile enabled but inbox has no upstream; not running", "inbox", in.Name)
 			}
 		}
 	}
@@ -846,8 +876,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 	go func() { errs <- ignoreClosed(imapSrv.ListenAndServe(cli.IMAPAddr)) }()
 	go func() { errs <- ignoreClosed(adminSrv.ListenAndServe()) }()
 
-	fmt.Fprintf(os.Stderr, "darbaan: SMTP on %s, IMAP on %s, admin on %s\n",
-		cli.ListenerAddr, cli.IMAPAddr, cli.AdminAddr)
+	slog.Info("serve listening", "smtp", cli.ListenerAddr, "imap", cli.IMAPAddr, "admin", cli.AdminAddr)
 
 	// Return on the first server to exit; close the rest and drain them.
 	err = <-errs

@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -109,7 +109,7 @@ func (s *bboltStore) sweepOrphans() error {
 		return err
 	}
 	if n > 0 {
-		log.Printf("darbaan: inbound reclaimed %d orphan blob(s) at startup", n)
+		slog.Info("inbound reclaimed orphan blobs at startup", "count", n)
 	}
 	return nil
 }
@@ -360,7 +360,7 @@ func (s *bboltStore) RemoveSynced(owner, inbox, id string) error {
 		// Best-effort: a present record's blob. Delete is idempotent (a missing blob
 		// is not an error); a real failure only orphans it for the next sweep.
 		if err := s.blobs.Delete(id); err != nil {
-			log.Printf("darbaan: inbound retract %s: blob delete failed (orphan, will be swept): %v", id, err)
+			slog.Warn("inbound retract: blob delete failed (orphan, will be swept)", "id", id, "err", err)
 		}
 	}
 	return nil

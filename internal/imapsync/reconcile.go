@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 
 	"github.com/emersion/go-imap/v2"
 
@@ -198,8 +197,9 @@ func (s *Syncer) Reconcile(ctx context.Context, opts ReconcileOptions) (int, err
 		if err := s.state.SaveReconcile(s.stateKey(), ReconcileState{Suspended: true, HeldCount: len(gone)}); err != nil {
 			return 0, fmt.Errorf("imapsync: reconcile: latch: %w", err)
 		}
-		log.Printf("darbaan: reconcile HELD for inbox %q: a pass would retract %d of %d synced messages (cap %.0f%%); suspended pending operator release",
-			inbound.NormInbox(s.inbox), len(gone), syncedCount, frac*100)
+		// Structured "reconcile held" event — the hook for the #149 latch-push
+		// notification. The inbox is carried by the injected per-inbox logger.
+		s.logger.Warn("reconcile held", "candidates", len(gone), "synced", syncedCount, "cap_fraction", frac)
 		return 0, ErrReconcileHeld
 	}
 

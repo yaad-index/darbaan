@@ -18,7 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -49,10 +49,20 @@ type Client struct {
 	operatorID   int64
 	pollInterval time.Duration
 
+	logger *slog.Logger // structured logger; defaults to slog.Default(), injectable via SetLogger
+
 	mu          sync.Mutex
 	posted      map[string]bool     // sluice message ids already sent to the operator
 	postedHolds map[string]bool     // inbound-hold ids already sent (separate id space)
 	pending     map[int]rejectState // reject reason prompts awaiting the operator's reply, keyed by prompt message id
+}
+
+// SetLogger injects the structured logger for the Telegram client (#151);
+// unset falls back to slog.Default().
+func (c *Client) SetLogger(l *slog.Logger) {
+	if l != nil {
+		c.logger = l
+	}
 }
 
 // rejectState remembers, for a reason force-reply prompt, which held message it
@@ -95,6 +105,7 @@ func New(token string, operatorID int64, pollInterval time.Duration, adminClient
 		admin:        adminClient,
 		operatorID:   operatorID,
 		pollInterval: pollInterval,
+		logger:       slog.Default(),
 		posted:       make(map[string]bool),
 		postedHolds:  make(map[string]bool),
 		pending:      make(map[int]rejectState),
@@ -117,7 +128,7 @@ func (c *Client) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("telegram: connect: %w", err)
 	}
-	log.Printf("darbaan telegram: ready — bot @%s, operator %d, polling the queue every %s", me.Username, c.operatorID, c.pollInterval)
+	c.logger.Info("telegram client ready", "bot", me.Username, "operator", c.operatorID, "poll_interval", c.pollInterval.String())
 
 	go c.pollLoop(ctx)
 	c.bot.Start(ctx) // long-poll loop; returns when ctx is cancelled
@@ -146,7 +157,7 @@ func (c *Client) pollLoop(ctx context.Context) {
 func (c *Client) poll(ctx context.Context) {
 	metas, err := c.admin.List(ctx)
 	if err != nil {
-		log.Printf("darbaan telegram: poll: %v", err)
+		c.logger.Error("telegram poll failed", "err", err)
 		return
 	}
 	c.prunePosted(metas)
@@ -155,7 +166,7 @@ func (c *Client) poll(ctx context.Context) {
 			continue
 		}
 		if err := c.notify(ctx, m); err != nil {
-			log.Printf("darbaan telegram: notify %s: %v", m.ID, err)
+			c.logger.Warn("telegram notify failed", "id", m.ID, "err", err)
 			continue
 		}
 		c.markPosted(m.ID)
@@ -168,7 +179,7 @@ func (c *Client) notify(ctx context.Context, m sluice.Meta) error {
 	// fetch failure still notifies, falling back to the envelope values.
 	raw, err := c.admin.Show(ctx, m.ID)
 	if err != nil {
-		log.Printf("darbaan telegram: fetch body %s: %v", m.ID, err)
+		c.logger.Warn("telegram fetch body failed", "id", m.ID, "err", err)
 	}
 	from, to, headerSet, parsed := headerAddrs(raw)
 	if from == "" {
@@ -245,7 +256,7 @@ func (c *Client) sendAttachments(ctx context.Context, queueID string, anchorID i
 			params.ReplyParameters = &models.ReplyParameters{MessageID: anchorID}
 		}
 		if _, err := c.bot.SendDocument(ctx, params); err != nil {
-			log.Printf("darbaan telegram: upload attachment %s: %v", a.filename, err)
+			c.logger.Warn("telegram upload attachment failed", "filename", a.filename, "err", err)
 		}
 	}
 }
@@ -273,7 +284,7 @@ func (c *Client) sendFullBody(ctx context.Context, queueID string, anchorID int,
 		return
 	}
 	if len(data) > maxUpload {
-		log.Printf("darbaan telegram: full body %s too large to attach (%d bytes)", queueID, len(data))
+		c.logger.Warn("telegram full body too large to attach", "id", queueID, "bytes", len(data))
 		return
 	}
 	params := &bot.SendDocumentParams{
@@ -285,7 +296,7 @@ func (c *Client) sendFullBody(ctx context.Context, queueID string, anchorID int,
 		params.ReplyParameters = &models.ReplyParameters{MessageID: anchorID}
 	}
 	if _, err := c.bot.SendDocument(ctx, params); err != nil {
-		log.Printf("darbaan telegram: upload full body %s: %v", queueID, err)
+		c.logger.Warn("telegram upload full body failed", "id", queueID, "err", err)
 	}
 }
 
@@ -490,7 +501,7 @@ func (c *Client) isOperator(cq *models.CallbackQuery) bool {
 
 // denyCallback rejects a callback from anyone but the operator.
 func (c *Client) denyCallback(ctx context.Context, b *bot.Bot, cq *models.CallbackQuery) {
-	log.Printf("darbaan telegram: ignored callback from non-operator %d", cq.From.ID)
+	c.logger.Warn("telegram ignored callback from non-operator", "from", cq.From.ID)
 	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
 		CallbackQueryID: cq.ID, Text: "Not authorized.", ShowAlert: true,
 	})
@@ -522,7 +533,7 @@ func (c *Client) editResult(ctx context.Context, b *bot.Bot, chatID int64, msgID
 		Text:        result,
 		ReplyMarkup: emptyKeyboard(),
 	})
-	log.Printf("darbaan telegram: %s", result)
+	c.logger.Info("telegram decision result", "result", result)
 }
 
 // handleRejectPermanent / handleRejectRetryable are the two reject buttons; both
@@ -564,7 +575,7 @@ func (c *Client) promptReason(ctx context.Context, b *bot.Bot, cq *models.Callba
 		},
 	})
 	if err != nil {
-		log.Printf("darbaan telegram: reject prompt %s: %v", id, err)
+		c.logger.Warn("telegram reject prompt failed", "id", id, "err", err)
 		// Dismiss the spinner so the button doesn't hang on a network error.
 		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
 			CallbackQueryID: cq.ID, Text: "Could not start the reason prompt.",

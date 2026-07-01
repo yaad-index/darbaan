@@ -3,7 +3,6 @@ package telegram
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/go-telegram/bot"
@@ -19,7 +18,7 @@ import (
 func (c *Client) pollHolds(ctx context.Context) {
 	held, err := c.admin.HeldList(ctx)
 	if err != nil {
-		log.Printf("darbaan telegram: poll holds: %v", err)
+		c.logger.Error("telegram poll holds failed", "err", err)
 		return
 	}
 	c.prunePostedHolds(held)
@@ -28,7 +27,7 @@ func (c *Client) pollHolds(ctx context.Context) {
 			continue
 		}
 		if err := c.notifyHold(ctx, m); err != nil {
-			log.Printf("darbaan telegram: notify hold %s: %v", m.ID, err)
+			c.logger.Warn("telegram notify hold failed", "id", m.ID, "err", err)
 			continue
 		}
 		c.markPostedHold(m.ID)
