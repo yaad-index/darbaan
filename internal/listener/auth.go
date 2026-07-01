@@ -2,13 +2,29 @@ package listener
 
 import "crypto/subtle"
 
-// Principal is an authenticated agent identity: the Darbaan login it presents
-// (ADR 0002 — the agent never holds upstream credentials). The grants that gate a
-// principal's access are added to the session in a later increment (ADR 0027);
-// this increment establishes identity and per-agent authentication.
+// Principal is an authenticated agent (ADR 0002 — the agent never holds upstream
+// credentials): its Darbaan login plus the grants that gate its access (ADR 0027).
+// DefaultInbox is the inbox this agent sees as IMAP INBOX; Reads/Sends are the
+// inboxes it may read / send as. A principal with nil Reads/Sends is unrestricted
+// — the single-agent / back-compat case, where the one agent sees every inbox.
 type Principal struct {
-	Name     string
-	Password string
+	Name         string
+	Password     string
+	DefaultInbox string
+	Reads        map[string]bool
+	Sends        map[string]bool
+}
+
+// CanRead reports whether the principal may read the inbox. Nil Reads means
+// unrestricted (single-agent / back-compat).
+func (p *Principal) CanRead(inbox string) bool {
+	return p != nil && (p.Reads == nil || p.Reads[inbox])
+}
+
+// CanSend reports whether the principal may send as the inbox. Nil Sends means
+// unrestricted (single-agent / back-compat).
+func (p *Principal) CanSend(inbox string) bool {
+	return p != nil && (p.Sends == nil || p.Sends[inbox])
 }
 
 // Auth resolves a presented (username, password) to a configured Principal. The
@@ -40,17 +56,17 @@ func SingleAuth(name, password string) *Auth {
 }
 
 // Verify authenticates a presented (username, password), returning the matched
-// principal's name; ok is false on any miss.
-func (a *Auth) Verify(username, password string) (name string, ok bool) {
+// principal; ok is false on any miss.
+func (a *Auth) Verify(username, password string) (*Principal, bool) {
 	p, found := a.byName[username]
 	if !found {
 		// Compare against a fixed value so an unknown username takes a similar path
 		// to a wrong password (no username-enumeration oracle).
 		subtle.ConstantTimeCompare([]byte(password), []byte(dummyPassword))
-		return "", false
+		return nil, false
 	}
 	if subtle.ConstantTimeCompare([]byte(password), []byte(p.Password)) != 1 {
-		return "", false
+		return nil, false
 	}
-	return p.Name, true
+	return &p, true
 }

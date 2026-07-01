@@ -257,7 +257,24 @@ func (c *CLI) resolvePrincipals(inboxes []inboxcfg.Inbox) ([]listener.Principal,
 		if pass == "" {
 			return nil, fmt.Errorf("agent %q: set %s (the password is supplied out-of-band, never in config — ADR 0012)", a.Name, env)
 		}
-		principals = append(principals, listener.Principal{Name: a.Name, Password: pass})
+		def, err := agentcfg.DefaultInbox(a)
+		if err != nil {
+			return nil, err
+		}
+		reads := make(map[string]bool, len(a.Grants))
+		sends := make(map[string]bool, len(a.Grants))
+		for _, g := range a.Grants {
+			if g.HasAccess(agentcfg.AccessRead) {
+				reads[g.Inbox] = true
+			}
+			if g.HasAccess(agentcfg.AccessSend) {
+				sends[g.Inbox] = true
+			}
+		}
+		principals = append(principals, listener.Principal{
+			Name: a.Name, Password: pass,
+			DefaultInbox: def, Reads: reads, Sends: sends,
+		})
 	}
 	return principals, nil
 }
