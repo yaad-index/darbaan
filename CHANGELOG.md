@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/yaad-index/darbaan/compare/v0.6.0...v0.7.0) (2026-07-01)
+
+
+### Features
+
+* **admin,telegram:** Change-sender at the approval gate ([#139](https://github.com/yaad-index/darbaan/issues/139)) ([#158](https://github.com/yaad-index/darbaan/issues/158)) ([b446747](https://github.com/yaad-index/darbaan/commit/b446747d1165e82da808f057675778c406452f69))
+
 ## [0.6.0](https://github.com/yaad-index/darbaan/compare/v0.5.0...v0.6.0) (2026-06-30)
 
 
