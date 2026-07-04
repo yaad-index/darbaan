@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/yaad-index/darbaan/compare/v0.8.0...v0.9.0) (2026-07-04)
+
+
+### Features
+
+* **sync:** STATUS triggers debounced on-demand inbound sync (ADR 0028) ([#174](https://github.com/yaad-index/darbaan/issues/174)) ([a3a4214](https://github.com/yaad-index/darbaan/commit/a3a4214233f8bd7998ec34570629cc6ee59ae56e))
+
 ## [0.8.0](https://github.com/yaad-index/darbaan/compare/v0.7.0...v0.8.0) (2026-07-01)
 
 
