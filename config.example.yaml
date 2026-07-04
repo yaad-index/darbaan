@@ -86,10 +86,20 @@ approval-light: [manual]
 # sees as IMAP INBOX and the target of its send catch-all; it must be a granted
 # inbox with read access. An agent name may not equal an inbox name.
 #
+# On-demand sync (ADR 0028, opt-in per inbox): when sync_on_status is set, an IMAP
+# STATUS for that inbox triggers an immediate upstream pull before the counts are
+# returned, so an agent can "sync now" instead of waiting out the background poll
+# (inbound-imap-poll-interval). It is debounced per inbox — sync_on_status_interval
+# is the minimum gap between on-demand pulls (default 60s); a STATUS inside the
+# window silently reports current counts without dialing. NOOP/CHECK never trigger
+# a pull. Ignored for an inbox with no upstream.
+#
 # inboxes:
 #   - name: inbox-a
 #     identity: a@inbox-a.example      # the From/envelope Darbaan sends as
 #     backend: { imap_host: "imap.example:993", imap_username: "a@inbox-a.example" }
+#     sync_on_status: true             # STATUS pulls upstream now (ADR 0028)
+#     sync_on_status_interval: "60s"   # debounce window (default 60s)
 #   - name: inbox-b
 #     identity: b@inbox-b.example
 #     backend: { imap_host: "imap.example:993", imap_username: "b@inbox-b.example" }

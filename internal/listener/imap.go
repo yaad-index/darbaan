@@ -48,6 +48,14 @@ type ContentFetch func(owner, inbox, id string) (inbound.Message, error)
 // disabled).
 type KeywordWriter func(owner, inbox, id string, add, remove []string) error
 
+// SyncTrigger runs a debounced on-demand upstream pull of an inbox (ADR 0028),
+// invoked when a client issues STATUS for an inbox the operator opted in. It is
+// best-effort: a returned error is logged, never surfaced to the client (STATUS
+// still reports the store's current counts). nil disables on-demand sync (the
+// back-compat / no-opted-in-inbox path), and it is a no-op for an inbox that is
+// not opted in or whose debounce window has not elapsed.
+type SyncTrigger func(inbox string) error
+
 // IMAPServer serves the agent's mailbox (the InboundStore) over IMAP as a
 // translation adapter (ADR 0016): the store is canonical. SELECT snapshots
 // metadata only; a body FETCH resolves content per-message via a ContentFetch.
@@ -68,7 +76,9 @@ type IMAPServer struct {
 // in multi-agent mode, so agents sharing an inbox read the same records. nil (the
 // single-agent / back-compat path) keys synced mail by the connecting agent, as
 // before.
-func NewIMAPServer(cfg IMAPServerConfig, auth *Auth, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter, filters map[string]*filter.Filter, guard *bounceguard.Guard, holdSpoof bool, mailOwner func(inbox string) string) (*IMAPServer, error) {
+// syncNow triggers a debounced on-demand upstream pull of an inbox on STATUS
+// (ADR 0028); nil disables on-demand sync (STATUS stays a plain query).
+func NewIMAPServer(cfg IMAPServerConfig, auth *Auth, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter, filters map[string]*filter.Filter, guard *bounceguard.Guard, holdSpoof bool, mailOwner func(inbox string) string, syncNow SyncTrigger) (*IMAPServer, error) {
 	if cfg.TLSConfig == nil && !cfg.AllowInsecure {
 		return nil, errors.New("listener: IMAP TLS required (set TLSConfig, or AllowInsecure for local testing)")
 	}
@@ -80,7 +90,7 @@ func NewIMAPServer(cfg IMAPServerConfig, auth *Auth, store inbound.InboundStore,
 	}
 	srv := imapserver.New(&imapserver.Options{
 		NewSession: func(_ *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return &imapSession{auth: auth, store: store, fetch: fetch, writeKeywords: writeKeywords, filters: filters, guard: guard, holdSpoof: holdSpoof, mailOwner: mailOwner}, nil, nil
+			return &imapSession{auth: auth, store: store, fetch: fetch, writeKeywords: writeKeywords, filters: filters, guard: guard, holdSpoof: holdSpoof, mailOwner: mailOwner, syncNow: syncNow}, nil, nil
 		},
 		TLSConfig:    cfg.TLSConfig,
 		InsecureAuth: cfg.AllowInsecure,
@@ -112,6 +122,7 @@ type imapSession struct {
 	holdSpoof     bool                      // on_spoof=hold-for-human → held-semantics; false = hide
 	principal     *Principal                // the authenticated agent + its grants (ADR 0027)
 	mailOwner     func(inbox string) string // synced-mail owner key per inbox (ADR 0027); nil = key by the connecting agent
+	syncNow       SyncTrigger               // debounced on-demand pull on STATUS (ADR 0028); nil = disabled
 	owner         string
 	selectedInbox string // the inbox name of the SELECTed mailbox (ADR 0023)
 	authed        bool
@@ -351,6 +362,17 @@ func (s *imapSession) Status(mailbox string, options *imap.StatusOptions) (*imap
 	inbox, ok := s.resolveMailbox(mailbox)
 	if !ok {
 		return nil, fmt.Errorf("imap: no such mailbox %q", mailbox)
+	}
+	// On-demand sync (ADR 0028): STATUS is the agent's "sync now" — trigger a
+	// debounced upstream pull for this inbox BEFORE computing the counts, so the
+	// reply reflects mail that arrived since the last background poll. Best-effort:
+	// a pull error is logged, never surfaced (STATUS still reports the store's
+	// current counts); the trigger is a no-op for an inbox that is not opted in or
+	// whose debounce window has not elapsed (silent-skip).
+	if s.syncNow != nil {
+		if err := s.syncNow(inbox); err != nil {
+			slog.Warn("imap on-demand sync failed", "inbox", inbox, "err", err)
+		}
 	}
 	full, visible, err := s.listAndFilter(inbox) // a query, not a selection — selectedInbox unchanged
 	if err != nil {
