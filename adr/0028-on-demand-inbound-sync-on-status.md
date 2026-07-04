@@ -78,6 +78,14 @@ one is already in flight (a single-flight guard), so a burst collapses to one
 dial. The window is measured from pull **completion**, so a slow pull does not
 immediately re-trigger.
 
+A **failed** pull starts the window too — the completion timestamp is stamped
+whether the pull succeeded or errored. This is deliberate anti-storm behavior: a
+persistently unreachable or erroring upstream cannot be turned into a dial-storm
+by repeated `STATUS`, since each failed attempt still opens a fresh debounce
+window. The background poll loop (ADR 0019) is the fallback that keeps retrying
+and eventually recovers, so suppressing on-demand retries within the window
+loses nothing.
+
 ### Counts, not unsolicited updates (v1 boundary)
 
 `STATUS` reports fresh counts computed after the pull; it pushes **no**
