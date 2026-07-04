@@ -2,6 +2,7 @@ package imapsync
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -76,5 +77,14 @@ func (o *OnDemandSync) Trigger(ctx context.Context, inbox string) (int, bool, er
 	in.inflight = false
 	in.last = time.Now() // start the window from completion, not from entry
 	o.mu.Unlock()
+
+	// Log the fire path (only when a pull actually ran, not the silent-skip) so an
+	// on-demand pull is unambiguous in the logs — distinct from the background
+	// poll's "inbound sync pulled messages" and from a skip that logged nothing. A
+	// failed pull is left to the caller to log (the STATUS handler warns); here we
+	// record the successful fire and its count.
+	if err == nil {
+		slog.Info("on-demand inbound sync ran", "inbox", inbox, "pulled", n)
+	}
 	return n, true, err
 }
