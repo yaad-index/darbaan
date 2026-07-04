@@ -1,7 +1,9 @@
 package imapsync_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -51,6 +53,39 @@ func TestOnDemandSyncDebounces(t *testing.T) {
 	msgs, err = store.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
 	assert.Len(t, msgs, 2)
+}
+
+// A fired pull logs an unambiguous "on-demand inbound sync ran" line with the
+// inbox and pulled count, so a prod log can distinguish an on-demand pull from an
+// early background poll; a silent-skip within the window logs nothing.
+func TestOnDemandSyncLogsOnFire(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "From: a@x.test\r\nSubject: one\r\n\r\nbody one")
+
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
+	od := imapsync.NewOnDemandSync()
+	od.Register(inbound.DefaultInbox, syncer, time.Hour) // long window: only the first fires
+
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	defer slog.SetDefault(old)
+
+	_, ran, err := od.Trigger(context.Background(), inbound.DefaultInbox)
+	require.NoError(t, err)
+	require.True(t, ran)
+	logged := buf.String()
+	assert.Contains(t, logged, "on-demand inbound sync ran")
+	assert.Contains(t, logged, "inbox=default")
+	assert.Contains(t, logged, "pulled=1")
+
+	// A silent-skip within the (1h) window logs nothing.
+	buf.Reset()
+	_, ran, err = od.Trigger(context.Background(), inbound.DefaultInbox)
+	require.NoError(t, err)
+	require.False(t, ran)
+	assert.Empty(t, buf.String(), "a debounced skip logs nothing")
 }
 
 // An inbox that was never registered (not opted in, or bounce-only with no
