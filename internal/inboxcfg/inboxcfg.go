@@ -59,6 +59,18 @@ type Inbox struct {
 	// set value must be >= 1. The latch rule is the conjunction of both —
 	// retract-count >= floor AND retract-count > fraction * synced-set.
 	ReconcileCapFloor int `yaml:"reconcile_cap_floor"`
+
+	// On-demand inbound sync (ADR 0028): when set, an IMAP STATUS for this inbox
+	// triggers an immediate, debounced upstream pull before the counts are computed,
+	// so "give me current status" reflects mail that arrived since the last
+	// background poll (ADR 0019) instead of waiting out the interval. It is OPT-IN
+	// and OFF unless SyncOnStatus is set — STATUS stays a cheap query by default;
+	// NOOP/CHECK never trigger a pull. SyncOnStatusInterval is the debounce window:
+	// the minimum gap between on-demand pulls of this inbox (empty uses the runtime
+	// default). It is only meaningful when enabled and ignored for an inbox with no
+	// upstream syncer.
+	SyncOnStatus         bool   `yaml:"sync_on_status"`
+	SyncOnStatusInterval string `yaml:"sync_on_status_interval"`
 }
 
 // Backend is an inbox's upstream account coordinates (ADR 0009). Secrets
@@ -140,6 +152,14 @@ func Validate(inboxes []Inbox) error {
 			}
 			if fl := in.ReconcileCapFloor; fl != 0 && fl < 1 {
 				return fmt.Errorf("inboxcfg: inbox %q: reconcile_cap_floor must be >= 1, got %d", name, fl)
+			}
+		}
+		// Fail-fast on a malformed on-demand-sync debounce window for an enabled
+		// inbox, so a bad duration is caught at load, not at the first STATUS
+		// (ADR 0028).
+		if in.SyncOnStatus {
+			if _, err := in.SyncOnStatusDuration(); err != nil {
+				return fmt.Errorf("inboxcfg: inbox %q: %w", name, err)
 			}
 		}
 	}
@@ -232,6 +252,26 @@ func (in Inbox) ReconcileDuration() (time.Duration, error) {
 	}
 	if d <= 0 {
 		return 0, fmt.Errorf("reconcile_interval must be positive, got %q", s)
+	}
+	return d, nil
+}
+
+// SyncOnStatusDuration parses the inbox's on-demand-sync debounce window
+// (ADR 0028). An empty interval returns (0, nil) — the caller substitutes the
+// runtime default. A set interval must be a positive Go duration (e.g. "15s",
+// "1m"); zero or negative is an error. It is only meaningful when SyncOnStatus is
+// set.
+func (in Inbox) SyncOnStatusDuration() (time.Duration, error) {
+	s := strings.TrimSpace(in.SyncOnStatusInterval)
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid sync_on_status_interval %q: %w", s, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("sync_on_status_interval must be positive, got %q", s)
 	}
 	return d, nil
 }

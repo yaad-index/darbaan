@@ -504,6 +504,39 @@ func runSync(ctx context.Context, inbox string, s *imapsync.Syncer) {
 	}
 }
 
+// DefaultSyncOnStatusInterval is the on-demand-sync debounce window for an inbox
+// that enables sync_on_status without setting one (ADR 0028): the minimum gap
+// between STATUS-triggered upstream pulls. A minute is coarse enough that STATUS
+// stays cheap under bursty polling, fine enough that "sync now" feels immediate
+// after the first call.
+const DefaultSyncOnStatusInterval = time.Minute
+
+// newOnDemandSync builds the STATUS-triggered on-demand sync coordinator
+// (ADR 0028): it registers each inbox that opted in (sync_on_status) AND has an
+// upstream syncer, with its debounce window (sync_on_status_interval, or the
+// runtime default). An inbox with no syncer is skipped (nothing to pull). The
+// returned coordinator is empty when no inbox opted in — Trigger is then a pure
+// no-op — so it is always safe to wire onto the read face.
+func newOnDemandSync(inboxes []inboxcfg.Inbox, syncers map[string]*imapsync.Syncer) *imapsync.OnDemandSync {
+	od := imapsync.NewOnDemandSync()
+	for _, in := range inboxes {
+		if !in.SyncOnStatus {
+			continue
+		}
+		syn, ok := syncers[in.Name]
+		if !ok {
+			slog.Warn("sync_on_status enabled but inbox has no upstream; ignoring", "inbox", in.Name)
+			continue
+		}
+		iv, _ := in.SyncOnStatusDuration() // validated at load; 0 ⇒ default
+		if iv <= 0 {
+			iv = DefaultSyncOnStatusInterval
+		}
+		od.Register(in.Name, syn, iv)
+	}
+	return od
+}
+
 // DefaultReconcileInterval is the reconcile-pass period for an inbox that enables
 // reconciliation without setting one (ADR 0026). A full UID listing is heavier
 // than the incremental forward poll, so the default is deliberately coarse.
@@ -881,6 +914,17 @@ func (*ServeCmd) Run(cli *CLI) error {
 	}
 	defer stopSync()
 
+	// On-demand sync (ADR 0028): STATUS for an opted-in inbox triggers a debounced
+	// upstream pull before the counts are computed, so the agent can "sync now"
+	// instead of waiting out the background poll interval. Empty (no inbox opted
+	// in) ⇒ the trigger is a no-op. It runs the same read-only forward Sync as the
+	// background loop, on the connection's goroutine.
+	onDemand := newOnDemandSync(inboxes, syncers)
+	syncNow := func(inbox string) error {
+		_, _, terr := onDemand.Trigger(context.Background(), inbox)
+		return terr
+	}
+
 	// Wire the reconcile safety-cap controls onto the admin surface (ADR 0026):
 	// release a latched inbox (clear + cap-bypassed purge once) and report each
 	// inbox's latch. Only when an inbox has an upstream — otherwise the endpoints
@@ -931,7 +975,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 		Addr:          cli.IMAPAddr,
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
-	}, auth, inbox, imapContentFetch(syncers, inbox), imapKeywordWriter(syncers), filters, guard, holdSpoof, pw.mailOwner)
+	}, auth, inbox, imapContentFetch(syncers, inbox), imapKeywordWriter(syncers), filters, guard, holdSpoof, pw.mailOwner, syncNow)
 	if err != nil {
 		return err
 	}

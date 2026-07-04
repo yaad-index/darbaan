@@ -45,7 +45,7 @@ func startIMAPFull(t *testing.T, store inbound.InboundStore, fetch listener.Cont
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		listener.SingleAuth("agent", "pw"), store, fetch, wk, map[string]*filter.Filter{inbound.DefaultInbox: flt}, nil, false, nil)
+		listener.SingleAuth("agent", "pw"), store, fetch, wk, map[string]*filter.Filter{inbound.DefaultInbox: flt}, nil, false, nil, nil)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -57,7 +57,7 @@ func startIMAPMulti(t *testing.T, store inbound.InboundStore, filters map[string
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		listener.SingleAuth("agent", "pw"), store, nil, nil, filters, nil, false, nil)
+		listener.SingleAuth("agent", "pw"), store, nil, nil, filters, nil, false, nil, nil)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -69,7 +69,7 @@ func startIMAPAuth(t *testing.T, store inbound.InboundStore, filters map[string]
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		auth, store, nil, nil, filters, nil, false, nil)
+		auth, store, nil, nil, filters, nil, false, nil, nil)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -630,7 +630,7 @@ func TestIMAPBadAuthRejected(t *testing.T) {
 
 func TestIMAPRequiresTLS(t *testing.T) {
 	_, err := listener.NewIMAPServer(listener.IMAPServerConfig{},
-		listener.SingleAuth("agent", "pw"), seedInbound(t), nil, nil, nil, nil, false, nil)
+		listener.SingleAuth("agent", "pw"), seedInbound(t), nil, nil, nil, nil, false, nil, nil)
 	require.Error(t, err)
 }
 
@@ -639,7 +639,7 @@ func startIMAPDecoupled(t *testing.T, store inbound.InboundStore, filters map[st
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		auth, store, nil, nil, filters, nil, false, mailOwner)
+		auth, store, nil, nil, filters, nil, false, mailOwner, nil)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
