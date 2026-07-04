@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/yaad-index/darbaan/compare/v0.9.0...v0.10.0) (2026-07-04)
+
+
+### Features
+
+* **sync:** log successful on-demand inbound sync pulls (ADR 0028) ([#177](https://github.com/yaad-index/darbaan/issues/177)) ([41715f2](https://github.com/yaad-index/darbaan/commit/41715f2a23d6f963b19186aca302682b542376c0))
+
 ## [0.9.0](https://github.com/yaad-index/darbaan/compare/v0.8.0...v0.9.0) (2026-07-04)
 
 
