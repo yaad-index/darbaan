@@ -56,10 +56,16 @@ type Client struct {
 
 	logger *slog.Logger // structured logger; defaults to slog.Default(), injectable via SetLogger
 
-	// identities are the configured inbox send identities (ADR 0023 slice 5),
-	// fetched from serve at startup; the Change-sender picker offers them. Read-only
-	// after Run's initial fetch, so no lock is needed.
-	identities []admin.InboxIdentity
+	// identities are the configured inbox send identities (ADR 0023 slice 5) that the
+	// Change-sender picker offers. They are fetched from serve lazily by the poll
+	// loop (retry-until-success, #160) rather than once at startup, so a co-start
+	// race where serve's admin endpoint isn't up yet self-recovers instead of
+	// leaving Change-sender permanently off. idMu guards them because the poll
+	// goroutine now writes them while the callback goroutine (identityKeyboard)
+	// reads them; identitiesLoaded stops the loop re-fetching once it has succeeded.
+	idMu             sync.RWMutex
+	identities       []admin.InboxIdentity
+	identitiesLoaded bool
 
 	mu          sync.Mutex
 	posted      map[string]bool     // sluice message ids already sent to the operator
@@ -145,14 +151,8 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	c.logger.Info("telegram client ready", "bot", me.Username, "operator", c.operatorID, "poll_interval", c.pollInterval.String())
 
-	// Fetch the configured inbox identities for the Change-sender picker (ADR 0023
-	// slice 5); best-effort — without them the gate simply omits Change.
-	if ids, ierr := c.admin.Inboxes(ctx); ierr != nil {
-		c.logger.Warn("telegram fetch inbox identities failed; change-sender disabled", "err", ierr)
-	} else {
-		c.identities = ids
-	}
-
+	// The Change-sender identities are fetched by the poll loop (#160), not here, so
+	// a not-yet-ready serve at co-start is retried rather than fatal to Change-sender.
 	go c.pollLoop(ctx)
 	c.bot.Start(ctx) // long-poll loop; returns when ctx is cancelled
 	return nil
@@ -161,17 +161,55 @@ func (c *Client) Run(ctx context.Context) error {
 func (c *Client) pollLoop(ctx context.Context) {
 	t := time.NewTicker(c.pollInterval)
 	defer t.Stop()
-	c.poll(ctx) // post anything already pending at startup
+	c.ensureIdentities(ctx) // fetch the Change-sender identities (retries next tick if serve isn't up yet)
+	c.poll(ctx)             // post anything already pending at startup
 	c.pollHolds(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			c.ensureIdentities(ctx)
 			c.poll(ctx)
 			c.pollHolds(ctx)
 		}
 	}
+}
+
+// ensureIdentities fetches the configured inbox send identities for the
+// Change-sender picker (ADR 0023 slice 5) once, from the poll loop. It is a no-op
+// after the first success; before that, every poll cycle retries — mirroring how
+// poll/pollHolds already tolerate a not-yet-listening serve — so a co-start race
+// (telegram up before serve's admin endpoint) self-recovers on the next tick
+// instead of leaving Change-sender off until a manual restart (#160). A failed
+// fetch logs at debug (the loop retries) rather than warning every cycle.
+func (c *Client) ensureIdentities(ctx context.Context) {
+	c.idMu.RLock()
+	loaded := c.identitiesLoaded
+	c.idMu.RUnlock()
+	if loaded {
+		return
+	}
+	ids, err := c.admin.Inboxes(ctx)
+	if err != nil {
+		c.logger.Debug("telegram inbox identities not ready yet; will retry", "err", err)
+		return
+	}
+	c.idMu.Lock()
+	c.identities = ids
+	c.identitiesLoaded = true
+	c.idMu.Unlock()
+	c.logger.Info("telegram change-sender identities loaded", "count", len(ids))
+}
+
+// inboxIdentities returns the fetched Change-sender identities under the read lock
+// (the poll loop writes them, the callback goroutine reads them, #160). The slice
+// is replaced wholesale on load and never mutated in place, so the returned header
+// is safe to range without holding the lock.
+func (c *Client) inboxIdentities() []admin.InboxIdentity {
+	c.idMu.RLock()
+	defer c.idMu.RUnlock()
+	return c.identities
 }
 
 // poll lists the queue and notifies the operator of each new pending message.
@@ -444,7 +482,7 @@ func (c *Client) decisionKeyboard(id string) models.InlineKeyboardMarkup {
 	rows := [][]models.InlineKeyboardButton{
 		{{Text: "Approve", CallbackData: cbApprove + id}},
 	}
-	if len(c.identities) >= 2 {
+	if len(c.inboxIdentities()) >= 2 {
 		rows = append(rows, []models.InlineKeyboardButton{{Text: "Change sender", CallbackData: cbChange + id}})
 	}
 	rows = append(rows, []models.InlineKeyboardButton{
@@ -458,8 +496,9 @@ func (c *Client) decisionKeyboard(id string) models.InlineKeyboardMarkup {
 // identity (approve-and-send as that identity), plus a Back to the decision
 // buttons (ADR 0023 slice 5).
 func (c *Client) identityKeyboard(id string) models.InlineKeyboardMarkup {
-	rows := make([][]models.InlineKeyboardButton, 0, len(c.identities)+1)
-	for _, in := range c.identities {
+	ids := c.inboxIdentities()
+	rows := make([][]models.InlineKeyboardButton, 0, len(ids)+1)
+	for _, in := range ids {
 		rows = append(rows, []models.InlineKeyboardButton{
 			{Text: in.Identity, CallbackData: cbApproveAs + in.Name + ":" + id},
 		})
