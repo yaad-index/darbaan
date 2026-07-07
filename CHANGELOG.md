@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/yaad-index/darbaan/compare/v0.10.0...v0.10.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* **telegram:** retry Change-sender identity fetch in the poll loop ([#160](https://github.com/yaad-index/darbaan/issues/160)) ([#180](https://github.com/yaad-index/darbaan/issues/180)) ([e5dce5f](https://github.com/yaad-index/darbaan/commit/e5dce5f9a2c28a2a4207dcda25dd599499f39721))
+
 ## [0.10.0](https://github.com/yaad-index/darbaan/compare/v0.9.0...v0.10.0) (2026-07-04)
 
 
