@@ -9,9 +9,12 @@
 // immediately; either Reject first prompts (force-reply) for a reason that
 // becomes the DSN bounce reason. It also polls the INBOUND hold-for-human queue
 // (ADR 0021) and posts each held message with an [Expose] / [Drop] keyboard —
-// Expose reveals it to the agent, Drop keeps it hidden (see holds.go). Only the
-// configured operator may decide (ADR 0002) — every tap and reply is gated to
-// them.
+// Expose reveals it to the agent, Drop keeps it hidden (see holds.go). It also
+// pushes a proactive alert when the reconcile safety cap latches an inbox
+// (ADR 0026, #149), so a suspended inbox — reconciliation paused pending an
+// operator release — is not missed on the pull-only status surface (see
+// reconcile.go). Only the configured operator may decide (ADR 0002) — every tap
+// and reply is gated to them.
 package telegram
 
 import (
@@ -67,10 +70,11 @@ type Client struct {
 	identities       []admin.InboxIdentity
 	identitiesLoaded bool
 
-	mu          sync.Mutex
-	posted      map[string]bool     // sluice message ids already sent to the operator
-	postedHolds map[string]bool     // inbound-hold ids already sent (separate id space)
-	pending     map[int]rejectState // reject reason prompts awaiting the operator's reply, keyed by prompt message id
+	mu            sync.Mutex
+	posted        map[string]bool     // sluice message ids already sent to the operator
+	postedHolds   map[string]bool     // inbound-hold ids already sent (separate id space)
+	postedLatches map[string]bool     // reconcile-latched inbox names already alerted (#149); cleared on un-suspend so a re-latch re-notifies
+	pending       map[int]rejectState // reject reason prompts awaiting the operator's reply, keyed by prompt message id
 }
 
 // SetLogger injects the structured logger for the Telegram client (#151);
@@ -117,14 +121,15 @@ func New(token string, operatorID int64, pollInterval time.Duration, adminClient
 		return nil, fmt.Errorf("telegram: init bot: %w", err)
 	}
 	c := &Client{
-		bot:          b,
-		admin:        adminClient,
-		operatorID:   operatorID,
-		pollInterval: pollInterval,
-		logger:       slog.Default(),
-		posted:       make(map[string]bool),
-		postedHolds:  make(map[string]bool),
-		pending:      make(map[int]rejectState),
+		bot:           b,
+		admin:         adminClient,
+		operatorID:    operatorID,
+		pollInterval:  pollInterval,
+		logger:        slog.Default(),
+		posted:        make(map[string]bool),
+		postedHolds:   make(map[string]bool),
+		postedLatches: make(map[string]bool),
+		pending:       make(map[int]rejectState),
 	}
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbApprove, bot.MatchTypePrefix, c.handleApprove)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbRejectPerm, bot.MatchTypePrefix, c.handleRejectPermanent)
@@ -164,6 +169,7 @@ func (c *Client) pollLoop(ctx context.Context) {
 	c.ensureIdentities(ctx) // fetch the Change-sender identities (retries next tick if serve isn't up yet)
 	c.poll(ctx)             // post anything already pending at startup
 	c.pollHolds(ctx)
+	c.pollReconcile(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -172,6 +178,7 @@ func (c *Client) pollLoop(ctx context.Context) {
 			c.ensureIdentities(ctx)
 			c.poll(ctx)
 			c.pollHolds(ctx)
+			c.pollReconcile(ctx)
 		}
 	}
 }
