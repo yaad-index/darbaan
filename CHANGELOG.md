@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/yaad-index/darbaan/compare/v0.10.1...v0.11.0) (2026-07-08)
+
+
+### Features
+
+* **telegram:** push a proactive alert on reconcile cap-latch ([#149](https://github.com/yaad-index/darbaan/issues/149)) ([#182](https://github.com/yaad-index/darbaan/issues/182)) ([bea9c91](https://github.com/yaad-index/darbaan/commit/bea9c91bb267f17f95d8d8c51847906ea14f3692))
+
 ## [0.10.1](https://github.com/yaad-index/darbaan/compare/v0.10.0...v0.10.1) (2026-07-07)
 
 
