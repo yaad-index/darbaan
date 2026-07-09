@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -8,49 +9,114 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/yaad-index/darbaan/internal/admincfg"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
+// credential is one admin-API bearer credential (ADR 0029): the SHA-256 of its
+// full "Bearer <token>" header value (fixed-width, so the constant-time compare
+// can never leak token length) and the set of scopes it grants.
+type credential struct {
+	hash   [32]byte
+	scopes map[string]bool
+}
+
 // Server is the localhost-only HTTP admin API. It is the operator's approval
 // surface; it must be bound to loopback (or kept container-internal) and is
-// reachable only with the bearer token — never by the agent (ADR 0002).
+// reachable only with a bearer credential — never by the agent (ADR 0002). Each
+// credential carries a scope set (ADR 0029): the single root token grants every
+// scope; per-client tokens grant a least-privilege subset.
 type Server struct {
 	svc   *Service
-	token string
+	creds []credential
 	http  *http.Server
 }
 
+// ScopedClient is a named admin client's token + granted scopes (ADR 0029),
+// supplied by the serve wiring from the configured admin_clients.
+type ScopedClient struct {
+	Name   string
+	Token  string
+	Scopes []string
+}
+
 // NewServer builds the admin server. It fails closed: an empty token is refused
-// rather than expose an unauthenticated admin API.
+// rather than expose an unauthenticated admin API. The token is the full-scope
+// root credential (ADR 0029) — the back-compat single-token behavior when no
+// scoped clients are added; SetScopedClients adds least-privilege clients.
 func NewServer(addr, token string, svc *Service) (*Server, error) {
 	if token == "" {
 		return nil, errors.New("admin: a token is required (no unauthenticated admin API); set DARBAAN_ADMIN_TOKEN")
 	}
-	s := &Server{svc: svc, token: token}
+	s := &Server{svc: svc}
+	s.creds = append(s.creds, credential{
+		hash:   hashBearer(token),
+		scopes: scopeSet(admincfg.AllScopes()),
+	})
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /queue", s.auth(s.handleList))
-	mux.HandleFunc("GET /queue/{id}", s.auth(s.handleShow))
-	mux.HandleFunc("POST /queue/{id}/approve", s.auth(s.handleApprove))
-	mux.HandleFunc("POST /queue/{id}/approve-as/{inbox}", s.auth(s.handleApproveAs))
-	mux.HandleFunc("POST /queue/{id}/reject", s.auth(s.handleReject))
+	s.register(mux, "GET /queue", s.handleList)
+	s.register(mux, "GET /queue/{id}", s.handleShow)
+	s.register(mux, "POST /queue/{id}/approve", s.handleApprove)
+	s.register(mux, "POST /queue/{id}/approve-as/{inbox}", s.handleApproveAs)
+	s.register(mux, "POST /queue/{id}/reject", s.handleReject)
 
 	// Configured inbox identities for the Change-sender picker (ADR 0023 slice 5).
-	mux.HandleFunc("GET /inboxes", s.auth(s.handleInboxes))
+	s.register(mux, "GET /inboxes", s.handleInboxes)
 
 	// Inbound hold-for-human queue (ADR 0021): expose = show to the agent, drop =
 	// keep hidden.
-	mux.HandleFunc("GET /holds", s.auth(s.handleHeldList))
-	mux.HandleFunc("POST /holds/{id}/expose", s.auth(s.handleExpose))
-	mux.HandleFunc("POST /holds/{id}/drop", s.auth(s.handleDrop))
+	s.register(mux, "GET /holds", s.handleHeldList)
+	s.register(mux, "POST /holds/{id}/expose", s.handleExpose)
+	s.register(mux, "POST /holds/{id}/drop", s.handleDrop)
 
 	// Reconcile safety-cap controls (ADR 0026): list held inboxes, release one.
-	mux.HandleFunc("GET /reconcile", s.auth(s.handleReconcileStatus))
-	mux.HandleFunc("POST /reconcile/{inbox}/release", s.auth(s.handleReconcileRelease))
+	s.register(mux, "GET /reconcile", s.handleReconcileStatus)
+	s.register(mux, "POST /reconcile/{inbox}/release", s.handleReconcileRelease)
 
 	s.http = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
+}
+
+// SetScopedClients registers the configured per-client scoped credentials
+// (ADR 0029). It is called once at setup, before serving; the root token stays as
+// break-glass. A client whose token is empty (its secret was not supplied) is
+// skipped.
+func (s *Server) SetScopedClients(clients []ScopedClient) {
+	for _, c := range clients {
+		if c.Token == "" {
+			continue
+		}
+		s.creds = append(s.creds, credential{
+			hash:   hashBearer(c.Token),
+			scopes: scopeSet(c.Scopes),
+		})
+	}
+}
+
+// hashBearer is the fixed-width hash of a token's full Authorization header value.
+func hashBearer(token string) [32]byte { return sha256.Sum256([]byte("Bearer " + token)) }
+
+// scopeSet builds a lookup set from a scope list.
+func scopeSet(scopes []string) map[string]bool {
+	m := make(map[string]bool, len(scopes))
+	for _, sc := range scopes {
+		m[sc] = true
+	}
+	return m
+}
+
+// register wires a route with the required scope from the authoritative
+// route→scope map (ADR 0029). It panics if the route has no mapped scope — a
+// build-wiring error (a new admin route must ship with its scope in
+// admincfg.RouteScopes), which enforces the map↔routes invariant.
+func (s *Server) register(mux *http.ServeMux, pattern string, h http.HandlerFunc) {
+	scope, ok := admincfg.RouteScopes[pattern]
+	if !ok {
+		panic("admin: route " + pattern + " has no required scope in admincfg.RouteScopes")
+	}
+	mux.HandleFunc(pattern, s.scoped(scope, h))
 }
 
 // ListenAndServe binds Addr and serves until Close.
@@ -62,16 +128,41 @@ func (s *Server) Serve(l net.Listener) error { return s.http.Serve(l) }
 // Close stops the server.
 func (s *Server) Close() error { return s.http.Close() }
 
-func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
-	want := []byte("Bearer " + s.token)
+// scoped gates a handler on a required scope (ADR 0029): it resolves the
+// presented bearer to a credential, then authorizes the scope. An unrecognized
+// token is 401 Unauthorized; a recognized token lacking the scope is 403
+// Forbidden — a distinct, clearer signal than a blanket 401.
+func (s *Server) scoped(required string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		got := []byte(r.Header.Get("Authorization"))
-		if subtle.ConstantTimeCompare(got, want) != 1 {
+		cred, ok := s.resolve(r.Header.Get("Authorization"))
+		if !ok {
 			writeErr(w, http.StatusUnauthorized, errors.New("unauthorized"))
+			return
+		}
+		if !cred.scopes[required] {
+			writeErr(w, http.StatusForbidden, errors.New("forbidden: missing scope "+required))
 			return
 		}
 		next(w, r)
 	}
+}
+
+// resolve matches a presented Authorization header value to a configured
+// credential (ADR 0029). It hashes the value to a fixed width and constant-time-
+// compares against every credential with NO early exit, so timing reveals neither
+// which credential matched nor whether one did — the same no-oracle discipline as
+// the ADR 0027 agent Verify.
+func (s *Server) resolve(authHeader string) (credential, bool) {
+	got := sha256.Sum256([]byte(authHeader))
+	var found credential
+	matched := 0
+	for _, c := range s.creds {
+		if subtle.ConstantTimeCompare(got[:], c.hash[:]) == 1 {
+			found = c
+			matched = 1
+		}
+	}
+	return found, matched == 1
 }
 
 func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {

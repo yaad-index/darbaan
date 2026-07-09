@@ -60,16 +60,17 @@ var RouteScopes = map[string]string{
 	"GET /inboxes":                        ScopeInboxesRead,
 }
 
-// allScopes is the set of valid scopes, derived once from the vocabulary.
-var allScopes = map[string]bool{
-	ScopeQueueRead:        true,
-	ScopeQueueDecide:      true,
-	ScopeHoldsRead:        true,
-	ScopeHoldsDecide:      true,
-	ScopeReconcileRead:    true,
-	ScopeReconcileRelease: true,
-	ScopeInboxesRead:      true,
-}
+// allScopes is the set of valid scopes, derived from the RouteScopes values so it
+// cannot drift from the routes it gates: a scope is valid iff some route requires
+// it. RouteScopes is therefore the single hand-maintained list; the Scope*
+// constants only name the values it (and callers) use.
+var allScopes = func() map[string]bool {
+	m := make(map[string]bool, len(RouteScopes))
+	for _, s := range RouteScopes {
+		m[s] = true
+	}
+	return m
+}()
 
 // AllScopes returns every scope in the vocabulary, sorted — the full-scope set an
 // implicit or explicit root client is granted.
