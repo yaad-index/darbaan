@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.12.0](https://github.com/yaad-index/darbaan/compare/v0.11.0...v0.12.0) (2026-07-09)
+
+
+### Features
+
+* **admincfg:** admin_clients config schema + scope vocabulary (ADR 0029 slice 1) ([#185](https://github.com/yaad-index/darbaan/issues/185)) ([1eec69d](https://github.com/yaad-index/darbaan/commit/1eec69dae8a2cf552ce85e5d71e615a0a770b154))
+* **admin:** enforce per-client scopes in the auth middleware (ADR 0029 slice 2) ([#187](https://github.com/yaad-index/darbaan/issues/187)) ([c9fad8e](https://github.com/yaad-index/darbaan/commit/c9fad8e1e2328eeda37d02dce53c81769153192a))
+* **admin:** wire scoped admin clients + docs + finalize ADR 0029 ([#59](https://github.com/yaad-index/darbaan/issues/59)) ([#188](https://github.com/yaad-index/darbaan/issues/188)) ([d9d3e0e](https://github.com/yaad-index/darbaan/commit/d9d3e0e5e446d983233117daed28d4f124244396))
+
 ## [0.11.0](https://github.com/yaad-index/darbaan/compare/v0.10.1...v0.11.0) (2026-07-08)
 
 
