@@ -52,6 +52,11 @@ into the core:
 - **CLI** — `darbaan queue …` lists and decides held messages.
 - **Telegram** — approve or reject from your phone (setup in [INSTALL.md](INSTALL.md)).
 
+Each client authenticates with a bearer token. By default that's a single shared
+`DARBAAN_ADMIN_TOKEN`; optionally, give each client its own least-privilege,
+independently-revocable token via `admin_clients:` (see `config.example.yaml` and
+adr/0029).
+
 ## Install / run
 
 Darbaan is a single Go binary; the easiest deployment is Docker Compose. See

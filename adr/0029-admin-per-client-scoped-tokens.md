@@ -1,6 +1,6 @@
 # ADR 0029: Admin API — per-client scoped, independently-revocable tokens
 
-**Status:** Proposed (2026-07-09)
+**Status:** Accepted (2026-07-09)
 
 ## Context
 
@@ -85,11 +85,13 @@ A client's token grants exactly its listed scopes. Least-privilege examples:
 
 The `auth` middleware resolves `Bearer <token>` to a client + scopes, then
 authorizes the route's required scope. Resolution is **constant-time**: the
-presented token is compared against every configured token with
-`subtle.ConstantTimeCompare` and no early exit, and the same comparison work runs
-on an unknown token (the miss path is equalized), so timing never reveals which —
-or whether — a token matched. This is the same no-oracle discipline as ADR 0027's
-`Verify`. An unrecognized token is `401 Unauthorized`; a recognized token that
+presented header value is hashed to a **fixed width** (SHA-256) and compared
+against every configured credential's hash with `subtle.ConstantTimeCompare` and
+no early exit. Hashing first is load-bearing — `ConstantTimeCompare` short-
+circuits on unequal lengths, so comparing raw tokens would leak length; equal-
+width hashes remove that. The full loop runs on an unknown token too (the miss
+path is equalized), so timing never reveals which — or whether — a token matched.
+This is the same no-oracle discipline as ADR 0027's `Verify`. An unrecognized token is `401 Unauthorized`; a recognized token that
 **lacks** the route's scope is `403 Forbidden` (a distinct, clearer signal than a
 blanket 401).
 
