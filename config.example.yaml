@@ -63,6 +63,31 @@ imap-addr: ":1143"
 # (required — serve fails closed without it), never inlined here.
 admin-addr: "127.0.0.1:1144"
 
+# --- Per-client scoped admin tokens (optional; ADR 0029) ---------------------
+# By default DARBAAN_ADMIN_TOKEN is a single full-capability token every admin
+# interface shares. To give each interface its own least-privilege, independently
+# revocable credential, list them under `admin_clients:`. Each client's token
+# comes from DARBAAN_ADMIN_TOKEN_<NAME> (name uppercased, non-alphanumerics ->
+# '_'), never inlined (ADR 0012). Scopes are per route, least-privilege:
+#   queue:read / queue:decide, holds:read / holds:decide,
+#   reconcile:read / reconcile:release, inboxes:read.
+# Revoke one client by unsetting its token env and restarting; the others are
+# unaffected. A client whose token env is unset is skipped with a startup warning.
+#
+# DARBAAN_ADMIN_TOKEN stays the full-scope ROOT (break-glass) — and it is the
+# credential the `darbaan queue|holds|reconcile` CLI uses by default, so no config
+# change is needed to keep the CLI working. Put the CLI on its own revocable
+# credential only if you want to: add a named client granted every scope and point
+# the CLI's DARBAAN_ADMIN_TOKEN at that token instead of the root.
+#
+# admin_clients:
+#   - name: telegram        # the approval bot: decide on mail + read the latch alert (#149)
+#     scopes: [queue:read, queue:decide, holds:read, holds:decide, reconcile:read]
+#     # token from DARBAAN_ADMIN_TOKEN_TELEGRAM
+#   - name: pre-screener    # read-only: inspects but never decides
+#     scopes: [queue:read, holds:read]
+#     # token from DARBAAN_ADMIN_TOKEN_PRE_SCREENER
+
 # The agent's Darbaan SMTP username. The password is NOT configured here: it is
 # supplied out-of-band via DARBAAN_AGENT_PASS, a reference to the encrypted
 # store (ADR 0012). Secrets are never inlined in config.

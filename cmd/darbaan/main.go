@@ -30,6 +30,7 @@ import (
 	"github.com/alecthomas/kong"
 
 	"github.com/yaad-index/darbaan/internal/admin"
+	"github.com/yaad-index/darbaan/internal/admincfg"
 	"github.com/yaad-index/darbaan/internal/agentcfg"
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
@@ -298,6 +299,41 @@ func (c *CLI) resolvePrincipals(inboxes []inboxcfg.Inbox) (principalWiring, erro
 		mailOwner:  func(inbox string) string { return inbound.NormInbox(inbox) },
 		decoupled:  true,
 	}, nil
+}
+
+// resolveAdminClients resolves the configured admin_clients (ADR 0029): the
+// `admin_clients:` list, each a named admin-API credential whose token is read
+// from DARBAAN_ADMIN_TOKEN_<NAME> (never in config, ADR 0012). A client whose
+// token env is unset is logged and skipped — its scoped access stays disabled,
+// surfaced as a startup warning rather than a silent 401 at request time. With no
+// `admin_clients:` it returns nil, so the single DARBAAN_ADMIN_TOKEN root is the
+// only credential (back-compat).
+func (c *CLI) resolveAdminClients() ([]admin.ScopedClient, error) {
+	data, err := c.configBytes()
+	if err != nil {
+		return nil, err
+	}
+	clients, err := admincfg.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(clients) == 0 {
+		return nil, nil
+	}
+	if err := admincfg.Validate(clients); err != nil {
+		return nil, err
+	}
+	out := make([]admin.ScopedClient, 0, len(clients))
+	for _, cl := range clients {
+		env := admincfg.TokenEnv(cl.Name)
+		token := os.Getenv(env)
+		if token == "" {
+			slog.Warn("admin client has no token; its scoped access is disabled", "client", cl.Name, "env", env)
+			continue
+		}
+		out = append(out, admin.ScopedClient{Name: cl.Name, Token: token, Scopes: cl.Scopes})
+	}
+	return out, nil
 }
 
 // openInbound opens the inbound (served mailbox) store per config.
@@ -824,6 +860,16 @@ func (*ServeCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
+
+	// Per-client scoped admin tokens (ADR 0029): register each configured
+	// admin_client's token + least-privilege scopes. DARBAAN_ADMIN_TOKEN stays the
+	// full-scope root (break-glass, and the credential the CLI uses by default);
+	// with no admin_clients: it is the only credential (back-compat).
+	adminClients, err := cli.resolveAdminClients()
+	if err != nil {
+		return err
+	}
+	adminSrv.SetScopedClients(adminClients)
 
 	// Resolve the configured inboxes (ADR 0023): a config with no inboxes: is one
 	// implicit "default" inbox built from the legacy top-level flags, so a
