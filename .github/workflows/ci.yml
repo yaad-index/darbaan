@@ -36,6 +36,13 @@ jobs:
             exit 1
           fi
 
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          # Pin the linter version so CI matches the local run (same reasoning as
+          # go-version-file above); Dependabot bumps it deliberately.
+          version: v2.11.4
+
       - name: Test
         # -race: the listener + bbolt code is concurrent, so the gate runs the
         # race detector.
