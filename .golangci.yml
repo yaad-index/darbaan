@@ -1,0 +1,13 @@
+# House linter config (golangci-lint v2). The linter version is pinned in
+# .github/workflows/ci.yml so CI and local runs match; Dependabot bumps it.
+version: "2"
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - misspell
+  settings:
+    misspell:
+      ignore-rules:
+        # "teh" is the Unicode letter name "teh marbuta" (ة, U+0629), not a typo of "the".
+        - teh
