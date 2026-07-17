@@ -214,6 +214,52 @@ func TestIMAPFetchResolvesPendingOnDemand(t *testing.T) {
 	assert.False(t, got.Pending) // cached present after the on-demand fetch
 }
 
+// #190: a BODY[] fetch whose content is unresolvable (a stale upstream mapping)
+// must NOT hang or error — it serves an empty body and completes, so the client
+// proceeds. Critically, one poisoned UID must not stall the rest of the range.
+func TestIMAPFetchContentUnavailableServesEmpty(t *testing.T) {
+	store := seedInbound(t) // present bounce at seq 1
+	_, m, err := store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "gone", UpstreamUID: 7239, UIDValidity: 1,
+	})
+	require.NoError(t, err) // pending record at seq 2
+
+	fetch := func(owner, inbox, id string) (inbound.Message, error) {
+		if id == m.ID {
+			return inbound.Message{}, inbound.ErrContentUnavailable // stale mapping
+		}
+		return store.Get(owner, inbound.DefaultInbox, id)
+	}
+
+	c, err := imapclient.DialInsecure(startIMAPWithFetch(t, store, fetch), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	_, err = c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+
+	// BODY[] of the poisoned record completes cleanly with an empty body — the
+	// command returns, it does not hang or error.
+	msgs, err := c.Fetch(imap.SeqSetNum(2), &imap.FetchOptions{
+		UID:         true,
+		BodySection: []*imap.FetchItemBodySection{{}},
+	}).Collect()
+	require.NoError(t, err, "an unresolvable body completes, it does not error/hang")
+	require.Len(t, msgs, 1)
+	// A degenerate empty body (at most the section terminator), never the missing
+	// content or a hang.
+	assert.LessOrEqual(t, len(msgs[0].FindBodySection(&imap.FetchItemBodySection{})), 2, "an empty body is served")
+
+	// The whole range still returns both messages: one poisoned UID at the head
+	// does not stall the fetch of everything after it (the outage this fixes).
+	all, err := c.Fetch(imap.SeqSetNum(1, 2), &imap.FetchOptions{
+		UID:         true,
+		BodySection: []*imap.FetchItemBodySection{{}},
+	}).Collect()
+	require.NoError(t, err)
+	assert.Len(t, all, 2, "one unresolvable UID does not stall the whole fetch")
+}
+
 func TestIMAPFetchMarksSeenAndPersists(t *testing.T) {
 	store := seedInbound(t)
 	c, err := imapclient.DialInsecure(startIMAP(t, store), nil)

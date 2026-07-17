@@ -463,8 +463,17 @@ func (s *imapSession) rawResolver(m inbound.Message) rawFunc {
 		if !done {
 			done = true
 			var full inbound.Message
-			if full, err = s.fetch(m.Owner, s.selectedInbox, m.ID); err == nil {
+			switch full, err = s.fetch(m.Owner, s.selectedInbox, m.ID); {
+			case err == nil:
 				raw = full.Raw
+			case errors.Is(err, inbound.ErrContentUnavailable):
+				// The upstream content can't be resolved (a stale local→upstream UID
+				// mapping, #190). Serve an empty body rather than erroring: the FETCH
+				// response stays well-formed and the command completes, so one
+				// unresolvable UID can't stall the client's whole poll. The event is
+				// surfaced by the syncer at WARN and the stale mapping is dropped there;
+				// the message's stored ENVELOPE / SIZE / FLAGS still serve normally.
+				raw, err = nil, nil
 			}
 		}
 		return raw, err

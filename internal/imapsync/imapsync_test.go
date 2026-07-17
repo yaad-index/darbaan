@@ -231,6 +231,50 @@ func TestFetchContentStaleUIDValidity(t *testing.T) {
 
 	_, err = syncer.FetchContent("agent", inbound.DefaultInbox, m.ID)
 	require.Error(t, err)
+	// A mailbox reset is unresolvable-content, the clean-skip sentinel (#190) — the
+	// read face serves empty rather than hanging. It is NOT dropped here (a
+	// UIDVALIDITY change is reconcile's re-seed concern, not a per-message expunge).
+	assert.ErrorIs(t, err, inbound.ErrContentUnavailable)
+	_, gerr := store.Get("agent", inbound.DefaultInbox, m.ID)
+	assert.NoError(t, gerr, "a mailbox-reset record is not dropped on a single fetch")
+}
+
+// #190: FetchContent on a message whose upstream UID has vanished (expunged
+// upstream, local mapping stale) returns the ErrContentUnavailable sentinel AND
+// drops the dangling record + audits the retraction — the on-demand mirror of the
+// reconcile pass, so one poisoned UID can't stall an account's poll indefinitely.
+func TestFetchContentDropsVanishedMapping(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "From: a@x.test\r\nSubject: real\r\n\r\nbody")
+
+	store := newInbound(t)
+	aud := &captureAudit{}
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
+	syncer.SetAudit(aud)
+
+	n, err := syncer.Sync(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	msgs, err := store.List("agent", inbound.DefaultInbox)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	id, upUID := msgs[0].ID, msgs[0].UpstreamUID
+
+	// The upstream message is expunged: its UID vanishes, the local mapping stays.
+	expungeUID(t, addr, upUID)
+
+	_, ferr := syncer.FetchContent("agent", inbound.DefaultInbox, id)
+	require.Error(t, ferr)
+	assert.ErrorIs(t, ferr, inbound.ErrContentUnavailable, "unresolvable content is the clean-skip sentinel")
+
+	// The dangling record is dropped on detection, not left to poison future fetches.
+	_, gerr := store.Get("agent", inbound.DefaultInbox, id)
+	assert.ErrorIs(t, gerr, inbound.ErrNotFound, "the stale mapping is retracted")
+
+	// The retraction is audited, matching the reconcile trail.
+	require.Len(t, aud.recs, 1)
+	assert.Equal(t, "retract", aud.recs[0].Event)
+	assert.Equal(t, id, aud.recs[0].MessageID)
 }
 
 // A lost/reset sync cursor re-fetches everything, but the upstream-UID dedup
