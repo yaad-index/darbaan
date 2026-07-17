@@ -18,7 +18,7 @@ func TestNewSyncersPerInbox(t *testing.T) {
 		{Name: "personal", Backend: inboxcfg.Backend{IMAPHost: "imap.b.example:993"}},
 		{Name: "local-only"}, // no upstream host → skipped (no syncer)
 	}
-	syncers, stop, err := cli.newSyncers(inboxes, nil, func(inbox string) string { return inbox })
+	syncers, stop, err := cli.newSyncers(inboxes, nil, func(inbox string) string { return inbox }, nil)
 	require.NoError(t, err)
 	defer stop()
 	require.Len(t, syncers, 2)
@@ -65,7 +65,7 @@ func TestNewSendersPerInbox(t *testing.T) {
 func TestInboundSyncDisabledByDefault(t *testing.T) {
 	cli := &CLI{}
 	inboxes := []inboxcfg.Inbox{{Name: inbound.DefaultInbox}} // no backend host → no syncer
-	syncers, stop, err := cli.newSyncers(inboxes, nil, func(inbox string) string { return inbox })
+	syncers, stop, err := cli.newSyncers(inboxes, nil, func(inbox string) string { return inbox }, nil)
 	require.NoError(t, err)
 	require.Empty(t, syncers)
 	require.NotNil(t, stop)

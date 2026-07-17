@@ -415,7 +415,7 @@ func (cli *CLI) newSenders(inboxes []inboxcfg.Inbox) (map[string]backend.Sender,
 // backend host are skipped (no sync). The syncers share one sync-state store
 // (keyed per inbox internally); the returned stop func closes it. An empty map
 // means no inbox syncs (gated off, like the stub sender).
-func (cli *CLI) newSyncers(inboxes []inboxcfg.Inbox, store inbound.InboundStore, mailOwner func(inbox string) string) (map[string]*imapsync.Syncer, func(), error) {
+func (cli *CLI) newSyncers(inboxes []inboxcfg.Inbox, store inbound.InboundStore, mailOwner func(inbox string) string, al audit.AuditLog) (map[string]*imapsync.Syncer, func(), error) {
 	syncers := map[string]*imapsync.Syncer{}
 	var state imapsync.StateStore
 	stop := func() {
@@ -449,6 +449,10 @@ func (cli *CLI) newSyncers(inboxes []inboxcfg.Inbox, store inbound.InboundStore,
 		// Per-inbox structured logger (#151): every sync/reconcile record this
 		// syncer emits is tagged with its inbox.
 		syn.SetLogger(slog.Default().With("inbox", in.Name))
+		// On-demand retraction audit (#190): a content fetch that finds the upstream
+		// UID gone drops the stale mapping and records a "retract", same sink as the
+		// reconcile loop.
+		syn.SetAudit(al)
 		// Gmail label write-through (ADR 0020 20c): capability-gated, harmless on a
 		// non-Gmail backend (reports not-supported → WriteKeywords uses plain keywords).
 		syn.SetLabelStore(imapsync.RawGmailLabelStore(in.Backend.IMAPHost, in.Backend.IMAPUsername, pass, mailbox))
@@ -530,13 +534,10 @@ func (cli *CLI) runSyncLoop(ctx context.Context, inbox string, syncer *imapsync.
 }
 
 func runSync(ctx context.Context, inbox string, s *imapsync.Syncer) {
-	n, err := s.Sync(ctx)
-	if err != nil {
+	// Sync emits its own per-cycle summary (stored/watermark/uidvalidity, #190); the
+	// caller only needs to surface a hard failure.
+	if _, err := s.Sync(ctx); err != nil {
 		slog.Error("inbound sync failed", "inbox", inbox, "err", err)
-		return
-	}
-	if n > 0 {
-		slog.Info("inbound sync pulled messages", "inbox", inbox, "count", n)
 	}
 }
 
@@ -954,7 +955,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 	// One inbound syncer per inbox with an upstream (ADR 0019/0023), built before
 	// the read face so per-inbox FetchContent serves pending bodies on demand. An
 	// empty map = no inbox syncs.
-	syncers, stopSync, err := cli.newSyncers(inboxes, inbox, pw.mailOwner)
+	syncers, stopSync, err := cli.newSyncers(inboxes, inbox, pw.mailOwner, al)
 	if err != nil {
 		return err
 	}

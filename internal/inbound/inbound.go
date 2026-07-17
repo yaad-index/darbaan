@@ -16,6 +16,14 @@ import (
 // ErrNotFound is returned by Get when no message matches.
 var ErrNotFound = errors.New("inbound: message not found")
 
+// ErrContentUnavailable marks a message whose upstream content can't be resolved:
+// the local→upstream UID mapping is stale — the upstream message was expunged, or
+// the mailbox's UIDVALIDITY changed. It is a terminal "skip this cleanly" signal,
+// distinct from a transient/connection error. The IMAP read face serves an empty
+// body and completes the FETCH rather than hanging the client, so one unresolvable
+// UID can't stall a whole account's poll (#190).
+var ErrContentUnavailable = errors.New("inbound: message content unavailable")
+
 // Address is one parsed envelope address. It mirrors the IMAP envelope address
 // (name + mailbox@host) without importing the IMAP library, keeping the store
 // IMAP-type-free (ADR 0016).

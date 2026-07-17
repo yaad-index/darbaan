@@ -12,6 +12,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 
+	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/inbound"
 )
 
@@ -31,7 +32,14 @@ type Syncer struct {
 	maxAge     time.Duration  // recency cutoff; 0 = no cutoff (ADR 0008)
 	labelStore LabelStoreFunc // Gmail X-GM-LABELS writer; nil = plain keywords only (ADR 0020)
 	logger     *slog.Logger   // structured logger; defaults to slog.Default(), injectable via SetLogger
+	audit      audit.AuditLog // retract audit sink for on-demand stale-mapping drops (#190); nil = no audit
 }
+
+// SetAudit installs the audit sink for on-demand retractions — when a content
+// fetch finds the upstream UID gone, the stale mapping is dropped and a "retract"
+// record is appended, matching the reconcile loop's audit trail (#190 ask 2). nil
+// leaves the drop un-audited (still logged).
+func (s *Syncer) SetAudit(a audit.AuditLog) { s.audit = a }
 
 // SetLabelStore installs the Gmail X-GM-LABELS label writer (ADR 0020 20c). When
 // set, WriteKeywords replicates label changes via X-GM-LABELS on a Gmail backend
@@ -125,6 +133,12 @@ func (s *Syncer) Sync(ctx context.Context) (int, error) {
 	// Retry any label writes that failed their immediate upstream replicate
 	// (ADR 0020 best-effort write-through). Best-effort; never fails the sync.
 	s.reconcileKeywords()
+
+	// Per-cycle visibility (#190 ask 3): one summary line per account per sync, so a
+	// stalled or desynced inbox is obvious from the log without reading fetches
+	// line-by-line — how many new messages this cycle stored, the local UID
+	// watermark (the cursor), and the current UIDVALIDITY.
+	s.logger.Info("inbound sync cycle", "stored", stored, "watermark_uid", highest, "uidvalidity", sel.UIDValidity)
 	return stored, nil
 }
 
@@ -295,7 +309,13 @@ func (s *Syncer) FetchContent(owner, inbox, id string) (inbound.Message, error) 
 		return inbound.Message{}, fmt.Errorf("imapsync: select %q: %w", s.mailbox, err)
 	}
 	if sel.UIDValidity != m.UIDValidity {
-		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: mailbox reset (uidvalidity %d != %d)", id, sel.UIDValidity, m.UIDValidity)
+		// The mailbox was reset upstream: the whole UID space changed, so this
+		// mapping is stale. Don't drop a single record here — a UIDVALIDITY change is
+		// the reconcile loop's re-seed concern, not a per-message expunge. Surface it
+		// and let the read face serve empty rather than hang (#190).
+		s.logger.Warn("content unavailable: mailbox reset",
+			"id", id, "have_uidvalidity", m.UIDValidity, "upstream_uidvalidity", sel.UIDValidity)
+		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: mailbox reset (uidvalidity %d != %d): %w", id, sel.UIDValidity, m.UIDValidity, inbound.ErrContentUnavailable)
 	}
 
 	var set imap.UIDSet
@@ -323,7 +343,28 @@ func (s *Syncer) FetchContent(owner, inbox, id string) (inbound.Message, error) 
 		return inbound.Message{}, fmt.Errorf("imapsync: fetch content %s: %w", id, err)
 	}
 	if raw == nil {
-		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: upstream uid %d not found", id, m.UpstreamUID)
+		// The upstream UID is gone (expunged) while its local mapping survives — the
+		// exact stale mapping that hangs a client's fetch (#190). Drop it now so it
+		// can't poison future fetches, instead of waiting for the hourly reconcile
+		// pass; this mirrors the reconcile retraction (ADR 0026) at the moment of
+		// detection. Best-effort: even if the drop fails, return the sentinel so the
+		// read face serves empty and the client proceeds.
+		s.logger.Warn("content unavailable: upstream uid gone, dropping stale mapping",
+			"id", id, "upstream_uid", m.UpstreamUID)
+		if derr := s.store.RemoveSynced(owner, inbox, id); derr != nil {
+			s.logger.Error("could not drop stale mapping", "id", id, "upstream_uid", m.UpstreamUID, "err", derr)
+		} else if s.audit != nil {
+			// Best-effort audit, consistent with the reconcile retraction record; a
+			// failed append must not fail the already-committed drop (ADR 0011).
+			_ = s.audit.Append(audit.Record{
+				Event:     "retract",
+				Agent:     owner,
+				Inbox:     inbound.NormInbox(inbox),
+				MessageID: id,
+				Detail:    fmt.Sprintf("inbox=%s upstream_uid=%d content fetch found upstream uid gone", inbound.NormInbox(inbox), m.UpstreamUID),
+			})
+		}
+		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: upstream uid %d not found: %w", id, m.UpstreamUID, inbound.ErrContentUnavailable)
 	}
 	return s.store.SetContent(owner, inbox, id, raw)
 }
