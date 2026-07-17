@@ -2,6 +2,10 @@
 #
 #   1. cp .env.example .env   and fill DARBAAN_AGENT_PASS
 #   2. put TLS cert+key in ./secrets/tls/ and an ed25519 DKIM key in ./secrets/dkim/
+#      NOTE: the container runs as nonroot (uid 65532), so the mounted key files
+#      must be READABLE by that uid — a key created 0600 under your own host uid
+#      makes the container crash-loop on "permission denied". `chown 65532 <key>`
+#      (keeps 0600, readable only by the container) or `chmod 644 <key>` fixes it.
 #   3. docker compose up -d
 #
 # Safe by default: sender-type=stub, so the container sends NOTHING until you set
@@ -69,6 +73,8 @@ services:
       DARBAAN_INBOUND_IMAP_PASSWORD: "${DARBAAN_INBOUND_IMAP_PASSWORD:-}"
     volumes:
       - darbaan-data:/data # the three bbolt DBs (sluice / audit / inbound)
+      # The key files must be readable by the container's nonroot uid 65532 (see
+      # step 2 above) — otherwise startup crash-loops on "permission denied".
       - ./secrets/tls:/run/secrets/tls:ro # you provide cert.pem + key.pem
       - ./secrets/dkim:/run/secrets/dkim:ro # you provide dkim.pem (ed25519)
       # - ./config.yaml:/etc/darbaan/config.yaml:ro   # optional mounted config

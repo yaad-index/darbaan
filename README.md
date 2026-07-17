@@ -69,6 +69,8 @@ The short version:
 ```sh
 cp .env.example .env        # fill DARBAAN_AGENT_PASS, DARBAAN_ADMIN_TOKEN
 # put a TLS cert+key in ./secrets/tls/ and an ed25519 DKIM key in ./secrets/dkim/
+# the container runs as nonroot (uid 65532) — make the mounted key files readable
+# by it (`chown 65532 <key>`, keeps 0600) or startup fails with "permission denied"
 docker compose up -d
 ```
 

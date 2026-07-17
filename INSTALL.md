@@ -67,6 +67,21 @@ Extract the public key with:
 openssl pkey -in secrets/dkim/dkim.pem -pubout -outform DER | tail -c 32 | base64
 ```
 
+### Key-file permissions (nonroot container)
+
+The container runs as a **nonroot** user (uid 65532), so every mounted key file —
+`secrets/tls/key.pem` and `secrets/dkim/dkim.pem` — must be **readable by that
+uid**. A key generated `0600` under your own host uid makes the container
+crash-loop on `permission denied` at startup. Make the keys readable by the
+container:
+
+```sh
+# keeps 0600, readable only by the container's uid (needs sudo to chown to a uid you don't own)
+sudo chown 65532 secrets/tls/key.pem secrets/dkim/dkim.pem
+# or, without sudo — readable by anyone on the host, which is fine inside ./secrets:
+chmod 644 secrets/tls/key.pem secrets/dkim/dkim.pem
+```
+
 ## 4. Configure `.env`
 
 ```sh
