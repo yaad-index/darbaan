@@ -74,6 +74,18 @@ func (s *Syncer) stateKey() string {
 	return s.inbox + "\x00" + s.mailbox
 }
 
+// Watermark returns this account's persisted sync cursor — the mailbox UIDVALIDITY
+// and the highest synced UID — for health reporting (#195). It reads the local
+// state store only (no upstream contact), so it is cheap to call after each sync
+// cycle. Before the first successful sync both are zero.
+func (s *Syncer) Watermark() (uidValidity, lastUID uint32, err error) {
+	st, err := s.state.Load(s.stateKey())
+	if err != nil {
+		return 0, 0, err
+	}
+	return st.UIDValidity, st.LastUID, nil
+}
+
 // Dialer is the production DialFunc: TLS-connect to addr and log in with the
 // Darbaan-held upstream credentials. The engine is tested with an injected
 // DialFunc against an in-process server.

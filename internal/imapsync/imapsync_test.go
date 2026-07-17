@@ -141,6 +141,30 @@ func TestSyncPullsIncrementally(t *testing.T) {
 	assert.Len(t, msgs, 3)
 }
 
+// Watermark reports the persisted sync cursor (UIDVALIDITY + highest synced UID)
+// for health reporting (#195): zero before the first sync, advanced afterward.
+func TestSyncerWatermark(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "Subject: a\r\n\r\nx")
+	appendMsg(t, user, "Subject: b\r\n\r\ny")
+
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
+
+	uidv, last, err := syncer.Watermark()
+	require.NoError(t, err)
+	assert.Zero(t, uidv)
+	assert.Zero(t, last)
+
+	_, err = syncer.Sync(context.Background())
+	require.NoError(t, err)
+
+	uidv, last, err = syncer.Watermark()
+	require.NoError(t, err)
+	assert.NotZero(t, uidv, "UIDVALIDITY is set after the first sync")
+	assert.Equal(t, uint32(2), last, "watermark advanced to the highest synced UID")
+}
+
 func TestSyncTagsInbox(t *testing.T) {
 	addr, user := startUpstream(t)
 	appendMsg(t, user, "From: a@x.test\r\nSubject: w\r\n\r\nbody")

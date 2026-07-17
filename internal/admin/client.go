@@ -195,6 +195,23 @@ func (c *Client) ReconcileStatus(ctx context.Context) ([]ReconcileStatus, error)
 	return st, nil
 }
 
+// SyncStatus reports each fronted account's inbound-sync health (#195).
+func (c *Client) SyncStatus(ctx context.Context) ([]SyncStatus, error) {
+	resp, err := c.request(ctx, http.MethodGet, "/sync-status", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errorFrom(resp)
+	}
+	var st []SyncStatus
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
 // ReleaseReconcile releases a latched inbox — confirm the large retraction and
 // resume reconciliation (ADR 0026).
 func (c *Client) ReleaseReconcile(ctx context.Context, inbox string) (ReconcileReleaseResult, error) {
