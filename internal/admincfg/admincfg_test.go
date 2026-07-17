@@ -70,7 +70,7 @@ func TestValidate(t *testing.T) {
 
 func TestAllScopesAndValidScope(t *testing.T) {
 	all := admincfg.AllScopes()
-	assert.Len(t, all, 7)
+	assert.Len(t, all, 8)
 	for _, s := range all {
 		assert.True(t, admincfg.ValidScope(s))
 	}
@@ -94,6 +94,7 @@ func TestRouteScopesComplete(t *testing.T) {
 		"GET /reconcile",
 		"POST /reconcile/{inbox}/release",
 		"GET /inboxes",
+		"GET /sync-status",
 	}
 	assert.Len(t, admincfg.RouteScopes, len(wantRoutes), "no extra/missing routes")
 	for _, r := range wantRoutes {

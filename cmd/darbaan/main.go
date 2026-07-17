@@ -85,6 +85,7 @@ type CLI struct {
 	InboundIMAPUsername     string        `name:"inbound-imap-username" help:"Upstream IMAP username for the sync."`
 	InboundIMAPMailbox      string        `name:"inbound-imap-mailbox" default:"INBOX" help:"Upstream mailbox to sync."`
 	InboundIMAPPollInterval time.Duration `name:"inbound-imap-poll-interval" default:"60s" help:"How often to poll the upstream mailbox for new mail."`
+	SyncStallThreshold      int           `name:"sync-stall-threshold" default:"3" help:"Consecutive failed sync cycles before an account is flagged stalled (loud ERROR + sync-status). Minimum 1."`
 	InboundSyncDB           string        `name:"inbound-sync-db" default:"darbaan-sync.db" help:"Path to the inbound sync-state (UIDVALIDITY + last UID) database." type:"path"`
 	InboundMaxAge           string        `name:"inbound-max-age" help:"Recency cutoff for the initial/full sync, e.g. 1y, 30d, 12h (ADR 0008). Empty = no cutoff (pull everything). Forward-only: widening it later needs a re-sync."`
 	InboundFilter           string        `name:"inbound-filter" help:"Path to the inbound filter rules (YAML, ADR 0021): serve-time allow/hide over synced mail. Empty = no filter (allow all)." type:"path"`
@@ -107,6 +108,7 @@ type CLI struct {
 	Queue      QueueCmd      `cmd:"" help:"Inspect and decide held messages (via the running serve's admin API)."`
 	Holds      HoldsCmd      `cmd:"" help:"Inspect and decide inbound messages held for a human (ADR 0021)."`
 	Reconcile  ReconcileCmd  `cmd:"" help:"Inspect and release inboxes held by the reconcile safety cap (ADR 0026)."`
+	SyncStatus SyncStatusCmd `cmd:"" name:"sync-status" help:"Report each fronted account's inbound-sync health (via the running serve's admin API)."`
 	Filter     FilterCmd     `cmd:"" help:"Inspect the inbound filter without starting serve (ADR 0021/0022)."`
 	Telegram   TelegramCmd   `cmd:"" help:"Run the Telegram approval client (a separate admin-API client process)."`
 	DkimPubkey DkimPubkeyCmd `cmd:"" name:"dkim-pubkey" help:"Print the DKIM public-key record to pin to the agent."`
@@ -518,27 +520,48 @@ func imapKeywordWriter(syncers map[string]*imapsync.Syncer) listener.KeywordWrit
 // runSyncLoop polls one inbox's upstream on the configured interval until ctx is
 // cancelled. Sync errors are logged, never fatal — a flaky or unreachable
 // upstream must not take down serve.
-func (cli *CLI) runSyncLoop(ctx context.Context, inbox string, syncer *imapsync.Syncer) {
+func (cli *CLI) runSyncLoop(ctx context.Context, inbox string, syncer *imapsync.Syncer, health *syncHealth) {
 	slog.Info("inbound sync loop started", "inbox", inbox, "interval", cli.InboundIMAPPollInterval.String())
 	t := time.NewTicker(cli.InboundIMAPPollInterval)
 	defer t.Stop()
-	runSync(ctx, inbox, syncer) // initial pull at startup
+	runSync(ctx, inbox, syncer, health) // initial pull at startup
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			runSync(ctx, inbox, syncer)
+			runSync(ctx, inbox, syncer, health)
 		}
 	}
 }
 
-func runSync(ctx context.Context, inbox string, s *imapsync.Syncer) {
+// runSync runs one sync cycle and records its outcome in the health registry (#195).
+// On a persistent stall (consecutive errors crossing the threshold) it emits a
+// distinct high-severity event a downstream can alert on — the server-side
+// complement to the client-side fetch alert, catching a stall that never even
+// reaches a client.
+func runSync(ctx context.Context, inbox string, s *imapsync.Syncer, health *syncHealth) {
 	// Sync emits its own per-cycle summary (stored/watermark/uidvalidity, #190); the
-	// caller only needs to surface a hard failure.
+	// caller surfaces a hard failure and tracks per-account health.
 	if _, err := s.Sync(ctx); err != nil {
 		slog.Error("inbound sync failed", "inbox", inbox, "err", err)
+		if stalled, consec, since := health.recordFailure(inbox, err); stalled {
+			slog.Error("account sync stalled",
+				"inbox", inbox,
+				"consecutive_errors", consec,
+				"stalled_since", since.UTC().Format(time.RFC3339),
+				"last_error", err.Error())
+		}
+		return
 	}
+	// A successful cycle: record the fresh watermark (best-effort — a failed local
+	// read keeps the prior watermark rather than clobbering it).
+	uidValidity, watermark, werr := s.Watermark()
+	if werr != nil {
+		slog.Debug("could not read sync watermark for health", "inbox", inbox, "err", werr)
+		uidValidity = 0 // signals recordSuccess to keep the prior watermark
+	}
+	health.recordSuccess(inbox, uidValidity, watermark)
 }
 
 // DefaultSyncOnStatusInterval is the on-demand-sync debounce window for an inbox
@@ -692,6 +715,43 @@ func (*ReconcileStatusCmd) Run(cli *CLI) error {
 		fmt.Println("no inboxes are held by the reconcile safety cap")
 	}
 	return nil
+}
+
+// SyncStatusCmd reports each fronted account's inbound-sync health (#195): whether
+// it is syncing, since when, its error streak, and its UID watermark.
+type SyncStatusCmd struct{}
+
+func (*SyncStatusCmd) Run(cli *CLI) error {
+	client, err := cli.adminClient()
+	if err != nil {
+		return err
+	}
+	st, err := client.SyncStatus(context.Background())
+	if err != nil {
+		return err
+	}
+	if len(st) == 0 {
+		fmt.Fprintln(os.Stderr, "no inbound-sync accounts (no inbox has an upstream configured)")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "INBOX\tSTATE\tLAST SUCCESS\tERRORS\tUIDVALIDITY\tWATERMARK\tLAST ERROR")
+	for _, s := range st {
+		state := "ok"
+		switch {
+		case s.Stalled:
+			state = "STALLED"
+		case s.ConsecutiveErrors > 0:
+			state = "erroring"
+		}
+		last := s.LastSuccess
+		if last == "" {
+			last = "never"
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%s\n",
+			s.Inbox, state, last, s.ConsecutiveErrors, s.UIDValidity, s.WatermarkUID, s.LastError)
+	}
+	return w.Flush()
 }
 
 // ReconcileReleaseCmd releases a held inbox: the operator confirms the large
@@ -1002,6 +1062,14 @@ func (*ServeCmd) Run(cli *CLI) error {
 			},
 		)
 	}
+
+	// Per-account sync-health registry (#195): the sync loop records each cycle's
+	// outcome, the admin API reads a snapshot (GET /sync-status). Created even with
+	// no syncers so the endpoint always answers (an empty set), and shared with the
+	// per-inbox sync loops spawned below.
+	health := newSyncHealth(cli.SyncStallThreshold)
+	svc.SetSyncStatusReader(health.snapshot)
+
 	// The inbound bounce-spoof guard (ADR 0024) runs ahead of the user filter on
 	// both faces, verifying with the bounce signer's own key. On by default; an
 	// explicit opt-out is logged. on_spoof=hold-for-human routes spoofs to the
@@ -1036,7 +1104,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 		slog.Info("inbound sync disabled", "reason", "no inbox has an upstream configured")
 	}
 	for name, syn := range syncers {
-		go cli.runSyncLoop(ctx, name, syn)
+		go cli.runSyncLoop(ctx, name, syn, health)
 	}
 
 	// Per-inbox reconcile loops (ADR 0026): retract local copies of messages that

@@ -48,6 +48,10 @@ type Service struct {
 	// nil when no inbox has an upstream (nothing to reconcile).
 	reconcileRelease func(ctx context.Context, inbox string) (int, error)
 	reconcileStatus  func() ([]ReconcileStatus, error)
+
+	// Sync-health reader (#195), wired by serve over its per-account health
+	// registry; nil when no inbox syncs (the endpoint then reports an empty set).
+	syncStatus func() []SyncStatus
 }
 
 // ReconcileStatus reports one inbox's reconciliation latch (ADR 0026): whether
@@ -56,6 +60,18 @@ type ReconcileStatus struct {
 	Inbox     string `json:"inbox"`
 	Suspended bool   `json:"suspended"`
 	HeldCount int    `json:"held_count"`
+}
+
+// SyncStatus reports one fronted account's inbound-sync health (#195), so a health
+// check can answer "is every account syncing, and since when?" without log-scraping.
+type SyncStatus struct {
+	Inbox             string `json:"inbox"`
+	LastSuccess       string `json:"last_success,omitempty"` // RFC3339; empty until the first successful cycle
+	ConsecutiveErrors int    `json:"consecutive_errors"`
+	LastError         string `json:"last_error,omitempty"`
+	WatermarkUID      uint32 `json:"watermark_uid"`
+	UIDValidity       uint32 `json:"uidvalidity"`
+	Stalled           bool   `json:"stalled"` // consecutive errors have crossed the stall threshold
 }
 
 // ReconcileReleaseResult is the outcome of releasing a latched inbox (ADR 0026).
@@ -98,6 +114,22 @@ func (s *Service) ReconcileStatusAll() ([]ReconcileStatus, error) {
 		return nil, ErrReconcileUnavailable
 	}
 	return s.reconcileStatus()
+}
+
+// SetSyncStatusReader wires the per-account sync-health reader (#195). serve
+// supplies it over its health registry; without it (no inbox syncs) the endpoint
+// reports an empty set rather than an error.
+func (s *Service) SetSyncStatusReader(status func() []SyncStatus) {
+	s.syncStatus = status
+}
+
+// SyncStatusAll returns the inbound-sync health of every fronted account (#195).
+// An empty set (nil reader, i.e. no account syncs) is a valid answer, not an error.
+func (s *Service) SyncStatusAll() []SyncStatus {
+	if s.syncStatus == nil {
+		return nil
+	}
+	return s.syncStatus()
 }
 
 // NewService wires the approval service. inbox and signer may be nil only when

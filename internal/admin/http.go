@@ -75,6 +75,9 @@ func NewServer(addr, token string, svc *Service) (*Server, error) {
 	s.register(mux, "GET /reconcile", s.handleReconcileStatus)
 	s.register(mux, "POST /reconcile/{inbox}/release", s.handleReconcileRelease)
 
+	// Per-account inbound-sync health (#195): is every fronted account syncing?
+	s.register(mux, "GET /sync-status", s.handleSyncStatus)
+
 	s.http = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
 }
@@ -256,6 +259,16 @@ func (s *Server) handleReconcileStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	if st == nil {
 		st = []ReconcileStatus{}
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// handleSyncStatus reports the inbound-sync health of every fronted account (#195).
+// An empty list (no account syncs) is a normal 200, not an error.
+func (s *Server) handleSyncStatus(w http.ResponseWriter, _ *http.Request) {
+	st := s.svc.SyncStatusAll()
+	if st == nil {
+		st = []SyncStatus{}
 	}
 	writeJSON(w, http.StatusOK, st)
 }

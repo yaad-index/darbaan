@@ -228,6 +228,11 @@ approve/reject buttons.
   insecure-plaintext option noted in `docker-compose.yml`.
 - **Bounce won't verify** — confirm the DKIM `TXT` record matches the generated
   public key and the configured selector/domain.
+- **Is inbound sync healthy?** — `docker exec darbaan-darbaan-1 darbaan sync-status`
+  reports each fronted account's last successful sync, consecutive-error count, UID
+  watermark, and whether it is **stalled**. A stalled account also emits a loud
+  `account sync stalled` log event, so a persistent stall is visible without
+  reading the per-cycle log line by line.
 
 ## Configuration reference
 

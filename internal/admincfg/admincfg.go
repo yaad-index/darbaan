@@ -37,6 +37,7 @@ const (
 	ScopeReconcileRead    = "reconcile:read"
 	ScopeReconcileRelease = "reconcile:release"
 	ScopeInboxesRead      = "inboxes:read"
+	ScopeSyncRead         = "sync:read"
 )
 
 // RouteScopes is the authoritative route→required-scope map (ADR 0029): every
@@ -58,6 +59,7 @@ var RouteScopes = map[string]string{
 	"GET /reconcile":                      ScopeReconcileRead,
 	"POST /reconcile/{inbox}/release":     ScopeReconcileRelease,
 	"GET /inboxes":                        ScopeInboxesRead,
+	"GET /sync-status":                    ScopeSyncRead,
 }
 
 // allScopes is the set of valid scopes, derived from the RouteScopes values so it
