@@ -3,7 +3,7 @@ module github.com/yaad-index/darbaan
 go 1.26
 
 require (
-	github.com/alecthomas/kong v1.15.0
+	github.com/alecthomas/kong v1.16.0
 	github.com/alecthomas/kong-yaml v0.2.0
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/emersion/go-message v0.18.2
