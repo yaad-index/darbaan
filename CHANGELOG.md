@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1](https://github.com/yaad-index/darbaan/compare/v0.12.0...v0.12.1) (2026-07-17)
+
+
+### Bug Fixes
+
+* **imapsync:** don't hang the client on an unresolvable upstream UID ([#190](https://github.com/yaad-index/darbaan/issues/190)) ([#191](https://github.com/yaad-index/darbaan/issues/191)) ([86dde41](https://github.com/yaad-index/darbaan/commit/86dde41308f040e196de0b94d498f08e9d9fb0b0))
+
 ## [0.12.0](https://github.com/yaad-index/darbaan/compare/v0.11.0...v0.12.0) (2026-07-09)
 
 
