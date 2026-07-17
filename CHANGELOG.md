@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/yaad-index/darbaan/compare/v0.12.1...v0.13.0) (2026-07-17)
+
+
+### Features
+
+* **sync:** per-account sync-health observability + stall alert ([#195](https://github.com/yaad-index/darbaan/issues/195)) ([#198](https://github.com/yaad-index/darbaan/issues/198)) ([4b73868](https://github.com/yaad-index/darbaan/commit/4b73868ae3f95bda050ecced418e8d2965bd11a3))
+
 ## [0.12.1](https://github.com/yaad-index/darbaan/compare/v0.12.0...v0.12.1) (2026-07-17)
 
 
