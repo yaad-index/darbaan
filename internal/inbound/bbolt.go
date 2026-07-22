@@ -13,6 +13,7 @@ import (
 	"go.etcd.io/bbolt"
 
 	"github.com/yaad-index/darbaan/internal/blobstore"
+	"github.com/yaad-index/darbaan/internal/provenance"
 	"github.com/yaad-index/darbaan/internal/seqkey"
 )
 
@@ -191,19 +192,38 @@ func (s *bboltStore) SetContent(owner, inbox, id string, raw []byte) (Message, e
 			return ErrNotFound
 		}
 		// Content blob first, then the metadata flip (same ordering as Add).
-		if err := s.blobs.Put(id, raw); err != nil {
-			return fmt.Errorf("write content: %w", err)
+		clean, err := s.putBlob(id, raw)
+		if err != nil {
+			return err
 		}
 		rec.Pending = false
 		rec.Blobbed = true
 		msg = rec.Message
-		msg.Raw = raw
+		msg.Raw = clean
 		return putStored(tx, key, rec)
 	})
 	if err != nil {
 		return Message{}, fmt.Errorf("inbound: set content %s: %w", id, err)
 	}
 	return msg, nil
+}
+
+// putBlob is the single content-write chokepoint: it strips darbaan's reserved
+// X-Darbaan-* namespace (ADR 0030 Layer-1) before persisting the body, so no
+// caller — SetContent for lazily-fetched pending mail, or put for a present Add
+// — can store an un-stripped blob. It returns the sanitized bytes so the caller
+// mirrors them into the in-memory Message it hands back. A blob carrying a
+// namespace line it can't cleanly strip is rejected rather than stored; an inert
+// non-message blob (e.g. a locally-generated bounce) passes through untouched.
+func (s *bboltStore) putBlob(id string, raw []byte) ([]byte, error) {
+	clean, err := provenance.Strip(raw)
+	if err != nil {
+		return nil, fmt.Errorf("sanitize content: %w", err)
+	}
+	if err := s.blobs.Put(id, clean); err != nil {
+		return nil, fmt.Errorf("write content: %w", err)
+	}
+	return clean, nil
 }
 
 // put builds and persists a new message. For a present message it writes the
@@ -234,10 +254,11 @@ func (s *bboltStore) put(tx *bbolt.Tx, d Delivery, pending bool) (Message, []byt
 	key := seqkey.Encode(seq)
 	blobbed := false
 	if !pending {
-		msg.Raw = d.Raw // present (return carries it; storedRec drops it for storage)
-		if err := s.blobs.Put(msg.ID, d.Raw); err != nil {
-			return Message{}, nil, fmt.Errorf("write content: %w", err)
+		clean, err := s.putBlob(msg.ID, d.Raw)
+		if err != nil {
+			return Message{}, nil, err
 		}
+		msg.Raw = clean // present (return carries it; storedRec drops it for storage)
 		blobbed = true
 	}
 	if err := putStored(tx, key, storedRec(msg, blobbed)); err != nil {
