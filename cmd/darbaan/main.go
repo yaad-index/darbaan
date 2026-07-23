@@ -41,6 +41,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/inboxcfg"
 	"github.com/yaad-index/darbaan/internal/listener"
 	"github.com/yaad-index/darbaan/internal/policy"
+	"github.com/yaad-index/darbaan/internal/provenance"
 	"github.com/yaad-index/darbaan/internal/signer"
 	"github.com/yaad-index/darbaan/internal/sluice"
 	"github.com/yaad-index/darbaan/internal/telegram"
@@ -338,9 +339,28 @@ func (c *CLI) resolveAdminClients() ([]admin.ScopedClient, error) {
 	return out, nil
 }
 
-// openInbound opens the inbound (served mailbox) store per config.
-func (c *CLI) openInbound() (inbound.InboundStore, error) {
-	return inbound.New(c.InboundType, c.InboundDB)
+// openInbound opens the inbound (served mailbox) store per config, wiring the
+// per-inbox trust resolver so the content-write chokepoint stamps X-Darbaan-Trust
+// by authenticated inbox (ADR 0030).
+func (c *CLI) openInbound(inboxes []inboxcfg.Inbox) (inbound.InboundStore, error) {
+	return inbound.New(c.InboundType, c.InboundDB, inbound.WithTrustResolver(trustResolver(inboxes)))
+}
+
+// trustResolver maps an inbox name to the X-Darbaan-Trust value to stamp
+// (ADR 0030), keyed on the normalized inbox name so it matches the store's
+// record scope, and defaulting to unknown for an unconfigured inbox. It reads
+// only config — never message content.
+func trustResolver(inboxes []inboxcfg.Inbox) inbound.TrustResolver {
+	m := make(map[string]string, len(inboxes))
+	for _, in := range inboxes {
+		m[inbound.NormInbox(in.Name)] = in.TrustHeaderValue()
+	}
+	return func(inbox string) string {
+		if v, ok := m[inbound.NormInbox(inbox)]; ok {
+			return v
+		}
+		return provenance.TrustUnknown
+	}
 }
 
 // openSigner loads the DKIM signer from config. It fails closed: bounce signing
@@ -897,7 +917,17 @@ func (*ServeCmd) Run(cli *CLI) error {
 	}
 	defer closeStore()
 
-	inbox, err := cli.openInbound()
+	// Resolve the configured inboxes (ADR 0023) up front: the inbound store needs
+	// them to stamp X-Darbaan-Trust by authenticated inbox (ADR 0030), and the
+	// per-inbox filters below reuse the same set. A config with no inboxes: is one
+	// implicit "default" inbox built from the legacy top-level flags, so a
+	// single-inbox deployment is unchanged.
+	inboxes, err := cli.resolveInboxes()
+	if err != nil {
+		return err
+	}
+
+	inbox, err := cli.openInbound(inboxes)
 	if err != nil {
 		return err
 	}
@@ -932,14 +962,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 	}
 	adminSrv.SetScopedClients(adminClients)
 
-	// Resolve the configured inboxes (ADR 0023): a config with no inboxes: is one
-	// implicit "default" inbox built from the legacy top-level flags, so a
-	// single-inbox deployment is unchanged. Each inbox's filter is compiled up
-	// front (fail-fast on a bad rule set).
-	inboxes, err := cli.resolveInboxes()
-	if err != nil {
-		return err
-	}
+	// Each inbox's filter is compiled up front (fail-fast on a bad rule set).
 	filters := make(map[string]*filter.Filter, len(inboxes))
 	for _, in := range inboxes {
 		f, ferr := in.Filter()

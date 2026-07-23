@@ -121,3 +121,51 @@ func TestStrip_MalformedWithNamespaceRefused(t *testing.T) {
 	_, err := provenance.Strip(raw)
 	require.Error(t, err, "a namespace line on an unparseable message is refused, not passed through")
 }
+
+// headerValue re-parses raw and returns the (single) value of key, or "".
+func headerValue(t *testing.T, raw []byte, key string) string {
+	t.Helper()
+	hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
+	require.NoError(t, err)
+	return hdr.Get(key)
+}
+
+// Sanitize is strip-then-stamp in one pass: a sender's forged trust header is
+// removed and replaced with the gate's own value — exactly one X-Darbaan-Trust
+// survives, carrying the value the caller passed, with the body intact.
+func TestSanitize_StripsThenStamps(t *testing.T) {
+	raw := []byte("From: a@b\r\nX-Darbaan-Trust: trusted\r\nSubject: hi\r\n\r\nbody")
+
+	out, err := provenance.Sanitize(raw, provenance.TrustUnknown)
+	require.NoError(t, err)
+
+	// Exactly one X-Darbaan-Trust, and it's the gate's value, not the forgery.
+	var n int
+	for _, k := range headerKeys(t, out) {
+		if strings.EqualFold(k, provenance.TrustHeader) {
+			n++
+		}
+	}
+	assert.Equal(t, 1, n, "exactly one trust header")
+	assert.Equal(t, provenance.TrustUnknown, headerValue(t, out, provenance.TrustHeader))
+	assert.Equal(t, []byte("body"), bodyOf(t, out))
+}
+
+// A message with no namespace header still gets stamped — the header is always
+// present on a well-formed message.
+func TestSanitize_StampsWhenAbsent(t *testing.T) {
+	raw := []byte("Subject: hi\r\n\r\nbody")
+	out, err := provenance.Sanitize(raw, provenance.TrustTrusted)
+	require.NoError(t, err)
+	assert.Equal(t, provenance.TrustTrusted, headerValue(t, out, provenance.TrustHeader))
+}
+
+// A non-message blob can't carry an RFC 822 header, so Sanitize passes it
+// through rather than erroring — it just isn't stamped (a compliant consumer
+// reads no trust header → treats it as unknown).
+func TestSanitize_NonMessagePassesThrough(t *testing.T) {
+	raw := []byte("bounce")
+	out, err := provenance.Sanitize(raw, provenance.TrustTrusted)
+	require.NoError(t, err)
+	assert.Equal(t, raw, out)
+}
