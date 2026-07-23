@@ -13,6 +13,23 @@ Two properties define it:
 - **Inbound is gated.** The client reads a synced, recency-bounded view of the
   real mailbox, never the live account directly.
 
+> [!CAUTION]
+> **Darbaan is not an authenticity / authentication source.**
+>
+> Darbaan is a proxy that reads from an upstream mail server; it does **not**
+> itself verify that a message genuinely came from its claimed sender. The
+> provenance it stamps (`X-Darbaan-Trust`, `X-Darbaan-Note`) is only as
+> trustworthy as the **upstream mail server's own sender authentication**
+> (SPF, DKIM, DMARC, spam filtering).
+>
+> When darbaan reads from a server that authenticates senders well — e.g. Gmail,
+> which enforces DMARC on its own domain and spam-filters spoofed mail before it
+> ever reaches the inbox — the signals darbaan re-exposes are meaningful. Point
+> darbaan at a mail server that does **not** authenticate senders and those
+> signals are **not** safe: a forged `From` would be served as if genuine. **The
+> security of the trust model rests entirely on the mail server on the other
+> side.**
+
 ## Outbound — nothing leaves without approval
 
 A client submits a message over SMTP, and:
