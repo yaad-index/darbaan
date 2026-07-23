@@ -18,11 +18,13 @@ import (
 // stamps its own, so a sender can never pre-forge one (ADR 0030).
 const Namespace = "X-Darbaan-"
 
-// TrustHeader carries the gate's trust verdict for a message; TrustTrusted /
-// TrustUntrusted / TrustUnknown are its only values. The value is computed from
-// the authenticated source, never from message content (ADR 0030).
+// TrustHeader carries the gate's trust verdict; NoteHeader carries an optional
+// operator directive. Both values are computed from the authenticated source,
+// never from message content (ADR 0030). TrustTrusted / TrustUntrusted /
+// TrustUnknown are the only trust values.
 const (
 	TrustHeader    = "X-Darbaan-Trust"
+	NoteHeader     = "X-Darbaan-Note"
 	TrustTrusted   = "trusted"
 	TrustUntrusted = "untrusted"
 	TrustUnknown   = "unknown"
@@ -30,22 +32,32 @@ const (
 
 var namespaceLower = strings.ToLower(Namespace)
 
+// Stamp is the provenance darbaan writes onto a message (ADR 0030): the trust
+// verdict and an optional operator note, both resolved from the authenticated
+// source by the caller, never from the message. An empty field leaves its header
+// unset.
+type Stamp struct {
+	Trust string // one of the Trust* values; "" leaves X-Darbaan-Trust unset
+	Note  string // optional directive; "" leaves X-Darbaan-Note unset
+}
+
 // Strip removes every X-Darbaan-* header from a raw RFC 822 message without
 // stamping anything — the pure Layer-1 floor. See rewrite for the parse-failure
 // contract.
-func Strip(raw []byte) ([]byte, error) { return rewrite(raw, "") }
+func Strip(raw []byte) ([]byte, error) { return rewrite(raw, Stamp{}) }
 
 // Sanitize is the atomic strip-then-stamp the content-write chokepoint uses: it
-// removes the whole X-Darbaan-* namespace and then stamps a single
-// X-Darbaan-Trust: <trust> in one header-block rewrite, so a caller can never
-// persist a blob that is un-stripped OR un-stamped. trust must be one of the
-// Trust* values; it is computed from the authenticated source by the caller and
-// is never derived from the message. See rewrite for the parse-failure contract.
-func Sanitize(raw []byte, trust string) ([]byte, error) { return rewrite(raw, trust) }
+// removes the whole X-Darbaan-* namespace and then stamps darbaan's own trust
+// (and note, if any) in one header-block rewrite, so a caller can never persist
+// a blob that is un-stripped OR carrying a forged namespace header. See rewrite
+// for the parse-failure contract.
+func Sanitize(raw []byte, s Stamp) ([]byte, error) { return rewrite(raw, s) }
 
-// rewrite deletes the namespace and, when trust != "", stamps X-Darbaan-Trust,
-// re-serializing only the header block (body preserved byte-for-byte, the same
-// mechanism as the send-path From rewrite).
+// rewrite deletes the namespace and stamps X-Darbaan-Trust / X-Darbaan-Note for
+// the non-empty fields of s, re-serializing only the header block (body
+// preserved byte-for-byte, the same mechanism as the send-path From rewrite).
+// The note is header-sanitized at stamp time so a value can never inject a
+// second header (one X-Darbaan-Note max via Set).
 //
 // The chokepoint feeds this both untrusted upstream mail (always well-formed
 // RFC 822) and darbaan's own locally-generated blobs (bounces), some of which
@@ -55,7 +67,7 @@ func Sanitize(raw []byte, trust string) ([]byte, error) { return rewrite(raw, tr
 // line, in which case rewrite errors and (by the caller's contract) the blob is
 // not persisted, rather than risk a lenient consumer reading a smuggled
 // look-alike.
-func rewrite(raw []byte, trust string) ([]byte, error) {
+func rewrite(raw []byte, s Stamp) ([]byte, error) {
 	br := bufio.NewReader(bytes.NewReader(raw))
 	hdr, err := textproto.ReadHeader(br)
 	if err != nil {
@@ -69,8 +81,11 @@ func rewrite(raw []byte, trust string) ([]byte, error) {
 			fields.Del()
 		}
 	}
-	if trust != "" {
-		hdr.Set(TrustHeader, trust)
+	if s.Trust != "" {
+		hdr.Set(TrustHeader, s.Trust)
+	}
+	if s.Note != "" {
+		hdr.Set(NoteHeader, headerSafe(s.Note))
 	}
 	var buf bytes.Buffer
 	if err := textproto.WriteHeader(&buf, hdr); err != nil {
@@ -80,6 +95,18 @@ func rewrite(raw []byte, trust string) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// headerSafe drops CR, LF, and other control characters from a header value so a
+// templated note can never inject a second header (ADR 0030) — belt-and-
+// suspenders over the config-load validation that already rejects them.
+func headerSafe(v string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, v)
 }
 
 // hasNamespaceHeaderLine reports whether raw's header region (up to the first

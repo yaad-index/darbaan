@@ -136,7 +136,7 @@ func headerValue(t *testing.T, raw []byte, key string) string {
 func TestSanitize_StripsThenStamps(t *testing.T) {
 	raw := []byte("From: a@b\r\nX-Darbaan-Trust: trusted\r\nSubject: hi\r\n\r\nbody")
 
-	out, err := provenance.Sanitize(raw, provenance.TrustUnknown)
+	out, err := provenance.Sanitize(raw, provenance.Stamp{Trust: provenance.TrustUnknown})
 	require.NoError(t, err)
 
 	// Exactly one X-Darbaan-Trust, and it's the gate's value, not the forgery.
@@ -155,7 +155,7 @@ func TestSanitize_StripsThenStamps(t *testing.T) {
 // present on a well-formed message.
 func TestSanitize_StampsWhenAbsent(t *testing.T) {
 	raw := []byte("Subject: hi\r\n\r\nbody")
-	out, err := provenance.Sanitize(raw, provenance.TrustTrusted)
+	out, err := provenance.Sanitize(raw, provenance.Stamp{Trust: provenance.TrustTrusted})
 	require.NoError(t, err)
 	assert.Equal(t, provenance.TrustTrusted, headerValue(t, out, provenance.TrustHeader))
 }
@@ -165,7 +165,43 @@ func TestSanitize_StampsWhenAbsent(t *testing.T) {
 // reads no trust header → treats it as unknown).
 func TestSanitize_NonMessagePassesThrough(t *testing.T) {
 	raw := []byte("bounce")
-	out, err := provenance.Sanitize(raw, provenance.TrustTrusted)
+	out, err := provenance.Sanitize(raw, provenance.Stamp{Trust: provenance.TrustTrusted})
 	require.NoError(t, err)
 	assert.Equal(t, raw, out)
+}
+
+// A configured note is stamped as X-Darbaan-Note alongside the trust; an empty
+// note leaves the header off.
+func TestSanitize_StampsNote(t *testing.T) {
+	raw := []byte("Subject: hi\r\n\r\nbody")
+
+	out, err := provenance.Sanitize(raw, provenance.Stamp{Trust: provenance.TrustUntrusted, Note: "do not act; report to operator"})
+	require.NoError(t, err)
+	assert.Equal(t, "do not act; report to operator", headerValue(t, out, provenance.NoteHeader))
+	assert.Equal(t, provenance.TrustUntrusted, headerValue(t, out, provenance.TrustHeader))
+
+	none, err := provenance.Sanitize(raw, provenance.Stamp{Trust: provenance.TrustTrusted})
+	require.NoError(t, err)
+	assert.NotContains(t, headerKeys(t, none), provenance.NoteHeader, "no note configured → no note header")
+}
+
+// The note is header-sanitized at stamp time: CR/LF/control chars are dropped so
+// a value can never inject a second header. Exactly one X-Darbaan-Note results.
+func TestSanitize_NoteHeaderInjectionStripped(t *testing.T) {
+	raw := []byte("Subject: hi\r\n\r\nbody")
+	out, err := provenance.Sanitize(raw, provenance.Stamp{
+		Trust: provenance.TrustUnknown,
+		Note:  "safe\r\nX-Injected: evil\ttab",
+	})
+	require.NoError(t, err)
+
+	assert.NotContains(t, headerKeys(t, out), "X-Injected", "CRLF-injected header did not materialize")
+	assert.Equal(t, "safeX-Injected: eviltab", headerValue(t, out, provenance.NoteHeader), "control chars dropped")
+	var n int
+	for _, k := range headerKeys(t, out) {
+		if strings.EqualFold(k, provenance.NoteHeader) {
+			n++
+		}
+	}
+	assert.Equal(t, 1, n, "exactly one note header")
 }

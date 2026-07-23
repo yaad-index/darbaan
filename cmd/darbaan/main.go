@@ -340,26 +340,26 @@ func (c *CLI) resolveAdminClients() ([]admin.ScopedClient, error) {
 }
 
 // openInbound opens the inbound (served mailbox) store per config, wiring the
-// per-inbox trust resolver so the content-write chokepoint stamps X-Darbaan-Trust
-// by authenticated inbox (ADR 0030).
+// per-inbox provenance resolver so the content-write chokepoint stamps
+// X-Darbaan-Trust (and X-Darbaan-Note) by authenticated inbox (ADR 0030).
 func (c *CLI) openInbound(inboxes []inboxcfg.Inbox) (inbound.InboundStore, error) {
-	return inbound.New(c.InboundType, c.InboundDB, inbound.WithTrustResolver(trustResolver(inboxes)))
+	return inbound.New(c.InboundType, c.InboundDB, inbound.WithProvenanceResolver(provenanceResolver(inboxes)))
 }
 
-// trustResolver maps an inbox name to the X-Darbaan-Trust value to stamp
-// (ADR 0030), keyed on the normalized inbox name so it matches the store's
-// record scope, and defaulting to unknown for an unconfigured inbox. It reads
-// only config — never message content.
-func trustResolver(inboxes []inboxcfg.Inbox) inbound.TrustResolver {
-	m := make(map[string]string, len(inboxes))
+// provenanceResolver maps an inbox name to the trust + note to stamp (ADR 0030),
+// keyed on the normalized inbox name so it matches the store's record scope, and
+// defaulting to unknown trust (no note) for an unconfigured inbox. It reads only
+// config — never message content.
+func provenanceResolver(inboxes []inboxcfg.Inbox) inbound.ProvenanceResolver {
+	m := make(map[string]provenance.Stamp, len(inboxes))
 	for _, in := range inboxes {
-		m[inbound.NormInbox(in.Name)] = in.TrustHeaderValue()
+		m[inbound.NormInbox(in.Name)] = provenance.Stamp{Trust: in.TrustHeaderValue(), Note: in.Trust.Note}
 	}
-	return func(inbox string) string {
-		if v, ok := m[inbound.NormInbox(inbox)]; ok {
-			return v
+	return func(inbox string) provenance.Stamp {
+		if s, ok := m[inbound.NormInbox(inbox)]; ok {
+			return s
 		}
-		return provenance.TrustUnknown
+		return provenance.Stamp{Trust: provenance.TrustUnknown}
 	}
 }
 
