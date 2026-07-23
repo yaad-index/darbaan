@@ -212,7 +212,7 @@ func TestAdd_StripsForgedTrustAndStamps(t *testing.T) {
 // from the namespace strip).
 func TestSetContent_StampsConfiguredProvenance(t *testing.T) {
 	s, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"),
-		inbound.WithProvenanceResolver(func(inbox string) provenance.Stamp {
+		inbound.WithProvenanceResolver(func(inbox, _ string) provenance.Stamp {
 			if inbox == inbound.DefaultInbox {
 				return provenance.Stamp{Trust: provenance.TrustTrusted, Note: "operator forwarded"}
 			}
@@ -238,7 +238,7 @@ func TestSetContent_StampsConfiguredProvenance(t *testing.T) {
 // a fenced top-of-body banner on a text/plain message (ADR 0030 slice 4).
 func TestSetContent_BannersWhenConfigured(t *testing.T) {
 	s, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"),
-		inbound.WithProvenanceResolver(func(string) provenance.Stamp {
+		inbound.WithProvenanceResolver(func(string, string) provenance.Stamp {
 			return provenance.Stamp{Trust: provenance.TrustUntrusted, Banner: true}
 		}))
 	require.NoError(t, err)
@@ -250,6 +250,29 @@ func TestSetContent_BannersWhenConfigured(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(filled.Raw), "BEGIN DARBAAN TRUST BANNER", "banner stamped into the stored body")
 	assert.Contains(t, string(filled.Raw), "X-Darbaan-Trust: untrusted", "header still authoritative")
+}
+
+// The content-write chokepoint extracts the message From and passes it to the
+// resolver (ADR 0031): a sender-keyed resolver stamps by the actual From, so
+// per-sender rules take effect at write time.
+func TestSetContent_ResolvesTrustBySender(t *testing.T) {
+	s, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"),
+		inbound.WithProvenanceResolver(func(_ string, from string) provenance.Stamp {
+			if from == "ops@example.com" {
+				return provenance.Stamp{Trust: provenance.TrustTrusted}
+			}
+			return provenance.Stamp{Trust: provenance.TrustUnknown}
+		}))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	trusted, err := s.Add(inbound.Delivery{Owner: "agent", Raw: []byte("From: Ops <ops@example.com>\r\nSubject: hi\r\n\r\nbody")})
+	require.NoError(t, err)
+	assert.Contains(t, string(trusted.Raw), "X-Darbaan-Trust: trusted", "stamped from the From-matched rule")
+
+	other, err := s.Add(inbound.Delivery{Owner: "agent", Raw: []byte("From: someone@else.test\r\nSubject: hi\r\n\r\nbody")})
+	require.NoError(t, err)
+	assert.Contains(t, string(other.Raw), "X-Darbaan-Trust: unknown", "a non-matching sender takes the default")
 }
 
 // An inbox with no note configured stamps trust but no X-Darbaan-Note — and a

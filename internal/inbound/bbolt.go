@@ -61,7 +61,7 @@ func newBbolt(path string, resolve ProvenanceResolver) (InboundStore, error) {
 	if resolve == nil {
 		// No resolver wired → stamp the fail-safe unknown trust (no note), so the
 		// content-write chokepoint always stamps a valid value (ADR 0030).
-		resolve = func(string) provenance.Stamp { return provenance.Stamp{Trust: provenance.TrustUnknown} }
+		resolve = func(string, string) provenance.Stamp { return provenance.Stamp{Trust: provenance.TrustUnknown} }
 	}
 	db, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: time.Second})
 	if err != nil {
@@ -227,7 +227,10 @@ func (s *bboltStore) SetContent(owner, inbox, id string, raw []byte) (Message, e
 // locally-generated bounce) passes through untouched (unstamped → read as
 // unknown).
 func (s *bboltStore) putBlob(inbox, id string, raw []byte) ([]byte, error) {
-	clean, err := provenance.Sanitize(raw, s.resolve(inbox))
+	// Trust is resolved from the authenticated inbox and the message's From
+	// (per-sender rules, ADR 0031). The From is read from the raw here; the trust
+	// asymmetry keeps that safe (only `trusted` is gated on the upstream, slice 2).
+	clean, err := provenance.Sanitize(raw, s.resolve(inbox, provenance.From(raw)))
 	if err != nil {
 		return nil, fmt.Errorf("sanitize content: %w", err)
 	}

@@ -94,6 +94,22 @@ type Trust struct {
 	// BodyBanner is a reserved (ADR 0030 slice 4) toggle for a fenced top-of-body
 	// trust banner. Parsed now; not yet acted on.
 	BodyBanner bool `yaml:"body_banner"`
+	// Rules are per-sender overrides (ADR 0031): the most-specific rule whose
+	// matcher matches a message's From supplies the trust level + note, overriding
+	// the inbox Level default. Matched on From only (v1); a `trusted` rule is sound
+	// only under the upstream-authentication boundary (the README caution).
+	Rules []TrustRule `yaml:"rules"`
+}
+
+// TrustRule maps a sender to a trust level + optional note (ADR 0031). Exactly
+// one matcher is set: From (an exact address, most specific) or FromDomain (the
+// From's domain). Level is trusted or untrusted — unknown is the absence of a
+// rule, not a rule outcome.
+type TrustRule struct {
+	From       string `yaml:"from"`
+	FromDomain string `yaml:"from_domain"`
+	Level      string `yaml:"level"`
+	Note       string `yaml:"note"`
 }
 
 // Trust levels an operator may set. Anything else is a config error; an omitted
@@ -229,17 +245,115 @@ func (in Inbox) validateTrust() error {
 		return fmt.Errorf("trust.level %q is invalid (want %q or %q, or omit for unknown)",
 			in.Trust.Level, TrustLevelTrusted, TrustLevelUntrusted)
 	}
-	if n := in.Trust.Note; n != "" {
-		if len(n) > maxNoteLen {
-			return fmt.Errorf("trust.note is too long (%d > %d bytes)", len(n), maxNoteLen)
+	if err := validateNote(in.Trust.Note); err != nil {
+		return fmt.Errorf("trust.note: %w", err)
+	}
+	return validateRules(in.Trust.Rules)
+}
+
+// validateNote rejects a note that isn't a single sane header value (ADR 0030).
+func validateNote(note string) error {
+	if note == "" {
+		return nil
+	}
+	if len(note) > maxNoteLen {
+		return fmt.Errorf("too long (%d > %d bytes)", len(note), maxNoteLen)
+	}
+	for _, r := range note {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("contains a control character")
 		}
-		for _, r := range n {
-			if r < 0x20 || r == 0x7f {
-				return fmt.Errorf("trust.note contains a control character")
+	}
+	return nil
+}
+
+// validateRules checks each per-sender rule (ADR 0031): exactly one matcher, a
+// trusted/untrusted level, a sane note, and no duplicate matcher (which would be
+// an ambiguous double-classification of the same sender).
+func validateRules(rules []TrustRule) error {
+	seenFrom := make(map[string]bool, len(rules))
+	seenDomain := make(map[string]bool, len(rules))
+	for i, r := range rules {
+		hasFrom := strings.TrimSpace(r.From) != ""
+		hasDomain := strings.TrimSpace(r.FromDomain) != ""
+		if hasFrom == hasDomain {
+			return fmt.Errorf("trust.rules[%d]: exactly one of `from` or `from_domain` is required", i)
+		}
+		if r.Level != TrustLevelTrusted && r.Level != TrustLevelUntrusted {
+			return fmt.Errorf("trust.rules[%d]: level %q must be %q or %q", i, r.Level, TrustLevelTrusted, TrustLevelUntrusted)
+		}
+		if err := validateNote(r.Note); err != nil {
+			return fmt.Errorf("trust.rules[%d].note: %w", i, err)
+		}
+		if hasFrom {
+			if k := normAddr(r.From); seenFrom[k] {
+				return fmt.Errorf("trust.rules: duplicate from %q", r.From)
+			} else {
+				seenFrom[k] = true
+			}
+		} else {
+			if k := normDomain(r.FromDomain); seenDomain[k] {
+				return fmt.Errorf("trust.rules: duplicate from_domain %q", r.FromDomain)
+			} else {
+				seenDomain[k] = true
 			}
 		}
 	}
 	return nil
+}
+
+// SenderStamp resolves the provenance to stamp for a message whose (normalized,
+// lower-cased) sender address is `from`, in this inbox (ADR 0031): the
+// most-specific matching rule — an exact-address rule beats a domain rule —
+// supplies the trust level + note, else the inbox's own default level + note. The
+// banner toggle is always the inbox's. `from` == "" (no parseable From) matches
+// no rule and takes the inbox default.
+func (in Inbox) SenderStamp(from string) provenance.Stamp {
+	trust := in.TrustHeaderValue()
+	note := in.Trust.Note
+	if from != "" {
+		if r, ok := in.matchRule(from); ok {
+			if r.Level == TrustLevelUntrusted {
+				trust = provenance.TrustUntrusted
+			} else {
+				trust = provenance.TrustTrusted
+			}
+			note = r.Note
+		}
+	}
+	return provenance.Stamp{Trust: trust, Note: note, Banner: in.Trust.BodyBanner}
+}
+
+// matchRule returns the most-specific rule matching from: an exact-address rule
+// wins over a domain rule (rules are deduped at load, so at most one per tier).
+func (in Inbox) matchRule(from string) (TrustRule, bool) {
+	dom := domainOf(from)
+	var domainMatch *TrustRule
+	for i := range in.Trust.Rules {
+		r := in.Trust.Rules[i]
+		if r.From != "" && normAddr(r.From) == from {
+			return r, true
+		}
+		if r.FromDomain != "" && dom != "" && normDomain(r.FromDomain) == dom {
+			domainMatch = &in.Trust.Rules[i]
+		}
+	}
+	if domainMatch != nil {
+		return *domainMatch, true
+	}
+	return TrustRule{}, false
+}
+
+func normAddr(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+func normDomain(s string) string {
+	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(s), "@"))
+}
+
+func domainOf(addr string) string {
+	if i := strings.LastIndexByte(addr, '@'); i >= 0 {
+		return addr[i+1:]
+	}
+	return ""
 }
 
 // EnvPrefix mangles an inbox name into the infix of its per-inbox secret env vars

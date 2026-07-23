@@ -205,3 +205,13 @@ func TestSanitize_NoteHeaderInjectionStripped(t *testing.T) {
 	}
 	assert.Equal(t, 1, n, "exactly one note header")
 }
+
+// From extracts a normalized lower-cased sender address, or "" when absent.
+func TestFrom(t *testing.T) {
+	assert.Equal(t, "alice@example.com",
+		provenance.From([]byte("From: Alice <Alice@Example.COM>\r\nSubject: hi\r\n\r\nbody")))
+	assert.Equal(t, "bob@x.test",
+		provenance.From([]byte("From: bob@x.test\r\n\r\nbody")))
+	assert.Equal(t, "", provenance.From([]byte("Subject: no from\r\n\r\nbody")), "no From → empty")
+	assert.Equal(t, "", provenance.From([]byte("not a message")), "unparseable → empty")
+}

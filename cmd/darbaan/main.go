@@ -351,13 +351,13 @@ func (c *CLI) openInbound(resolver inbound.ProvenanceResolver) (inbound.InboundS
 // defaulting to unknown trust (no note) for an unconfigured inbox. It reads only
 // config — never message content.
 func provenanceResolver(inboxes []inboxcfg.Inbox) inbound.ProvenanceResolver {
-	m := make(map[string]provenance.Stamp, len(inboxes))
+	byName := make(map[string]inboxcfg.Inbox, len(inboxes))
 	for _, in := range inboxes {
-		m[inbound.NormInbox(in.Name)] = provenance.Stamp{Trust: in.TrustHeaderValue(), Note: in.Trust.Note, Banner: in.Trust.BodyBanner}
+		byName[inbound.NormInbox(in.Name)] = in
 	}
-	return func(inbox string) provenance.Stamp {
-		if s, ok := m[inbound.NormInbox(inbox)]; ok {
-			return s
+	return func(inbox, from string) provenance.Stamp {
+		if in, ok := byName[inbound.NormInbox(inbox)]; ok {
+			return in.SenderStamp(from) // per-sender rule → inbox default → unknown (ADR 0031)
 		}
 		return provenance.Stamp{Trust: provenance.TrustUnknown}
 	}
@@ -1118,7 +1118,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
 		ServeStamp: func(inbox string, raw []byte) ([]byte, error) {
-			return provenance.Sanitize(raw, provResolver(inbox))
+			return provenance.Sanitize(raw, provResolver(inbox, provenance.From(raw)))
 		},
 	}, auth, inbox, imapContentFetch(syncers, inbox), imapKeywordWriter(syncers), filters, guard, holdSpoof, pw.mailOwner, syncNow)
 	if err != nil {

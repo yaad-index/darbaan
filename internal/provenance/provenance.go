@@ -7,10 +7,29 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"net/mail"
 	"strings"
 
 	"github.com/emersion/go-message/textproto"
 )
+
+// From extracts the sender address from a raw message's From header, normalized
+// to a lower-cased RFC 5321 address (e.g. "alice@example.com"), or "" when there
+// is no parseable From. Per-sender trust rules match on this (ADR 0031). It is
+// read from the message, so it is only meaningful under the upstream-
+// authentication boundary the README states; the trust asymmetry keeps that safe
+// (a From only ever raises trust to `trusted` on an authenticated upstream).
+func From(raw []byte) string {
+	hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
+	if err != nil {
+		return ""
+	}
+	addr, err := mail.ParseAddress(hdr.Get("From"))
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(addr.Address))
+}
 
 // Namespace is the header-name prefix darbaan reserves for its own
 // trust/provenance headers. Every inbound header whose name begins with it (in
