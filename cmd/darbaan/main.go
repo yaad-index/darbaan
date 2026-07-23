@@ -353,7 +353,7 @@ func (c *CLI) openInbound(inboxes []inboxcfg.Inbox) (inbound.InboundStore, error
 func provenanceResolver(inboxes []inboxcfg.Inbox) inbound.ProvenanceResolver {
 	m := make(map[string]provenance.Stamp, len(inboxes))
 	for _, in := range inboxes {
-		m[inbound.NormInbox(in.Name)] = provenance.Stamp{Trust: in.TrustHeaderValue(), Note: in.Trust.Note}
+		m[inbound.NormInbox(in.Name)] = provenance.Stamp{Trust: in.TrustHeaderValue(), Note: in.Trust.Note, Banner: in.Trust.BodyBanner}
 	}
 	return func(inbox string) provenance.Stamp {
 		if s, ok := m[inbound.NormInbox(inbox)]; ok {

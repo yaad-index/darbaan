@@ -37,8 +37,9 @@ var namespaceLower = strings.ToLower(Namespace)
 // source by the caller, never from the message. An empty field leaves its header
 // unset.
 type Stamp struct {
-	Trust string // one of the Trust* values; "" leaves X-Darbaan-Trust unset
-	Note  string // optional directive; "" leaves X-Darbaan-Note unset
+	Trust  string // one of the Trust* values; "" leaves X-Darbaan-Trust unset
+	Note   string // optional directive; "" leaves X-Darbaan-Note unset
+	Banner bool   // also emit a fenced top-of-body banner (top-level text/plain only)
 }
 
 // Strip removes every X-Darbaan-* header from a raw RFC 822 message without
@@ -87,13 +88,20 @@ func rewrite(raw []byte, s Stamp) ([]byte, error) {
 	if s.Note != "" {
 		hdr.Set(NoteHeader, headerSafe(s.Note))
 	}
+	body, err := io.ReadAll(br)
+	if err != nil {
+		return nil, err
+	}
+	if s.Banner {
+		// Best-effort, never errors the message: only a top-level text/plain body is
+		// bannered; any other shape keeps just the (authoritative) headers.
+		body = maybeBanner(hdr, body, s)
+	}
 	var buf bytes.Buffer
 	if err := textproto.WriteHeader(&buf, hdr); err != nil {
 		return nil, err
 	}
-	if _, err := io.Copy(&buf, br); err != nil {
-		return nil, err
-	}
+	buf.Write(body)
 	return buf.Bytes(), nil
 }
 
