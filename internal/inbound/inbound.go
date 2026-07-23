@@ -197,8 +197,15 @@ type InboundStore interface {
 	Close() error
 }
 
-// Factory constructs an InboundStore of a given type from a path.
-type Factory func(path string) (InboundStore, error)
+// TrustResolver maps an inbox name to the X-Darbaan-Trust value the store's
+// content-write chokepoint stamps for that inbox (ADR 0030). It reads only the
+// authenticated inbox, never message content, so a message can't influence its
+// own trust. A nil resolver selects the unknown fail-safe default.
+type TrustResolver func(inbox string) string
+
+// Factory constructs an InboundStore of a given type from a path and trust
+// resolver (nil → stamp unknown).
+type Factory func(path string, trustOf TrustResolver) (InboundStore, error)
 
 var registry = map[string]Factory{}
 
@@ -210,14 +217,28 @@ func Register(name string, f Factory) {
 	registry[name] = f
 }
 
+// Option configures New.
+type Option func(*options)
+
+type options struct{ trustOf TrustResolver }
+
+// WithTrustResolver injects the per-inbox trust resolver used to stamp
+// X-Darbaan-Trust at the content-write chokepoint (ADR 0030). Without it the
+// store stamps unknown.
+func WithTrustResolver(r TrustResolver) Option { return func(o *options) { o.trustOf = r } }
+
 // New constructs the configured inbound backend, or an error if inboundType is
 // not registered.
-func New(inboundType, path string) (InboundStore, error) {
+func New(inboundType, path string, opts ...Option) (InboundStore, error) {
 	f, ok := registry[inboundType]
 	if !ok {
 		return nil, fmt.Errorf("inbound: unknown type %q (have %v)", inboundType, Registered())
 	}
-	return f(path)
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return f(path, o.trustOf)
 }
 
 // Registered returns the names of all registered inbound backends, sorted.

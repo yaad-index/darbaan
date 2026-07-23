@@ -1,6 +1,6 @@
 # ADR 0030: Gate-stamp trust/provenance headers on inbound mail
 
-**Status:** Proposed (2026-07-22)
+**Status:** Accepted (2026-07-23)
 
 ## Context
 

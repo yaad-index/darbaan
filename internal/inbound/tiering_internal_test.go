@@ -16,7 +16,7 @@ import (
 
 func newTieredStore(t *testing.T) *bboltStore {
 	t.Helper()
-	ms, err := newBbolt(filepath.Join(t.TempDir(), "inbound.db"))
+	ms, err := newBbolt(filepath.Join(t.TempDir(), "inbound.db"), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ms.Close() })
 	return ms.(*bboltStore)

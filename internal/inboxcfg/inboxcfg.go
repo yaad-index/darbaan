@@ -18,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/yaad-index/darbaan/internal/filter"
+	"github.com/yaad-index/darbaan/internal/provenance"
 )
 
 // Inbox is one configured mailbox the single agent addresses by name (ADR 0023).
@@ -71,7 +72,39 @@ type Inbox struct {
 	// upstream syncer.
 	SyncOnStatus         bool   `yaml:"sync_on_status"`
 	SyncOnStatusInterval string `yaml:"sync_on_status_interval"`
+
+	// Trust/provenance stamping (ADR 0030): the gate stamps X-Darbaan-Trust on
+	// this inbox's mail from Trust.Level — anchored on the authenticated source
+	// (this inbox), never the From header. An omitted trust block → unknown.
+	Trust Trust `yaml:"trust"`
 }
+
+// Trust is an inbox's provenance-stamping config (ADR 0030). Only Level is wired
+// this slice; Note (slice 3) and BodyBanner (slice 4) are reserved so the config
+// schema is stable ahead of those slices.
+type Trust struct {
+	// Level is the trust the gate stamps for mail from this authenticated source:
+	// "trusted" or "untrusted". Omitted (empty) → the message is stamped
+	// "unknown" — the fail-safe default a consumer treats as not-safe-to-act.
+	Level string `yaml:"level"`
+	// Note is a reserved (ADR 0030 slice 3) operator directive templated into
+	// X-Darbaan-Note. Validated now (length + no control chars) so the schema is
+	// pinned, but not yet stamped.
+	Note string `yaml:"note"`
+	// BodyBanner is a reserved (ADR 0030 slice 4) toggle for a fenced top-of-body
+	// trust banner. Parsed now; not yet acted on.
+	BodyBanner bool `yaml:"body_banner"`
+}
+
+// Trust levels an operator may set. Anything else is a config error; an omitted
+// level maps to the unknown default at stamp time.
+const (
+	TrustLevelTrusted   = "trusted"
+	TrustLevelUntrusted = "untrusted"
+)
+
+// maxNoteLen bounds a trust note so it stays a single sane header value.
+const maxNoteLen = 512
 
 // Backend is an inbox's upstream account coordinates (ADR 0009). Secrets
 // (passwords) are supplied out-of-band via env/secret, never in config
@@ -160,6 +193,49 @@ func Validate(inboxes []Inbox) error {
 		if in.SyncOnStatus {
 			if _, err := in.SyncOnStatusDuration(); err != nil {
 				return fmt.Errorf("inboxcfg: inbox %q: %w", name, err)
+			}
+		}
+		// Fail-fast on an unknown trust level or a malformed note (ADR 0030), so a
+		// bad value is caught at load, not silently mis-stamped at ingest.
+		if err := in.validateTrust(); err != nil {
+			return fmt.Errorf("inboxcfg: inbox %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// TrustHeaderValue maps the inbox's configured trust level to the value stamped
+// into X-Darbaan-Trust (ADR 0030): trusted/untrusted as configured, else the
+// unknown fail-safe default. It reads only config, never message content.
+func (in Inbox) TrustHeaderValue() string {
+	switch in.Trust.Level {
+	case TrustLevelTrusted:
+		return provenance.TrustTrusted
+	case TrustLevelUntrusted:
+		return provenance.TrustUntrusted
+	default:
+		return provenance.TrustUnknown
+	}
+}
+
+// validateTrust rejects an unknown trust level and a note that isn't a single
+// sane header value (ADR 0030). An omitted level (empty) is valid — it maps to
+// the unknown default at stamp time. Note is validated now though it isn't
+// stamped until slice 3, so the schema is pinned.
+func (in Inbox) validateTrust() error {
+	switch in.Trust.Level {
+	case "", TrustLevelTrusted, TrustLevelUntrusted:
+	default:
+		return fmt.Errorf("trust.level %q is invalid (want %q or %q, or omit for unknown)",
+			in.Trust.Level, TrustLevelTrusted, TrustLevelUntrusted)
+	}
+	if n := in.Trust.Note; n != "" {
+		if len(n) > maxNoteLen {
+			return fmt.Errorf("trust.note is too long (%d > %d bytes)", len(n), maxNoteLen)
+		}
+		for _, r := range n {
+			if r < 0x20 || r == 0x7f {
+				return fmt.Errorf("trust.note contains a control character")
 			}
 		}
 	}
