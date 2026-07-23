@@ -34,7 +34,18 @@ type IMAPServerConfig struct {
 	Addr          string
 	TLSConfig     *tls.Config // enables STARTTLS; required unless AllowInsecure
 	AllowInsecure bool        // permit AUTH over plaintext — local/testing only
+	// ServeStamp re-runs the provenance sanitize-then-stamp on a message's raw
+	// before serving it (ADR 0030 slice 5 backstop), keyed on the serving inbox.
+	// It closes the legacy gap — pre-ADR blobs serve with their real trust, and
+	// served trust stays fresh on a config change — and is idempotent, so it's a
+	// safe belt-and-suspenders on every fetch. nil disables it (serve as stored).
+	ServeStamp ServeStamp
 }
+
+// ServeStamp sanitizes+stamps a raw message for the given (serving) inbox,
+// returning the served bytes (ADR 0030). It reads only the inbox key it is
+// given, never the message.
+type ServeStamp func(inbox string, raw []byte) ([]byte, error)
 
 // ContentFetch resolves a message's full content (Raw) on demand: for a present
 // record from its blob, for a pending record by fetching the body from upstream
@@ -90,7 +101,7 @@ func NewIMAPServer(cfg IMAPServerConfig, auth *Auth, store inbound.InboundStore,
 	}
 	srv := imapserver.New(&imapserver.Options{
 		NewSession: func(_ *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return &imapSession{auth: auth, store: store, fetch: fetch, writeKeywords: writeKeywords, filters: filters, guard: guard, holdSpoof: holdSpoof, mailOwner: mailOwner, syncNow: syncNow}, nil, nil
+			return &imapSession{auth: auth, store: store, fetch: fetch, writeKeywords: writeKeywords, filters: filters, guard: guard, holdSpoof: holdSpoof, mailOwner: mailOwner, syncNow: syncNow, serveStamp: cfg.ServeStamp}, nil, nil
 		},
 		TLSConfig:    cfg.TLSConfig,
 		InsecureAuth: cfg.AllowInsecure,
@@ -123,6 +134,7 @@ type imapSession struct {
 	principal     *Principal                // the authenticated agent + its grants (ADR 0027)
 	mailOwner     func(inbox string) string // synced-mail owner key per inbox (ADR 0027); nil = key by the connecting agent
 	syncNow       SyncTrigger               // debounced on-demand pull on STATUS (ADR 0028); nil = disabled
+	serveStamp    ServeStamp                // serve-path provenance re-stamp (ADR 0030 slice 5); nil = serve as stored
 	owner         string
 	selectedInbox string // the inbox name of the SELECTed mailbox (ADR 0023)
 	authed        bool
@@ -466,6 +478,21 @@ func (s *imapSession) rawResolver(m inbound.Message) rawFunc {
 			switch full, err = s.fetch(m.Owner, s.selectedInbox, m.ID); {
 			case err == nil:
 				raw = full.Raw
+				// Serve-path backstop (ADR 0030 slice 5): re-run the same sanitize +
+				// stamp as the write chokepoint, keyed strictly on the session's
+				// server-side selected inbox (never anything from the blob), so a
+				// pre-ADR/legacy blob serves with its real trust and the stamp stays
+				// fresh on a config change. Idempotent on an already-stamped blob. A
+				// blob that can't be safely re-stamped serves empty rather than
+				// un-sanitized — real stored blobs are sanitized at write, so this is
+				// a near-dead edge.
+				if s.serveStamp != nil {
+					if stamped, serr := s.serveStamp(s.selectedInbox, raw); serr == nil {
+						raw = stamped
+					} else {
+						raw = nil
+					}
+				}
 			case errors.Is(err, inbound.ErrContentUnavailable):
 				// The upstream content can't be resolved (a stale local→upstream UID
 				// mapping, #190). Serve an empty body rather than erroring: the FETCH
