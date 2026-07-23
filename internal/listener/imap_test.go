@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/emersion/go-imap/v2"
@@ -14,7 +15,20 @@ import (
 	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/listener"
+	"github.com/yaad-index/darbaan/internal/provenance"
 )
+
+func startIMAPServeStamp(t *testing.T, store inbound.InboundStore, ss listener.ServeStamp) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true, ServeStamp: ss},
+		listener.SingleAuth("agent", "pw"), store, nil, nil, map[string]*filter.Filter{inbound.DefaultInbox: nil}, nil, false, nil, nil)
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return l.Addr().String()
+}
 
 func seedInbound(t *testing.T) inbound.InboundStore {
 	t.Helper()
@@ -745,4 +759,36 @@ func TestIMAPBouncePrivacyOnSharedInbox(t *testing.T) {
 		"agent-a sees shared synced mail + its own bounce, never agent-b's")
 	assert.Equal(t, map[string]bool{"synced-w": true, "bounce-b": true}, subjects("agent-b"),
 		"agent-b sees shared synced mail + its own bounce, never agent-a's")
+}
+
+// The serve-path backstop (ADR 0030 slice 5) re-runs the sanitize+stamp on the
+// raw before serving, keyed on the session's selected inbox — so a blob stored
+// with one trust value serves with the CURRENT config's value (freshness /
+// legacy gap), with exactly one trust header (idempotent, not stacked).
+func TestIMAPServeStampReStampsFresh(t *testing.T) {
+	store := seedInbound(t) // present bounce at seq 1, stored trust=unknown (default resolver)
+
+	// Serve-path resolves TRUSTED for the inbox: it must override the stored value.
+	ss := func(_ string, raw []byte) ([]byte, error) {
+		return provenance.Sanitize(raw, provenance.Stamp{Trust: provenance.TrustTrusted})
+	}
+
+	c, err := imapclient.DialInsecure(startIMAPServeStamp(t, store, ss), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	_, err = c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+
+	msgs, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{
+		BodySection: []*imap.FetchItemBodySection{{}},
+	}).Collect()
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+
+	body := string(msgs[0].FindBodySection(&imap.FetchItemBodySection{}))
+	assert.Contains(t, body, "X-Darbaan-Trust: trusted", "serve-path stamps the current config value")
+	assert.NotContains(t, body, "X-Darbaan-Trust: unknown", "stored value overridden on serve")
+	assert.Equal(t, 1, strings.Count(body, "X-Darbaan-Trust:"), "exactly one trust header, not stacked")
+	assert.Contains(t, body, "refused-marker", "body preserved")
 }

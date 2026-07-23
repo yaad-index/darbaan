@@ -342,8 +342,8 @@ func (c *CLI) resolveAdminClients() ([]admin.ScopedClient, error) {
 // openInbound opens the inbound (served mailbox) store per config, wiring the
 // per-inbox provenance resolver so the content-write chokepoint stamps
 // X-Darbaan-Trust (and X-Darbaan-Note) by authenticated inbox (ADR 0030).
-func (c *CLI) openInbound(inboxes []inboxcfg.Inbox) (inbound.InboundStore, error) {
-	return inbound.New(c.InboundType, c.InboundDB, inbound.WithProvenanceResolver(provenanceResolver(inboxes)))
+func (c *CLI) openInbound(resolver inbound.ProvenanceResolver) (inbound.InboundStore, error) {
+	return inbound.New(c.InboundType, c.InboundDB, inbound.WithProvenanceResolver(resolver))
 }
 
 // provenanceResolver maps an inbox name to the trust + note to stamp (ADR 0030),
@@ -926,8 +926,12 @@ func (*ServeCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
+	// One provenance resolver, shared by the write chokepoint (the store) and the
+	// serve-path backstop (the IMAP read face), so both stamp identically by
+	// authenticated inbox (ADR 0030).
+	provResolver := provenanceResolver(inboxes)
 
-	inbox, err := cli.openInbound(inboxes)
+	inbox, err := cli.openInbound(provResolver)
 	if err != nil {
 		return err
 	}
@@ -1113,6 +1117,9 @@ func (*ServeCmd) Run(cli *CLI) error {
 		Addr:          cli.IMAPAddr,
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
+		ServeStamp: func(inbox string, raw []byte) ([]byte, error) {
+			return provenance.Sanitize(raw, provResolver(inbox))
+		},
 	}, auth, inbox, imapContentFetch(syncers, inbox), imapKeywordWriter(syncers), filters, guard, holdSpoof, pw.mailOwner, syncNow)
 	if err != nil {
 		return err
