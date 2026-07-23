@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/yaad-index/darbaan/internal/provenance"
 )
 
 // ErrNotFound is returned by Get when no message matches.
@@ -197,15 +199,16 @@ type InboundStore interface {
 	Close() error
 }
 
-// TrustResolver maps an inbox name to the X-Darbaan-Trust value the store's
-// content-write chokepoint stamps for that inbox (ADR 0030). It reads only the
-// authenticated inbox, never message content, so a message can't influence its
-// own trust. A nil resolver selects the unknown fail-safe default.
-type TrustResolver func(inbox string) string
+// ProvenanceResolver maps an inbox name to the provenance the store's
+// content-write chokepoint stamps for that inbox (ADR 0030): its trust verdict
+// and optional note. It reads only the authenticated inbox, never message
+// content, so a message can't influence its own provenance. A nil resolver
+// selects the unknown-trust / no-note fail-safe default.
+type ProvenanceResolver func(inbox string) provenance.Stamp
 
-// Factory constructs an InboundStore of a given type from a path and trust
-// resolver (nil → stamp unknown).
-type Factory func(path string, trustOf TrustResolver) (InboundStore, error)
+// Factory constructs an InboundStore of a given type from a path and provenance
+// resolver (nil → stamp unknown trust, no note).
+type Factory func(path string, resolve ProvenanceResolver) (InboundStore, error)
 
 var registry = map[string]Factory{}
 
@@ -220,12 +223,12 @@ func Register(name string, f Factory) {
 // Option configures New.
 type Option func(*options)
 
-type options struct{ trustOf TrustResolver }
+type options struct{ resolve ProvenanceResolver }
 
-// WithTrustResolver injects the per-inbox trust resolver used to stamp
-// X-Darbaan-Trust at the content-write chokepoint (ADR 0030). Without it the
-// store stamps unknown.
-func WithTrustResolver(r TrustResolver) Option { return func(o *options) { o.trustOf = r } }
+// WithProvenanceResolver injects the per-inbox provenance resolver used to stamp
+// X-Darbaan-Trust (and X-Darbaan-Note) at the content-write chokepoint
+// (ADR 0030). Without it the store stamps unknown trust and no note.
+func WithProvenanceResolver(r ProvenanceResolver) Option { return func(o *options) { o.resolve = r } }
 
 // New constructs the configured inbound backend, or an error if inboundType is
 // not registered.
@@ -238,7 +241,7 @@ func New(inboundType, path string, opts ...Option) (InboundStore, error) {
 	for _, opt := range opts {
 		opt(&o)
 	}
-	return f(path, o.trustOf)
+	return f(path, o.resolve)
 }
 
 // Registered returns the names of all registered inbound backends, sorted.

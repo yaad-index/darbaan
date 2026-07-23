@@ -51,17 +51,17 @@ type stored struct {
 type bboltStore struct {
 	db      *bbolt.DB
 	blobs   *blobstore.Store
-	trustOf TrustResolver // never nil after newBbolt
+	resolve ProvenanceResolver // never nil after newBbolt
 }
 
-func newBbolt(path string, trustOf TrustResolver) (InboundStore, error) {
+func newBbolt(path string, resolve ProvenanceResolver) (InboundStore, error) {
 	if path == "" {
 		return nil, fmt.Errorf("inbound: bbolt requires a database path (inbound-db)")
 	}
-	if trustOf == nil {
-		// No resolver wired → stamp the fail-safe unknown, so the content-write
-		// chokepoint always stamps a valid value (ADR 0030).
-		trustOf = func(string) string { return provenance.TrustUnknown }
+	if resolve == nil {
+		// No resolver wired → stamp the fail-safe unknown trust (no note), so the
+		// content-write chokepoint always stamps a valid value (ADR 0030).
+		resolve = func(string) provenance.Stamp { return provenance.Stamp{Trust: provenance.TrustUnknown} }
 	}
 	db, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: time.Second})
 	if err != nil {
@@ -85,7 +85,7 @@ func newBbolt(path string, trustOf TrustResolver) (InboundStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("inbound: open blob store: %w", err)
 	}
-	store := &bboltStore{db: db, blobs: blobs, trustOf: trustOf}
+	store := &bboltStore{db: db, blobs: blobs, resolve: resolve}
 	// Reclaim blobs orphaned by a crash between blob and metadata writes. Safe at
 	// open: no concurrent writers yet (#83).
 	if err := store.sweepOrphans(); err != nil {
@@ -215,18 +215,19 @@ func (s *bboltStore) SetContent(owner, inbox, id string, raw []byte) (Message, e
 }
 
 // putBlob is the single content-write chokepoint: it strips darbaan's reserved
-// X-Darbaan-* namespace and stamps X-Darbaan-Trust in one atomic pass (ADR 0030)
-// before persisting the body, so no caller — SetContent for lazily-fetched
-// pending mail, or put for a present Add — can store a blob that is un-stripped
-// OR un-stamped. The trust value is resolved strictly from the authenticated
-// inbox, never from the message, so a message can't influence its own trust. It
+// X-Darbaan-* namespace and stamps X-Darbaan-Trust (and X-Darbaan-Note, if the
+// inbox configures one) in one atomic pass (ADR 0030) before persisting the
+// body, so no caller — SetContent for lazily-fetched pending mail, or put for a
+// present Add — can store a blob that is un-stripped OR un-stamped. The
+// provenance is resolved strictly from the authenticated inbox, never from the
+// message, so a message can't influence its own trust or note. It
 // returns the sanitized bytes so the caller mirrors them into the in-memory
 // Message it hands back. A blob carrying a namespace line it can't cleanly strip
 // is rejected rather than stored; an inert non-message blob (e.g. a
 // locally-generated bounce) passes through untouched (unstamped → read as
 // unknown).
 func (s *bboltStore) putBlob(inbox, id string, raw []byte) ([]byte, error) {
-	clean, err := provenance.Sanitize(raw, s.trustOf(inbox))
+	clean, err := provenance.Sanitize(raw, s.resolve(inbox))
 	if err != nil {
 		return nil, fmt.Errorf("sanitize content: %w", err)
 	}
