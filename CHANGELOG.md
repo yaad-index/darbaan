@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.14.0](https://github.com/yaad-index/darbaan/compare/v0.13.0...v0.14.0) (2026-07-23)
+
+
+### Features
+
+* **inboxcfg:** per-inbox per-sender trust rules + resolution (ADR 0031 slice 1) ([#212](https://github.com/yaad-index/darbaan/issues/212)) ([08ac72a](https://github.com/yaad-index/darbaan/commit/08ac72a749ba877385d5efb02a561865856b7a3c))
+* **listener:** serve-path sanitize-then-stamp backstop (ADR 0030 slice 5) ([#207](https://github.com/yaad-index/darbaan/issues/207)) ([5a765c2](https://github.com/yaad-index/darbaan/commit/5a765c23547c5e8cc6a09d62b7293df27c60cdf9))
+* **provenance:** optional fenced body banner for top-level text/plain (ADR 0030 slice 4) ([#206](https://github.com/yaad-index/darbaan/issues/206)) ([80282bd](https://github.com/yaad-index/darbaan/commit/80282bdeabc9a7693cf7fda8fb9039efb26c5653))
+* **provenance:** stamp X-Darbaan-Note from per-inbox config (ADR 0030 slice 3) ([#205](https://github.com/yaad-index/darbaan/issues/205)) ([0a7eb05](https://github.com/yaad-index/darbaan/commit/0a7eb0536f9e592ecbdcd8d03c4c347f3f8a76cc))
+* **provenance:** stamp X-Darbaan-Trust from per-inbox config at the chokepoint (ADR 0030 slice 2) ([#204](https://github.com/yaad-index/darbaan/issues/204)) ([e655f1c](https://github.com/yaad-index/darbaan/commit/e655f1c18bb6c985542cfaa3b3ddeb878dbaa3e1))
+* **provenance:** strip X-Darbaan-* at the content-write chokepoint (ADR 0030 slice 1) ([#202](https://github.com/yaad-index/darbaan/issues/202)) ([dc2ff87](https://github.com/yaad-index/darbaan/commit/dc2ff876d30af3655ab43cd6e783454ec2eceb25))
+
 ## [0.13.0](https://github.com/yaad-index/darbaan/compare/v0.12.1...v0.13.0) (2026-07-17)
 
 
