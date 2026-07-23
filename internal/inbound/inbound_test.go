@@ -234,6 +234,24 @@ func TestSetContent_StampsConfiguredProvenance(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(string(filled.Raw), "X-Darbaan-Note:"), "exactly one note header")
 }
 
+// The resolver's Banner flag flows to the stored blob: a body_banner inbox gets
+// a fenced top-of-body banner on a text/plain message (ADR 0030 slice 4).
+func TestSetContent_BannersWhenConfigured(t *testing.T) {
+	s, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"),
+		inbound.WithProvenanceResolver(func(string) provenance.Stamp {
+			return provenance.Stamp{Trust: provenance.TrustUntrusted, Banner: true}
+		}))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	_, m, err := s.AddSyncedPending(inbound.Delivery{Owner: "agent", Subject: "hi", UpstreamUID: 7, UIDValidity: 1})
+	require.NoError(t, err)
+	filled, err := s.SetContent("agent", inbound.DefaultInbox, m.ID, []byte("Content-Type: text/plain\r\n\r\nhello\r\n"))
+	require.NoError(t, err)
+	assert.Contains(t, string(filled.Raw), "BEGIN DARBAAN TRUST BANNER", "banner stamped into the stored body")
+	assert.Contains(t, string(filled.Raw), "X-Darbaan-Trust: untrusted", "header still authoritative")
+}
+
 // An inbox with no note configured stamps trust but no X-Darbaan-Note — and a
 // forged inbound note is still stripped (namespace strip), leaving none.
 func TestSetContent_ForgedNoteStrippedWhenNoneConfigured(t *testing.T) {
