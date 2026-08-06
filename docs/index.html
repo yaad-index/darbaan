@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Darbaan — a mail-gate proxy</title>
+<meta name="description" content="Darbaan is a mail-gate proxy. Clients talk IMAP and SMTP; Darbaan enforces policy in front of the real mailbox. Outbound is default-deny; inbound is a gated, synced view.">
+<meta name="color-scheme" content="light dark">
+<meta property="og:title" content="Darbaan">
+<meta property="og:description" content="A mail-gate proxy — nothing leaves without approval, and clients never hold the real mailbox credentials.">
+<meta property="og:type" content="website">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{
+    color-scheme:light dark;
+    /* Per-project accent — Darbaan is indigo. */
+    --accent:#4f6bd6;
+    --accent-2:#3f56b8;
+    /* Shared neutral system across the sibling pages. */
+    --bg:#ffffff;
+    --bg-soft:#f5f6f8;
+    --fg:#1b1d21;
+    --muted:#5c626c;
+    --card:#ffffff;
+    --border:#e6e8ec;
+    --shadow:0 1px 2px rgba(0,0,0,.05), 0 10px 30px rgba(0,0,0,.05);
+    --radius:14px;
+    --maxw:960px;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,"Apple Color Emoji",sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0e1013;
+      --bg-soft:#15181c;
+      --fg:#e7e9ee;
+      --muted:#99a0ab;
+      --card:#161a1f;
+      --border:#262b32;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 14px 34px rgba(0,0,0,.4);
+    }
+  }
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0;
+    font-family:var(--font);
+    color:var(--fg);
+    background:var(--bg);
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent-2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+
+  /* Top bar */
+  .nav{display:flex;align-items:center;justify-content:space-between;padding:22px 0}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:-.01em}
+  .brand .dot{width:12px;height:12px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 18%,transparent)}
+  .nav a.ghlink{font-weight:600;color:var(--fg)}
+
+  /* Hero */
+  .hero{
+    position:relative;
+    padding:64px 0 40px;
+    background:
+      radial-gradient(1000px 400px at 70% -10%, color-mix(in srgb,var(--accent) 16%,transparent), transparent 70%);
+  }
+  .hero h1{font-size:clamp(2.4rem,6vw,3.6rem);line-height:1.05;letter-spacing:-.03em;margin:.2em 0 .3em}
+  .tagline{font-size:clamp(1.15rem,2.4vw,1.4rem);color:var(--muted);max-width:34ch;margin:0 0 1.6em}
+  .cta{display:flex;flex-wrap:wrap;gap:12px}
+  .btn{
+    display:inline-flex;align-items:center;gap:8px;
+    padding:11px 20px;border-radius:10px;font-weight:600;font-size:.98rem;
+    border:1px solid transparent;cursor:pointer;transition:transform .05s ease,background .15s ease;
+  }
+  .btn:hover{text-decoration:none}
+  .btn:active{transform:translateY(1px)}
+  .btn-primary{background:var(--accent);color:#fff}
+  .btn-primary:hover{background:var(--accent-2)}
+  .btn-ghost{background:transparent;color:var(--fg);border-color:var(--border)}
+  .btn-ghost:hover{border-color:var(--accent)}
+  .btn svg{width:18px;height:18px;fill:currentColor}
+
+  /* Sections */
+  section.block{padding:44px 0}
+  .kicker{text-transform:uppercase;letter-spacing:.12em;font-size:.78rem;font-weight:700;color:var(--accent-2);margin:0 0 .6em}
+  h2{font-size:clamp(1.5rem,3vw,2rem);letter-spacing:-.02em;margin:.1em 0 .5em}
+  .lead{color:var(--muted);max-width:62ch;font-size:1.06rem}
+
+  /* Callout */
+  .note{
+    margin-top:22px;border:1px solid var(--border);border-left:4px solid var(--accent);
+    background:var(--bg-soft);border-radius:10px;padding:16px 18px;color:var(--muted);font-size:.96rem;max-width:66ch;
+  }
+  .note strong{color:var(--fg)}
+
+  /* Visual panel */
+  .visual{
+    margin-top:8px;background:var(--bg-soft);border:1px solid var(--border);
+    border-radius:var(--radius);padding:28px;box-shadow:var(--shadow);
+  }
+  .visual svg{display:block;width:100%;height:auto}
+  .figcap{color:var(--muted);font-size:.9rem;margin:14px 2px 0;text-align:center}
+
+  /* Feature grid */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:18px;margin-top:10px}
+  .feat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:22px;box-shadow:var(--shadow)}
+  .feat h3{margin:.1em 0 .35em;font-size:1.08rem;letter-spacing:-.01em}
+  .feat p{margin:0;color:var(--muted);font-size:.97rem}
+  .feat .ic{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;margin-bottom:12px;
+    background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent-2)}
+  .feat .ic svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+  /* Footer */
+  footer{border-top:1px solid var(--border);margin-top:24px;padding:32px 0 48px;color:var(--muted);font-size:.92rem}
+  footer .frow{display:flex;flex-wrap:wrap;gap:16px;justify-content:space-between;align-items:center}
+  .badge{display:inline-flex;align-items:center;gap:7px;padding:4px 11px;border:1px solid var(--border);border-radius:999px;font-size:.82rem}
+  .badge .dot{width:7px;height:7px;border-radius:50%;background:var(--accent)}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <nav class="nav">
+      <span class="brand"><span class="dot"></span>Darbaan</span>
+      <a class="ghlink" href="https://github.com/yaad-index/darbaan">GitHub ↗</a>
+    </nav>
+  </div>
+
+  <header class="hero">
+    <div class="wrap">
+      <h1>Nothing leaves without&nbsp;approval.</h1>
+      <p class="tagline">A mail-gate proxy that sits in front of your real mailbox — clients talk standard IMAP and SMTP, and policy is enforced at the gate.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/yaad-index/darbaan">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+          View on GitHub
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/yaad-index/darbaan/tree/main/adr">Design notes (ADRs)</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="block">
+      <p class="kicker">What it is</p>
+      <h2>Credentials the client never holds.</h2>
+      <p class="lead">
+        An agent — or any client — talks to Darbaan over standard IMAP to read mail and SMTP to
+        send it, and Darbaan enforces policy in front of the real mailbox. It holds the upstream
+        credentials and the bounce-signing key, so a compromised client only ever holds
+        <em>Darbaan</em> credentials, never the real mailbox. Outbound is default-deny; inbound is
+        a synced, recency-bounded view rather than the live account.
+      </p>
+
+      <div class="visual" role="img" aria-label="Diagram: a client sends outbound mail to Darbaan, where it is held in a default-deny sluice until a human approves, and only then delivered upstream; inbound mail is synced from upstream into Darbaan's own store and served back to the client over IMAP.">
+        <svg viewBox="0 0 720 320" xmlns="http://www.w3.org/2000/svg" font-family="var(--font)">
+          <defs>
+            <marker id="arw" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+              <path d="M0 0L9 4.5L0 9Z" fill="var(--accent)"/>
+            </marker>
+            <marker id="arwm" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+              <path d="M0 0L9 4.5L0 9Z" fill="var(--muted)"/>
+            </marker>
+          </defs>
+
+          <!-- client -->
+          <rect x="34" y="118" width="128" height="84" rx="13" fill="var(--card)" stroke="var(--border)" stroke-width="1.5"/>
+          <text x="98" y="152" text-anchor="middle" fill="var(--fg)" font-size="14" font-weight="700">Client</text>
+          <text x="98" y="171" text-anchor="middle" fill="var(--muted)" font-size="11">IMAP · SMTP</text>
+
+          <!-- darbaan gate -->
+          <rect x="286" y="70" width="148" height="180" rx="16" fill="color-mix(in srgb,var(--accent) 10%,transparent)" stroke="var(--accent)" stroke-width="1.8"/>
+          <text x="360" y="96" text-anchor="middle" fill="var(--accent-2)" font-size="14" font-weight="700">Darbaan</text>
+          <!-- lock glyph -->
+          <g stroke="var(--accent-2)" stroke-width="2" fill="none">
+            <rect x="349" y="116" width="22" height="17" rx="3" fill="var(--accent)" stroke="none"/>
+            <path d="M353 116v-4a7 7 0 0 1 14 0v4"/>
+          </g>
+          <text x="360" y="158" text-anchor="middle" fill="var(--fg)" font-size="11.5" font-weight="600">policy gate</text>
+          <rect x="300" y="176" width="120" height="30" rx="8" fill="var(--card)" stroke="var(--border)" stroke-width="1.3"/>
+          <text x="360" y="196" text-anchor="middle" fill="var(--muted)" font-size="11">held · default-deny</text>
+          <text x="360" y="230" text-anchor="middle" fill="var(--muted)" font-size="11">holds real credentials</text>
+
+          <!-- upstream -->
+          <rect x="560" y="118" width="128" height="84" rx="13" fill="var(--card)" stroke="var(--border)" stroke-width="1.5"/>
+          <text x="624" y="152" text-anchor="middle" fill="var(--fg)" font-size="14" font-weight="700">Upstream</text>
+          <text x="624" y="171" text-anchor="middle" fill="var(--muted)" font-size="11">real mailbox</text>
+
+          <!-- human approver -->
+          <circle cx="360" cy="286" r="15" fill="var(--card)" stroke="var(--accent)" stroke-width="1.6"/>
+          <circle cx="360" cy="281" r="4.4" fill="var(--accent-2)"/>
+          <path d="M351 296a9 9 0 0 1 18 0" fill="none" stroke="var(--accent-2)" stroke-width="1.6"/>
+          <text x="392" y="290" text-anchor="start" fill="var(--muted)" font-size="11">a human approves</text>
+
+          <!-- outbound: client -> gate -->
+          <line x1="162" y1="146" x2="282" y2="146" stroke="var(--accent)" stroke-width="2" marker-end="url(#arw)"/>
+          <text x="222" y="136" text-anchor="middle" fill="var(--muted)" font-size="10.5">send</text>
+          <!-- approve up into gate -->
+          <line x1="360" y1="270" x2="360" y2="208" stroke="var(--accent)" stroke-width="1.8" marker-end="url(#arw)"/>
+          <!-- release: gate -> upstream -->
+          <line x1="434" y1="146" x2="556" y2="146" stroke="var(--accent)" stroke-width="2" marker-end="url(#arw)"/>
+          <text x="495" y="136" text-anchor="middle" fill="var(--muted)" font-size="10.5">release</text>
+
+          <!-- inbound: upstream -> gate (sync) -->
+          <line x1="556" y1="176" x2="434" y2="176" stroke="var(--muted)" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arwm)"/>
+          <!-- inbound: gate -> client (served) -->
+          <line x1="282" y1="176" x2="162" y2="176" stroke="var(--muted)" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arwm)"/>
+          <text x="223" y="194" text-anchor="middle" fill="var(--muted)" font-size="10.5">synced view</text>
+        </svg>
+        <p class="figcap">Outbound is trapped and approved before it leaves; inbound is a synced, gated copy.</p>
+      </div>
+
+      <p class="note">
+        <strong>Not an authenticity source.</strong> Darbaan is a proxy; it does not itself verify
+        that a message genuinely came from its claimed sender. The provenance it stamps is only as
+        trustworthy as the upstream mail server's own sender authentication (SPF, DKIM, DMARC).
+      </p>
+    </section>
+
+    <section class="block">
+      <p class="kicker">Key features</p>
+      <h2>Two properties define it.</h2>
+      <div class="grid">
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg></div>
+          <h3>Outbound is default-deny</h3>
+          <p>Every submission is trapped in a sluice — queued, not sent. Nothing a client submits leaves until a human approves it.</p>
+        </div>
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg></div>
+          <h3>A human decides</h3>
+          <p>An operator approves or rejects each held message from a CLI or from Telegram. The client never approves its own mail.</p>
+        </div>
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><path d="M3 8l9 6 9-6"/><rect x="3" y="5" width="18" height="14" rx="2"/></svg></div>
+          <h3>Signed release or bounce</h3>
+          <p>On approval Darbaan delivers and signs the message; on rejection it returns a DKIM-signed bounce the client can cryptographically trust.</p>
+        </div>
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><path d="M4 4v6h6M20 20v-6h-6"/><path d="M20 10a8 8 0 00-14-3M4 14a8 8 0 0014 3"/></svg></div>
+          <h3>Gated inbound sync</h3>
+          <p>Mail is pulled into Darbaan's own store incrementally, with lazy bodies and a recency cutoff, then served over IMAP as a single inbox.</p>
+        </div>
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 2l8 4v6c0 4-3.5 7-8 8-4.5-1-8-4-8-8V6l8-4z"/></svg></div>
+          <h3>Credentials stay behind the gate</h3>
+          <p>Darbaan holds the upstream credentials and bounce-signing key; a compromised client holds only Darbaan credentials, never the real mailbox.</p>
+        </div>
+        <div class="feat">
+          <div class="ic"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg></div>
+          <h3>Localhost-only admin</h3>
+          <p>The agent faces bind to loopback by default; the admin API is always localhost-only, with per-client least-privilege tokens.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap frow">
+      <span class="badge"><span class="dot"></span>Built by AI agents · MIT licensed</span>
+      <span><a href="https://github.com/yaad-index/darbaan">github.com/yaad-index/darbaan</a></span>
+    </div>
+  </footer>
+</body>
+</html>
