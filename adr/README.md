@@ -5,9 +5,10 @@ its context, the decision, and the consequences. ADRs are immutable once
 Accepted — to change one, add a new ADR that supersedes it.
 
 These records (0001–0016) capture the v1 design, locked 2026-06-25 and amended
-through 2026-06-26 (maintainer review). Later records (0017–0029) extend it —
+through 2026-06-26 (maintainer review). Later records (0017–0032) extend it —
 labeling, the inbound filter, multi-inbox, reconciliation, multi-agent tenancy,
-on-demand sync, and per-client admin scopes.
+on-demand sync, per-client admin scopes, inbound trust stamping, and
+incoming-message injection assessment.
 
 | ADR | Title |
 |---|---|
@@ -41,3 +42,6 @@ on-demand sync, and per-client admin scopes.
 | [0027](0027-multi-agent-tenancy.md) | Multi-agent tenancy: per-agent logins, grants, and per-principal mailbox naming |
 | [0028](0028-on-demand-inbound-sync-on-status.md) | On-demand inbound sync: STATUS triggers a debounced upstream pull of the queried inbox |
 | [0029](0029-admin-per-client-scoped-tokens.md) | Admin API: per-client scoped, independently-revocable tokens |
+| [0030](0030-gate-stamp-trust-provenance-headers-on-inbound-mail.md) | Gate-stamp trust/provenance headers on inbound mail |
+| [0031](0031-per-sender-trust-rules.md) | Per-sender trust rules |
+| [0032](0032-incoming-message-injection-assessment.md) | Incoming-message injection assessment |
