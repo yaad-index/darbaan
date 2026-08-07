@@ -56,6 +56,17 @@ secrets, or smuggle directives through quoted text or attachments raises the sco
 Coarse buckets are deliberate — they avoid false precision and can be refined as
 real traffic is seen (the ADR 0005 rationale).
 
+**Content in scope.** Because attachments are a named injection vector, the assessor
+is fed the message's **decoded text content — the body's text parts and text
+extracted from attachments** (e.g. the text of a PDF or an HTML part), not just the
+top-level `text/plain`; assessing only the outer body would blind it to a vector the
+threat model calls out. Extraction is **bounded** (per-part size and type limits, and
+no execution of active content — the assessor renders attachments to inert text, it
+never opens them as programs), so a hostile attachment cannot turn extraction itself
+into code execution. The exact decoders, media types, and limits are an
+implementation detail (follow-up); this ADR fixes only that decoded attachment
+content is *in* the assessment's scope and that extraction stays inert and bounded.
+
 ### 2. Isolation: the assessor is a zero-access component
 
 The assessment runs in a component with **no tools and no privileges** — no mail
@@ -95,10 +106,19 @@ rules, not re-derived from a spoofable `From` alone. ADR 0031's trust asymmetry
 carries over: only an authenticated or explicitly-vouched source earns the fast
 path, and an unknown/unauthenticated sender always gets full scrutiny — fail-safe.
 
-### 4. Disposition: low passes, high is held for the human
+### 4. Disposition: low passes, medium and high are held for the human
+
+All three score buckets map to a disposition; the fail-safe default groups the
+uncertain middle with the high end:
 
 - **Low risk → pass:** the summary + score travel with the message into the
   agent's view; normal flow.
+- **Medium risk → held / flagged for the human (v1 default):** medium is genuine
+  uncertainty, so it resolves toward *more* scrutiny, not less — it is held for a
+  person exactly like high. Splitting medium off to a lighter disposition (e.g.
+  pass-with-prominent-flag) is a policy call the operator can make later via the
+  tunable config (§5); v1 holds it. This keeps the coarse three-bucket score from
+  leaving any value undispositioned.
 - **High risk → held / flagged for the human:** the message is surfaced to the
   operator rather than flowing straight to the agent, so a person decides before
   the agent can act on it.
