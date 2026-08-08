@@ -2,6 +2,7 @@ package admin_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,6 +13,72 @@ import (
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
+
+// C4: a message stranded in `approved` by a transient send failure can be
+// recovered by the re-send verb — a plain re-approve would hit ErrNotPending.
+func TestReSendRecoversStrandedApproved(t *testing.T) {
+	q, _ := seedStore(t)
+	m, err := q.Enqueue(sluice.Submission{
+		Agent: "agent", Inbox: inbound.DefaultInbox, From: "a@x.test", Rcpt: []string{"d@y.test"},
+		Raw: []byte("From: a@x.test\r\n\r\nb\r\n"),
+	})
+	require.NoError(t, err)
+
+	svc := admin.NewService(q, newInbound(t), backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	fail := true
+	svc.SetSenders(map[string]backend.Sender{
+		inbound.DefaultInbox: senderFunc(func(sluice.Message) error {
+			if fail {
+				return errors.New("dial tcp: connection refused") // transient, not permanent
+			}
+			return nil
+		}),
+	})
+
+	// First approve strands it: the transient failure keeps it approved with a SendErr.
+	out, err := svc.ApproveID(context.Background(), m.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(sluice.StatusApproved), out.Status)
+	stranded, err := q.Get(m.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, stranded.SendErr)
+
+	// Re-send now delivers and clears the error.
+	fail = false
+	out, err = svc.ReSend(context.Background(), m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(sluice.StatusSent), out.Status)
+	sent, err := q.Get(m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, sluice.StatusSent, sent.Status)
+	assert.Empty(t, sent.SendErr)
+}
+
+// C4: re-send only acts on an approved message with a recorded send error; a
+// pending or already-sent message is refused with ErrNotResendable.
+func TestReSendRejectsNonResendable(t *testing.T) {
+	q, _ := seedStore(t)
+	m, err := q.Enqueue(sluice.Submission{
+		Agent: "agent", Inbox: inbound.DefaultInbox, From: "a@x.test", Rcpt: []string{"d@y.test"},
+		Raw: []byte("From: a@x.test\r\n\r\nb\r\n"),
+	})
+	require.NoError(t, err)
+
+	svc := admin.NewService(q, newInbound(t), backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	svc.SetSenders(map[string]backend.Sender{
+		inbound.DefaultInbox: senderFunc(func(sluice.Message) error { return nil }),
+	})
+
+	// Pending → not resendable.
+	_, err = svc.ReSend(context.Background(), m.ID)
+	assert.ErrorIs(t, err, admin.ErrNotResendable)
+
+	// Clean approve → sent → not resendable.
+	_, err = svc.ApproveID(context.Background(), m.ID)
+	require.NoError(t, err)
+	_, err = svc.ReSend(context.Background(), m.ID)
+	assert.ErrorIs(t, err, admin.ErrNotResendable)
+}
 
 // ApproveAs sends via the chosen inbox's sender, rewrites both the envelope and
 // the header From to that inbox's identity, and leaves the stored record as

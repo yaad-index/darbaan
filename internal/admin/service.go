@@ -460,6 +460,52 @@ func (s *Service) approve(ctx context.Context, id, asInbox string) (Outcome, err
 	return out, nil
 }
 
+// ErrNotResendable is returned by ReSend when the message is not an approved
+// message carrying a recorded send error — the only state a manual re-send acts on.
+var ErrNotResendable = errors.New("admin: message is not awaiting re-send (needs an approved message with a recorded send error)")
+
+// ReSend retries the upstream delivery of an approved message whose previous send
+// failed (C4). It is the only recovery for a message stranded in `approved` with a
+// SendErr: decide() refuses non-pending messages, so a plain re-approve returns
+// ErrNotPending. Allowed only when Status==approved && SendErr!=""; it re-runs the
+// send and records the attempt (the RecordSendAttempt guard, C26, keeps this the
+// only way SendErr/Sent can be re-stamped). The message is delivered as stored —
+// the ADR 0023 slice 5 ApproveAs identity rewrite is send-time only and was never
+// persisted, so a re-send of an approved-as message goes through its stamped inbox
+// with its original From.
+func (s *Service) ReSend(ctx context.Context, id string) (Outcome, error) {
+	m, err := s.store.Get(id)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if m.Status != sluice.StatusApproved || m.SendErr == "" {
+		return Outcome{}, fmt.Errorf("%w: message %s is %s", ErrNotResendable, id, m.Status)
+	}
+	slog.Info("resend", "message_id", m.ID, "inbox", inbound.NormInbox(m.Inbox))
+
+	sendErr := s.senderFor(m.Inbox).Send(ctx, m)
+	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr)
+	if rerr != nil {
+		return Outcome{}, rerr
+	}
+	out := Outcome{ID: m.ID, Status: string(final.Status), Detail: "re-send attempted"}
+	switch {
+	case sendErr == nil:
+		out.Detail = "re-sent upstream"
+	case isSendPending(sendErr):
+		out.Detail = "re-send: no real Sender configured — nothing left Darbaan"
+	case backend.IsPermanent(sendErr):
+		if bErr := s.deliverBounce(m, "upstream delivery failed permanently", false); bErr != nil {
+			out.Warn = fmt.Sprintf("re-send failed permanently AND bounce delivery failed: %v", bErr)
+		} else {
+			out.Warn = "upstream re-send failed permanently — bounced to agent"
+		}
+	default:
+		out.Warn = "upstream re-send failed (transient); stays approved for another re-send"
+	}
+	return out, nil
+}
+
 // RejectID rejects a held message: commit, then deliver the DSN bounce
 // (downstream of commit, never mistaken for a reject failure, ADR 0006).
 func (s *Service) RejectID(ctx context.Context, id, reason string, retryable bool) (Outcome, error) {

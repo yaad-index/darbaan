@@ -1304,6 +1304,7 @@ type QueueCmd struct {
 	Ls      QueueLsCmd      `cmd:"" help:"List held messages."`
 	Show    QueueShowCmd    `cmd:"" help:"Dump a held message's raw RFC 822."`
 	Approve QueueApproveCmd `cmd:"" help:"Approve a held message (runs the chain in serve)."`
+	Resend  QueueResendCmd  `cmd:"" help:"Retry the upstream send of an approved message whose send failed."`
 	Reject  QueueRejectCmd  `cmd:"" help:"Reject a held message."`
 }
 
@@ -1324,10 +1325,14 @@ func (*QueueLsCmd) Run(cli *CLI) error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ID\tSTATUS\tAGENT\tFROM\tSUBJECT\tRCPT\tSIZE\tRECEIVED")
+	_, _ = fmt.Fprintln(w, "ID\tSTATUS\tAGENT\tINBOX\tFROM\tSUBJECT\tRCPT\tSIZE\tRECEIVED\tSEND ERR")
 	for _, m := range metas {
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
-			m.ID, m.Status, sanitizeField(m.Agent), sanitizeField(m.From), truncate(sanitizeField(m.Subject), 40), len(m.Rcpt), m.Size, m.ReceivedAt.Format(time.RFC3339))
+		// SendErr can carry the upstream server's response text, so sanitize it like
+		// the other operator-table fields (C22) before display (C21).
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
+			m.ID, m.Status, sanitizeField(m.Agent), sanitizeField(m.Inbox), sanitizeField(m.From),
+			truncate(sanitizeField(m.Subject), 40), len(m.Rcpt), m.Size, m.ReceivedAt.Format(time.RFC3339),
+			truncate(sanitizeField(m.SendErr), 40))
 	}
 	return w.Flush()
 }
@@ -1402,6 +1407,24 @@ func (c *QueueApproveCmd) Run(cli *CLI) error {
 		return err
 	}
 	out, err := client.Approve(context.Background(), c.ID)
+	if err != nil {
+		return err
+	}
+	return printOutcome(out)
+}
+
+// QueueResendCmd retries the upstream send of an approved message whose previous
+// send failed (C4), recovering a message stranded in `approved` with a send error.
+type QueueResendCmd struct {
+	ID string `arg:"" help:"Message id."`
+}
+
+func (c *QueueResendCmd) Run(cli *CLI) error {
+	client, err := cli.adminClient()
+	if err != nil {
+		return err
+	}
+	out, err := client.ReSend(context.Background(), c.ID)
 	if err != nil {
 		return err
 	}

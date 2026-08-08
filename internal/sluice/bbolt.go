@@ -167,12 +167,14 @@ func (s *bboltStore) List() ([]Meta, error) {
 			metas = append(metas, Meta{
 				ID:         rec.ID,
 				Agent:      rec.Agent,
+				Inbox:      rec.Inbox,
 				From:       rec.From,
 				Rcpt:       rec.Rcpt,
 				Subject:    subject,
 				Size:       size,
 				ReceivedAt: rec.ReceivedAt,
 				Status:     rec.Status,
+				SendErr:    rec.SendErr,
 			})
 			return nil
 		})
@@ -224,6 +226,13 @@ func (s *bboltStore) RecordSendAttempt(id string, sendErr error) (Message, error
 		rec, key, err := loadStored(tx, id)
 		if err != nil {
 			return err
+		}
+		// A send is only ever recorded against an approved message (or re-recorded
+		// against an already-sent one, idempotently). Guard so the re-send verb
+		// (or any future caller) can never stamp Sent/SendErr onto a pending or
+		// rejected record (C26).
+		if rec.Status != StatusApproved && rec.Status != StatusSent {
+			return fmt.Errorf("%w: message %s is %s", ErrNotApproved, id, rec.Status)
 		}
 		if sendErr != nil {
 			rec.SendErr = sendErr.Error() // stays approved for a manual re-send

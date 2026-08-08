@@ -159,6 +159,54 @@ func TestRecordSendAttemptStoresError(t *testing.T) {
 	require.NoError(t, al.Verify())
 }
 
+// C26: a send is only ever recorded against an approved message (idempotently once
+// sent). A pending or rejected message must refuse the stamp, so the re-send verb
+// can never resurrect a non-approved record.
+func TestRecordSendAttemptRejectsNonApproved(t *testing.T) {
+	q, _ := newStore(t)
+	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("orig")})
+	require.NoError(t, err)
+
+	// Pending → refused.
+	_, err = q.RecordSendAttempt(m.ID, errors.New("boom"))
+	require.ErrorIs(t, err, sluice.ErrNotApproved)
+
+	// Rejected → refused.
+	_, err = q.Reject(m.ID, "manual", "no", false)
+	require.NoError(t, err)
+	_, err = q.RecordSendAttempt(m.ID, errors.New("boom"))
+	require.ErrorIs(t, err, sluice.ErrNotApproved)
+
+	// Approved → allowed; and idempotent once sent.
+	m2, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("two")})
+	require.NoError(t, err)
+	_, err = q.Approve(m2.ID, "manual", nil)
+	require.NoError(t, err)
+	sent, err := q.RecordSendAttempt(m2.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, sluice.StatusSent, sent.Status)
+	_, err = q.RecordSendAttempt(m2.ID, nil) // idempotent on an already-sent message
+	require.NoError(t, err)
+}
+
+// C21: the listing view surfaces the routed inbox and the last send error, so an
+// approved-but-stranded message (and which inbox it routed through) is visible.
+func TestListSurfacesInboxAndSendErr(t *testing.T) {
+	q, _ := newStore(t)
+	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Inbox: "work", From: "f", Raw: []byte("Subject: s\r\n\r\nb")})
+	require.NoError(t, err)
+	_, err = q.Approve(m.ID, "manual", nil)
+	require.NoError(t, err)
+	_, err = q.RecordSendAttempt(m.ID, errors.New("451 temporary failure"))
+	require.NoError(t, err)
+
+	metas, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, metas, 1)
+	assert.Equal(t, "work", metas[0].Inbox)
+	assert.Equal(t, "451 temporary failure", metas[0].SendErr)
+}
+
 // failingAudit always errors on Append, to prove audit is best-effort.
 type failingAudit struct{}
 

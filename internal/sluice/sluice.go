@@ -26,6 +26,12 @@ var ErrNotFound = errors.New("sluice: message not found")
 // longer pending — fail-closed against double decisions.
 var ErrNotPending = errors.New("sluice: message is not pending")
 
+// ErrNotApproved is returned by RecordSendAttempt when the message is in a state
+// that must never receive a send stamp (pending or rejected). A send is only ever
+// recorded against an approved message (or re-recorded against an already-sent one,
+// idempotently).
+var ErrNotApproved = errors.New("sluice: message is not approved")
+
 // Status is the disposition of a queued message. New messages are Pending; the
 // approval pipeline transitions them to Approved or Rejected. Default-deny means
 // nothing leaves on Approved either until a real Sender is wired (ADR 0003) —
@@ -74,12 +80,14 @@ type Message struct {
 type Meta struct {
 	ID         string
 	Agent      string
+	Inbox      string // routed inbox (ADR 0023); "" reads as default
 	From       string
 	Rcpt       []string
 	Subject    string
 	Size       int
 	ReceivedAt time.Time
 	Status     Status
+	SendErr    string // the last send attempt's error, so a stranded approved message is visible
 }
 
 // subjectFromRaw extracts the Subject header from a stored message for display
