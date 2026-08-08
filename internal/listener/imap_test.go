@@ -698,6 +698,74 @@ func TestIMAPAssessmentRejectedTombstone(t *testing.T) {
 	assert.NotContains(t, body, "attacker-body-do-this", "real content withheld")
 }
 
+// A REJECTED tombstone must not leak the withheld message's real metadata through
+// SEARCH or FETCH FLAGS: matching Subject/From, size (LARGER/SMALLER), and custom
+// keywords all resolve against the system tombstone, never the attacker-controlled
+// record — closing the SEARCH/FLAGS oracle (ADR 0032 Amendment 1, C41). The prior
+// tests cover the FETCH ENVELOPE/BODY/SIZE tombstone; this covers the match paths.
+func TestIMAPAssessmentTombstoneSearchAndFlagsNoLeak(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	_, held, err := store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "attack-subject", UpstreamUID: 1, UIDValidity: 1,
+		Size:     100000, // real size, far larger than the tombstone
+		Keywords: []string{"secretlabel"},
+		Envelope: &inbound.Envelope{
+			Subject: "attack-subject",
+			From:    []inbound.Address{{Mailbox: "attacker", Host: "evil.test"}},
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.SetContentAssessed("agent", inbound.DefaultInbox, held.ID,
+		[]byte("Subject: attack-subject\r\n\r\nattacker-body-do-this"),
+		&inbound.Assessment{Disposition: inbound.AssessmentHeld, Summary: "flagged"})
+	require.NoError(t, err)
+	_, err = store.SetHoldDecision("agent", inbound.DefaultInbox, held.ID, inbound.HoldRejected)
+	require.NoError(t, err)
+
+	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, nil, nil), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	sel, err := c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), sel.NumMessages, "a rejected hold is visible as a tombstone")
+
+	search := func(cr *imap.SearchCriteria) []uint32 {
+		res, serr := c.Search(cr, nil).Wait()
+		require.NoError(t, serr)
+		return res.AllSeqNums()
+	}
+
+	// SUBJECT/FROM over the REAL values must NOT match — the oracle is closed...
+	assert.Empty(t, search(&imap.SearchCriteria{
+		Header: []imap.SearchCriteriaHeaderField{{Key: "Subject", Value: "attack-subject"}},
+	}), "real subject not searchable")
+	assert.Empty(t, search(&imap.SearchCriteria{
+		Header: []imap.SearchCriteriaHeaderField{{Key: "From", Value: "attacker"}},
+	}), "real sender not searchable")
+	// ...while the tombstone's own subject IS what's searchable (what's served).
+	assert.Equal(t, []uint32{1}, search(&imap.SearchCriteria{
+		Header: []imap.SearchCriteriaHeaderField{{Key: "Subject", Value: "reviewed out"}},
+	}), "tombstone subject is what's searchable")
+
+	// LARGER/SMALLER resolve against the small tombstone size, never the real
+	// 100000 — so the withheld message's size can't be probed.
+	assert.Empty(t, search(&imap.SearchCriteria{Larger: 10000}),
+		"real (large) size not probeable via LARGER")
+	assert.Equal(t, []uint32{1}, search(&imap.SearchCriteria{Smaller: 10000}),
+		"tombstone is small — matches SMALLER, confirming the real size is masked")
+
+	// FETCH FLAGS must not carry the withheld message's real keyword.
+	msgs, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{Flags: true}).Collect()
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	assert.NotContains(t, msgs[0].Flags, imap.Flag("secretlabel"),
+		"real keyword withheld from tombstone FLAGS")
+}
+
 // A message held by BOTH assessment and a filter Hold stays hidden, and the
 // single HoldDecision releases it past both sources (the documented model).
 func TestIMAPAssessmentAndFilterHold(t *testing.T) {

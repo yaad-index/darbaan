@@ -551,8 +551,13 @@ func (cli *CLI) buildAssessHook(inboxes []inboxcfg.Inbox, resolve inbound.Proven
 	}
 	slog.Warn("injection assessment ENABLED (ADR 0032): high-risk inbound mail is held for the operator")
 	identity := inboxIdentities(inboxes)
-	return func(inbox, from string, raw []byte, env *inbound.Envelope) *inbound.Assessment {
-		trust := resolve(inbox, from).Trust
+	// Resolve trust on the normalized RFC5321 sender address parsed from the raw
+	// (as the store's content-write chokepoint does), NOT the caller's display-form
+	// "Name <addr>" From — ADR 0031 per-sender rules match the bare address, so a
+	// display form would never match and would silently fail open (C42/C6). The
+	// caller's `from` argument is therefore unused here.
+	return func(inbox, _ string, raw []byte, env *inbound.Envelope) *inbound.Assessment {
+		trust := resolve(inbox, provenance.From(raw)).Trust
 		var to, cc []string
 		if env != nil {
 			to = envAddrStrings(env.To)

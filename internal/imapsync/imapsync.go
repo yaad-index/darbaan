@@ -412,11 +412,33 @@ func (s *Syncer) FetchContent(owner, inbox, id string) (inbound.Message, error) 
 		}
 		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: upstream uid %d not found: %w", id, m.UpstreamUID, inbound.ErrContentUnavailable)
 	}
-	// This lazy read-time fetch runs only when assessment is OFF (ADR 0019). With
-	// assessment ON, a message is assessed and stored present at ingest (pull, ADR
-	// 0032 Amendment 1), so it is never pending here — the assessment does not run
-	// on the agent-read path. Store the fetched body without assessment.
-	return s.store.SetContent(owner, inbox, id, raw)
+	// Steady state: with assessment ON a message is assessed and stored present at
+	// ingest (pull, ADR 0032 Amendment 1), so it is never pending here. The
+	// exception is the flag-flip TRANSITION backlog — records synced while
+	// assessment was OFF are still pending when the flag is later enabled, and a
+	// naive SetContent would store their bodies un-assessed, a visible-unassessed
+	// leak the Amendment forbids. So when a hook is installed, assess this pre-flip
+	// record's freshly-fetched body here as a fallback and store it present +
+	// decided, exactly as the ingest path would have. If that assessment HOLDS the
+	// message, do not surface its body on THIS in-flight read — the next SELECT
+	// re-reads the now-decided disposition and hides (undecided) or tombstones
+	// (rejected) it; clearing Raw keeps the triggering FETCH from serving a body the
+	// operator has not exposed. With no hook (assessment off) this is the plain lazy
+	// path, byte-identical to before (ADR 0019).
+	if s.assess == nil {
+		return s.store.SetContent(owner, inbox, id, raw)
+	}
+	a := s.assess(s.inbox, m.From, raw, m.Envelope)
+	full, err := s.store.SetContentAssessed(owner, inbox, id, raw, a)
+	if err != nil {
+		return inbound.Message{}, err
+	}
+	if full.HeldByAssessment() && full.HoldDecision != inbound.HoldApproved {
+		s.logger.Warn("assessed a pre-flip backlog record on read; holding for the operator",
+			"id", id, "inbox", inbound.NormInbox(inbox))
+		full.Raw = nil // withhold the un-exposed body from the triggering fetch
+	}
+	return full, nil
 }
 
 // WriteKeywords replicates a message's keyword set to the upstream backend over a
