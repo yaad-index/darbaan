@@ -341,7 +341,13 @@ func (s *Syncer) FetchContent(owner, inbox, id string) (inbound.Message, error) 
 		return inbound.Message{}, err
 	}
 	if !m.Pending {
-		return m, nil // already present — no upstream contact
+		// Already present — no upstream contact. Still gate the body: a held-and-
+		// unapproved record (stored present by the transition fallback below, or by
+		// eager ingest) must never yield its real body on the read path, even on a
+		// REPEAT fetch — the IMAP snapshot may predate the hold decision, so this is
+		// the authoritative withhold, not just the triggering fetch. The operator
+		// surface reads the stored body via store.Get and is unaffected.
+		return withheldIfHeld(m), nil
 	}
 
 	c, err := s.dial()
@@ -436,9 +442,21 @@ func (s *Syncer) FetchContent(owner, inbox, id string) (inbound.Message, error) 
 	if full.HeldByAssessment() && full.HoldDecision != inbound.HoldApproved {
 		s.logger.Warn("assessed a pre-flip backlog record on read; holding for the operator",
 			"id", id, "inbox", inbound.NormInbox(inbox))
-		full.Raw = nil // withhold the un-exposed body from the triggering fetch
 	}
-	return full, nil
+	return withheldIfHeld(full), nil
+}
+
+// withheldIfHeld blanks a message's body when the injection assessment holds it
+// and the operator has not approved exposure, so the lazy content path never
+// yields an un-exposed held body on ANY fetch — including a repeat fetch of a
+// record already stored present (ADR 0032 Amendment 1). The real body stays in the
+// store for the operator hold surface (read via store.Get); a later SELECT re-reads
+// the decided state and hides (undecided) or tombstones (rejected) it.
+func withheldIfHeld(m inbound.Message) inbound.Message {
+	if m.HeldByAssessment() && m.HoldDecision != inbound.HoldApproved {
+		m.Raw = nil
+	}
+	return m
 }
 
 // WriteKeywords replicates a message's keyword set to the upstream backend over a

@@ -766,6 +766,50 @@ func TestIMAPAssessmentTombstoneSearchAndFlagsNoLeak(t *testing.T) {
 		"real keyword withheld from tombstone FLAGS")
 }
 
+// Defense-in-depth (review C43 bypass): if a message is held by assessment but the
+// session's SELECT snapshot predates that decision, the serve path must still
+// withhold its real body — rawResolver re-checks the freshly-fetched hold state, so
+// a stale snapshot can't serve an un-exposed held body on a repeat fetch.
+func TestIMAPStaleSnapshotHeldBodyWithheld(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	_, m, err := store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "ok", UpstreamUID: 1, UIDValidity: 1,
+		Envelope: &inbound.Envelope{Subject: "ok"},
+	})
+	require.NoError(t, err)
+	// Present + CLEARED, so the message is visible at SELECT (not held in the snapshot).
+	_, err = store.SetContentAssessed("agent", inbound.DefaultInbox, m.ID,
+		[]byte("Subject: ok\r\n\r\nsecret-body"),
+		&inbound.Assessment{Disposition: inbound.AssessmentAgentHandled})
+	require.NoError(t, err)
+
+	c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, nil, nil), nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	sel, err := c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), sel.NumMessages, "visible at SELECT — the snapshot predates the hold")
+
+	// The message is re-assessed HELD after SELECT: the session's snapshot is now stale.
+	_, err = store.SetContentAssessed("agent", inbound.DefaultInbox, m.ID,
+		[]byte("Subject: ok\r\n\r\nsecret-body"),
+		&inbound.Assessment{Disposition: inbound.AssessmentHeld, Summary: "flagged"})
+	require.NoError(t, err)
+
+	msgs, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{
+		BodySection: []*imap.FetchItemBodySection{{}},
+	}).Collect()
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	body := string(msgs[0].FindBodySection(&imap.FetchItemBodySection{}))
+	assert.NotContains(t, body, "secret-body", "a held-unapproved body is withheld even from a stale snapshot")
+	assert.Empty(t, strings.TrimSpace(body), "served an inert empty body, not the real content")
+}
+
 // A message held by BOTH assessment and a filter Hold stays hidden, and the
 // single HoldDecision releases it past both sources (the documented model).
 func TestIMAPAssessmentAndFilterHold(t *testing.T) {

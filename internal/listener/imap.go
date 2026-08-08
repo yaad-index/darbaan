@@ -564,6 +564,18 @@ func (s *imapSession) rawResolver(m inbound.Message) rawFunc {
 			var full inbound.Message
 			switch full, err = s.fetch(m.Owner, s.selectedInbox, m.ID); {
 			case err == nil:
+				// Authoritative hold gate (ADR 0032 A1): the selected snapshot is taken
+				// at SELECT and can predate a hold decision (e.g. a pre-flip record
+				// assessed on its first read, or any mid-session hold), so isTombstone on
+				// the snapshot may be false for a now-held record. Re-check the freshly
+				// fetched record and never serve the real body of a message held by
+				// assessment and not operator-approved — whatever the ContentFetch wiring.
+				// A REJECTED hold is already served as a tombstone by the caller; this
+				// closes the UNDECIDED (invisible) stale-snapshot race.
+				if full.HeldByAssessment() && full.HoldDecision != inbound.HoldApproved {
+					raw = nil
+					break
+				}
 				raw = full.Raw
 				// Serve-path backstop (ADR 0030 slice 5): re-run the same sanitize +
 				// stamp as the write chokepoint, keyed strictly on the session's
