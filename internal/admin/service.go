@@ -208,6 +208,33 @@ func (s *Service) HeldList() ([]inbound.Message, error) {
 	return held, nil
 }
 
+// HeldContent returns a held message's stored raw body for the human hold
+// surface (ADR 0032 change A — the operator reads it, fenced, to judge
+// Expose/Drop). It reads the persisted blob only, never an on-demand upstream
+// fetch, and only for a currently-held id (it resolves the id through HeldList),
+// so it can't dump arbitrary inbox content. A held message whose body has not
+// been retrieved yet (a pending non-assessment hold) returns empty, not a pull.
+func (s *Service) HeldContent(id string) ([]byte, error) {
+	if s.inbox == nil {
+		return nil, nil
+	}
+	held, err := s.HeldList()
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range held {
+		if m.ID != id {
+			continue
+		}
+		got, err := s.inbox.Get(m.Owner, m.Inbox, m.ID)
+		if err != nil {
+			return nil, err
+		}
+		return got.Raw, nil
+	}
+	return nil, nil // not currently held (decided, gone, or unknown): no content
+}
+
 // inboxNames returns the configured inbox names in stable order (the held queue is
 // aggregated deterministically across inboxes).
 func (s *Service) inboxNames() []string {

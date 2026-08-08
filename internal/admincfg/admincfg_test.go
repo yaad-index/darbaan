@@ -89,6 +89,7 @@ func TestRouteScopesComplete(t *testing.T) {
 		"POST /queue/{id}/approve-as/{inbox}",
 		"POST /queue/{id}/reject",
 		"GET /holds",
+		"GET /holds/{id}/content",
 		"POST /holds/{id}/expose",
 		"POST /holds/{id}/drop",
 		"GET /reconcile",
