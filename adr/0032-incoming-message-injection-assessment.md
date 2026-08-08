@@ -1,6 +1,9 @@
 # ADR 0032: Incoming-message injection assessment
 
-**Status:** Proposed (2026-08-08)
+**Status:** Accepted (2026-08-08). **Amendment 1 (2026-08-08, pending operator sign-off):**
+pins the assessment trigger to *eager-at-ingest* and adds the agent-visible state
+model (invisible / real / tombstone), superseding the lazy-trigger + placeholder-visible
+implementation — see [Amendment 1](#amendment-1--eager-at-ingest-trigger-and-agent-visible-state-model-2026-08-08).
 
 Repoints the pre-screener concept from outbound to inbound.
 [ADR 0005](0005-agent-prescreener-plugin-risk-routing.md) introduced an automated
@@ -262,3 +265,108 @@ resolves toward *more* human scrutiny, never less:
 - **The assessor is not the gate.** It reduces how much untrusted content reaches
   the agent unflagged; the human release on the outbound sluice remains the
   authority for any consequential action.
+
+## Amendment 1 — eager-at-ingest trigger and agent-visible state model (2026-08-08)
+
+**Status:** Proposed (pending operator sign-off).
+
+The original decision placed the assessment on "the ingest/serve path" without
+fixing *when* it runs, and left the agent-visible disposition surface to
+implementation. This amendment pins both, after a live activation test exposed a
+leak in the first (lazy) implementation. It changes behaviour materially, so it is
+recorded here rather than as a silent implementation detail — the durable record
+must not describe one security model while the code implements another.
+
+### The leak, and the trigger move
+
+The first implementation ran the assessment **lazily**, at the moment the agent
+first fetched a message's body. That leaks: a message is listable and unassessed
+until that first fetch, and the very fetch that assesses-and-holds it also returns
+its body — so the flagged content reaches the agent once, before any human
+decision. Only subsequent reads are withheld.
+
+The assessment therefore runs **eagerly, at ingest**: when the inbound sync pulls a
+new message, its body is fetched and the disposition is computed and persisted
+**before the message is ever exposed to the agent**. A message is never in a
+*visible-but-unassessed* state.
+
+### Agent-visible state model
+
+With the disposition settled at ingest, what the agent sees is a pure read of
+stored state, not a race:
+
+- **held + undecided → invisible.** The agent does not see the message at all until
+  a human decides. There is nothing to act on yet, so surfacing anything — even a
+  placeholder — is unnecessary attack surface.
+- **held + approved → the real message.** Exactly what the operator released.
+- **held + rejected → a tombstone.** A system-authored marker ("a message was
+  received here and was reviewed out by the operator") stands in for the message, so
+  the agent knows something was received and dispositioned, with no
+  attacker-controlled bytes.
+
+**Nothing attacker-controlled is ever served for a held message:** undecided shows
+nothing, rejected shows a system tombstone, approved is the content the operator
+explicitly released. This removes an entire class of read-face hardening the lazy
+model required — a placeholder body, subject masking, size accounting, and a
+client-facing marker header — none of which is needed once a held message is simply
+invisible until decided.
+
+### Core invariant and fail-safe
+
+**With assessment enabled, no inbound message is ever visible-unassessed.** The
+ingest write is atomic — metadata, body, and disposition land in one store write —
+so even a concurrent read cannot observe a half-ingested, not-yet-assessed message.
+
+Ingest-time failure resolves fail-safe, distinguishing transient from terminal:
+
+- **Transient** (network blip, timeout, upstream temporarily unavailable) → **retry**
+  via the existing at-least-once sync robustness: the sync cursor is not advanced, so
+  the message is re-pulled on the next sync rather than being held. A blip never
+  holds legitimate mail invisibly. The retry posture matches or exceeds the existing
+  on-demand content-fetch robustness.
+- **Terminal** (the body was obtained but content extraction hard-fails, or the
+  assessor errors/times out on it) → **held, not-cleared, immediately** — surfaced to
+  the operator as "could not be assessed," invisible to the agent until decided. This
+  is the Fail-safe "not cleared → held" rule, applied at ingest.
+
+### No lazy/eager configuration knob
+
+Lazy assessment is **not** a configuration variant of this model — it is a
+*different security posture*. Lazy-with-assessment necessarily makes a message
+visible-then-held, which only closes safely with a placeholder-visible read face:
+a distinct model with distinct invariants. Offering "lazy vs eager" as a flag would
+obscure that these are two security models, not one knob. This ADR fixes
+**eager-at-ingest** as the model for assessment-enabled operation. Should the
+placeholder-visible / lazy posture ever have a use case (e.g. a high-volume inbox
+where the eager body-fetch cost is prohibitive), it warrants its own ADR, not a
+config value here.
+
+### Cost, and the cheap-first ordering
+
+Eager ingest fetches each incoming message's body at sync time rather than lazily on
+first read, so the lazy-body optimisation (ADR 0019) does not apply while assessment
+is enabled. The cheap-to-expensive ordering (§5) still holds *within* the ingest
+evaluation — the sender baseline and recipient position are checked first, and the
+isolated assessor (the expensive step) is still skipped when the cheap terms already
+gate — but the body itself is fetched regardless of that skip, because a held
+message's body must be persisted for the operator to review it on the hold surface
+(see coupling below). For the intended deployment (a single, low-volume personal
+inbox) this cost is negligible and accepted for v1.
+
+### Coupling: the operator hold surface requires eager
+
+The operator's hold-for-human surface presents each held message's body, fenced and
+inert, so the operator can judge Expose vs Drop. That requires the body to be
+**persisted while the message is undecided**. Under lazy assessment an undecided hold
+has no body yet, so the operator surface would be empty. Eager-at-ingest resolves
+this structurally: every held message has its content persisted at ingest, available
+to the operator surface. Eager is therefore load-bearing for the operator's
+decision, not only for agent invisibility.
+
+### What this supersedes
+
+The lazy-trigger and placeholder-visible read-face are superseded in full. The
+isolated assessor, the deterministic score composition, the point-table / baseline /
+band / threshold configuration, and the fail-safe routing (the original decision)
+are unchanged — only the trigger point and the agent-visible disposition surface
+change.
