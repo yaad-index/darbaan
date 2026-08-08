@@ -287,6 +287,39 @@ func TestInboundHoldQueue(t *testing.T) {
 	assert.Empty(t, list)
 }
 
+// HeldContent (ADR 0032 change A) returns a held message's stored body for the
+// operator's hold surface, restricted to currently-held ids — it can't be used to
+// dump arbitrary inbox mail, and a decided message drops off it.
+func TestHeldContentRestrictedToHeld(t *testing.T) {
+	q, _ := seedStore(t)
+	inbox := newInbound(t)
+	svc := admin.NewService(q, inbox, backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	flt, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]"))
+	require.NoError(t, err)
+	svc.SetInboundHolds(map[string]*filter.Filter{inbound.DefaultInbox: flt}, func(string) string { return "agent" }, nil, false)
+
+	_, plain, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1}) // not held
+	require.NoError(t, err)
+	_, held, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 2, UIDValidity: 1, Keywords: []string{"review"}})
+	require.NoError(t, err)
+	_, err = inbox.SetContent("agent", inbound.DefaultInbox, held.ID, []byte("Subject: x\r\n\r\nbody-bytes"))
+	require.NoError(t, err)
+
+	raw, err := svc.HeldContent(held.ID)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "body-bytes", "held id returns its stored body")
+
+	raw, err = svc.HeldContent(plain.ID)
+	require.NoError(t, err)
+	assert.Empty(t, raw, "a non-held id returns no content")
+
+	_, err = svc.ExposeHeld(held.ID)
+	require.NoError(t, err)
+	raw, err = svc.HeldContent(held.ID)
+	require.NoError(t, err)
+	assert.Empty(t, raw, "a decided message is no longer held → no content")
+}
+
 // An assessment-held message (ADR 0032) surfaces in the held queue with its
 // reason, and one expose decides it — the same human flow as a filter Hold.
 func TestInboundHoldQueueIncludesAssessment(t *testing.T) {

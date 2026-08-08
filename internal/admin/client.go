@@ -136,6 +136,21 @@ func (c *Client) HeldList(ctx context.Context) ([]inbound.Message, error) {
 	return held, nil
 }
 
+// HeldContent returns a held message's stored raw body for the operator hold
+// surface (ADR 0032 change A). An empty body (not-held / not-yet-fetched) comes
+// back as empty bytes, not an error.
+func (c *Client) HeldContent(ctx context.Context, id string) ([]byte, error) {
+	resp, err := c.request(ctx, http.MethodGet, "/holds/"+id+"/content", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errorFrom(resp)
+	}
+	return io.ReadAll(resp.Body)
+}
+
 // Expose approves a held message for the agent to see (ADR 0021).
 func (c *Client) Expose(ctx context.Context, id string) (inbound.Message, error) {
 	return c.hold(ctx, "/holds/"+id+"/expose")

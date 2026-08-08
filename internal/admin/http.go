@@ -68,6 +68,7 @@ func NewServer(addr, token string, svc *Service) (*Server, error) {
 	// Inbound hold-for-human queue (ADR 0021): expose = show to the agent, drop =
 	// keep hidden.
 	s.register(mux, "GET /holds", s.handleHeldList)
+	s.register(mux, "GET /holds/{id}/content", s.handleHeldContent)
 	s.register(mux, "POST /holds/{id}/expose", s.handleExpose)
 	s.register(mux, "POST /holds/{id}/drop", s.handleDrop)
 
@@ -223,6 +224,21 @@ func (s *Server) handleHeldList(w http.ResponseWriter, _ *http.Request) {
 		held = []inbound.Message{}
 	}
 	writeJSON(w, http.StatusOK, held)
+}
+
+// handleHeldContent serves a held message's stored raw body for the operator's
+// hold surface (ADR 0032 change A). Persisted-blob only, restricted to
+// currently-held ids; a not-held / no-body id serves an empty 200 rather than an
+// error, so the caller renders "no body available" without special-casing.
+func (s *Server) handleHeldContent(w http.ResponseWriter, r *http.Request) {
+	raw, err := s.svc.HeldContent(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Type", "message/rfc822")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
 }
 
 func (s *Server) handleExpose(w http.ResponseWriter, r *http.Request) {
