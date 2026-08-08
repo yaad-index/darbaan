@@ -8,8 +8,11 @@
 // path, no store access, and makes no network calls — an injected payload has
 // nothing to seize. This is the load-bearing property of ADR 0032: the gate's
 // safety does not depend on the assessor being uncompromised, because even a
-// fully-injected assessor can only misreport which factors it saw. It can never
-// assert a magnitude (the scorer composes that) or take an action.
+// fully-injected assessor can only misreport which factors it saw. Its output is
+// filtered to the detector's declared factor vocabulary (see Assessor.declared),
+// so a compromised detector can surface only system-defined factor names, never
+// arbitrary bytes; and it can never assert a magnitude (the scorer composes that)
+// or take an action.
 //
 // The v1 detector is a heuristic pattern ruleset (see HeuristicDetector):
 // best-effort and defense-in-depth, NOT the gate. It will miss novel phrasing;
@@ -65,6 +68,9 @@ type Assessor struct {
 	// arbitrary string. This makes the "no attacker bytes cross the boundary"
 	// invariant structural rather than by-convention: even an injected assessor
 	// can only misreport WHICH known factor it saw, matching the ADR's claim.
+	//
+	// It is derived from system-defined factor constants (det.Factors()), not from
+	// credentials or storage, so it does not weaken the zero-access guarantee.
 	declared map[riskscore.Factor]struct{}
 }
 
@@ -123,7 +129,7 @@ func (a *Assessor) Assess(ctx context.Context, c mailtext.Content) (Assessment, 
 	// cross the boundary" invariant.
 	factors = a.filterDeclared(factors)
 	factors = dedupeSort(factors)
-	return Assessment{Factors: factors, Summary: summarize(factors, c)}, nil
+	return Assessment{Factors: factors, Summary: summarize(factors, c.Truncated)}, nil
 }
 
 // filterDeclared drops any factor the detector did not declare at construction.
@@ -169,11 +175,13 @@ func dedupeSort(factors []riskscore.Factor) []riskscore.Factor {
 	return out
 }
 
-// summarize renders a sanitized, factual summary. The invariant it must hold: it
-// is composed only of system-defined strings that do not vary with message
-// content — factor names and a fixed truncation note. It never quotes message
-// bytes, so the summary can never relay an injection into whatever consumes it.
-func summarize(factors []riskscore.Factor, c mailtext.Content) string {
+// summarize renders a sanitized, factual summary. Its signature is deliberately
+// narrow — it takes only the (declared, filtered) factors and the truncation
+// flag, never the message content — so it *structurally* cannot quote message
+// bytes. The invariant it holds: the summary is composed only of system-defined
+// strings that do not vary with message content, so it can never relay an
+// injection into whatever consumes it.
+func summarize(factors []riskscore.Factor, truncated bool) string {
 	var b strings.Builder
 	if len(factors) == 0 {
 		b.WriteString("No injection-risk factors detected.")
@@ -184,7 +192,7 @@ func summarize(factors []riskscore.Factor, c mailtext.Content) string {
 		}
 		fmt.Fprintf(&b, "Detected injection-risk factors: %s.", strings.Join(names, ", "))
 	}
-	if c.Truncated {
+	if truncated {
 		b.WriteString(" Note: message content was truncated during extraction.")
 	}
 	return b.String()
