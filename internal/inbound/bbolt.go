@@ -127,7 +127,7 @@ func (s *bboltStore) Add(d Delivery) (Message, error) {
 	var msg Message
 	err := s.db.Update(func(tx *bbolt.Tx) error {
 		var e error
-		msg, _, e = s.put(tx, d, false)
+		msg, _, e = s.put(tx, d, false, nil)
 		return e
 	})
 	if err != nil {
@@ -138,20 +138,28 @@ func (s *bboltStore) Add(d Delivery) (Message, error) {
 
 // AddSynced stores an upstream-pulled message (with content) idempotently.
 func (s *bboltStore) AddSynced(d Delivery) (bool, Message, error) {
-	return s.addSynced(d, false)
+	return s.addSynced(d, false, nil)
 }
 
 // AddSyncedPending stores a headers-only (pending) record idempotently — no
 // content blob; SetContent fills it later (lazy sync, ADR 0019).
 func (s *bboltStore) AddSyncedPending(d Delivery) (bool, Message, error) {
-	return s.addSynced(d, true)
+	return s.addSynced(d, true, nil)
+}
+
+// AddSyncedAssessed stores a present, already-assessed record in one write —
+// body blob + disposition together (ADR 0032 Amendment 1, eager-at-ingest) — so
+// no reader ever observes a visible-unassessed message. Idempotent like
+// AddSynced.
+func (s *bboltStore) AddSyncedAssessed(d Delivery, a *Assessment) (bool, Message, error) {
+	return s.addSynced(d, false, a)
 }
 
 // addSynced is the shared dedup path: if the upstream (owner, UIDValidity,
 // UpstreamUID) is already indexed it's a no-op (added=false, returns the
 // existing record), so a crash-mid-sync re-fetch never duplicates (#87);
 // otherwise it stores the message (pending or present) and indexes it.
-func (s *bboltStore) addSynced(d Delivery, pending bool) (bool, Message, error) {
+func (s *bboltStore) addSynced(d Delivery, pending bool, a *Assessment) (bool, Message, error) {
 	if d.UpstreamUID == 0 {
 		return false, Message{}, fmt.Errorf("inbound: AddSynced requires a non-zero upstream UID")
 	}
@@ -172,7 +180,7 @@ func (s *bboltStore) addSynced(d Delivery, pending bool) (bool, Message, error) 
 			}
 			return nil
 		}
-		m, key, err := s.put(tx, d, pending)
+		m, key, err := s.put(tx, d, pending, a)
 		if err != nil {
 			return err
 		}
@@ -252,7 +260,7 @@ func (s *bboltStore) putBlob(inbox, id string, raw []byte) ([]byte, error) {
 // put builds and persists a new message. For a present message it writes the
 // content blob first (ADR 0018 ordering); a pending message has no blob yet.
 // Returns the message and its bbolt key. The caller is inside a write txn.
-func (s *bboltStore) put(tx *bbolt.Tx, d Delivery, pending bool) (Message, []byte, error) {
+func (s *bboltStore) put(tx *bbolt.Tx, d Delivery, pending bool, a *Assessment) (Message, []byte, error) {
 	b := tx.Bucket(bucketInbound)
 	seq, err := b.NextSequence()
 	if err != nil {
@@ -273,6 +281,7 @@ func (s *bboltStore) put(tx *bbolt.Tx, d Delivery, pending bool) (Message, []byt
 		Envelope:    d.Envelope,
 		Size:        d.Size,
 		Keywords:    d.Keywords,
+		Assessment:  a, // eager-at-ingest disposition (ADR 0032 A1); nil = not assessed
 	}
 	key := seqkey.Encode(seq)
 	blobbed := false

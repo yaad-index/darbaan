@@ -76,6 +76,9 @@ func (failingInbound) Add(inbound.Delivery) (inbound.Message, error) {
 func (failingInbound) AddSynced(inbound.Delivery) (bool, inbound.Message, error) {
 	return false, inbound.Message{}, errors.New("inbound store down")
 }
+func (failingInbound) AddSyncedAssessed(inbound.Delivery, *inbound.Assessment) (bool, inbound.Message, error) {
+	return false, inbound.Message{}, errors.New("inbound store down")
+}
 func (failingInbound) AddSyncedPending(inbound.Delivery) (bool, inbound.Message, error) {
 	return false, inbound.Message{}, errors.New("inbound store down")
 }

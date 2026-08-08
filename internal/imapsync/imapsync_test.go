@@ -243,36 +243,58 @@ func TestFetchContentFillsPending(t *testing.T) {
 }
 
 // The assessment hook runs once, at content fetch, and persists its disposition.
-// With no hook installed, no assessment is written — FetchContent is unchanged.
-func TestFetchContentAssessHook(t *testing.T) {
+// With no assess hook, sync stores headers-only pending records and the body is
+// fetched lazily on read, with no assessment (ADR 0019 unchanged).
+func TestSyncNoAssessHookLazy(t *testing.T) {
 	addr, user := startUpstream(t)
-	appendMsg(t, user, "Subject: a\r\n\r\nbody one") // uid 1
-	appendMsg(t, user, "Subject: b\r\n\r\nbody two") // uid 2
+	appendMsg(t, user, "Subject: a\r\n\r\nbody one")
 
 	store := newInbound(t)
 	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
-	_, m1, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1})
-	require.NoError(t, err)
-	_, m2, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 2, UIDValidity: 1})
+	_, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
 
-	// No hook: assessment off → nothing persisted.
-	off, err := syncer.FetchContent("agent", inbound.DefaultInbox, m1.ID)
+	list, err := store.List("agent", inbound.DefaultInbox)
 	require.NoError(t, err)
-	assert.Nil(t, off.Assessment, "with no hook installed, no assessment is written")
+	require.Len(t, list, 1)
+	assert.True(t, list[0].Pending, "no hook → headers-only pending record")
+	assert.Nil(t, list[0].Assessment)
 
-	// Hook installed: the fetched content is assessed and the disposition persisted.
+	filled, err := syncer.FetchContent("agent", inbound.DefaultInbox, list[0].ID)
+	require.NoError(t, err)
+	assert.Contains(t, string(filled.Raw), "body one")
+	assert.Nil(t, filled.Assessment, "the lazy read-time fetch never assesses")
+}
+
+// Eager-at-ingest (ADR 0032 Amendment 1): with the hook installed, sync fetches
+// the body, assesses it, and stores the message present + decided in one write —
+// never a visible-unassessed pending record — and the body is persisted for the
+// operator hold surface.
+func TestSyncEagerAssessAtIngest(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "Subject: danger\r\n\r\nattacker body")
+
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
 	var gotRaw []byte
 	syncer.SetAssessHook(func(inbox, from string, raw []byte, _ *inbound.Envelope) *inbound.Assessment {
 		gotRaw = raw
 		return &inbound.Assessment{Disposition: inbound.AssessmentHeld, Summary: "flagged"}
 	})
-	on, err := syncer.FetchContent("agent", inbound.DefaultInbox, m2.ID)
+	_, err := syncer.Sync(context.Background())
 	require.NoError(t, err)
-	require.NotNil(t, on.Assessment)
-	assert.Equal(t, inbound.AssessmentHeld, on.Assessment.Disposition)
-	assert.True(t, on.HeldByAssessment())
-	assert.Contains(t, string(gotRaw), "body two", "the hook receives the fetched content")
+
+	list, err := store.List("agent", inbound.DefaultInbox)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.False(t, list[0].Pending, "eager → stored present, not pending")
+	require.NotNil(t, list[0].Assessment)
+	assert.True(t, list[0].HeldByAssessment())
+	assert.Contains(t, string(gotRaw), "attacker body", "the hook receives the fetched body at ingest")
+
+	got, err := store.Get("agent", inbound.DefaultInbox, list[0].ID)
+	require.NoError(t, err)
+	assert.Contains(t, string(got.Raw), "attacker body", "body persisted for the operator hold surface")
 }
 
 // A pending record whose UIDVALIDITY no longer matches upstream errors cleanly

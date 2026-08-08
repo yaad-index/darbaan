@@ -245,12 +245,24 @@ func (s *imapSession) listAndFilter(inbox string) (full, visible []inbound.Messa
 				continue
 			}
 		}
-		// Injection assessment is a second security floor (ADR 0032), independent of
-		// the user filter: an assessment-held message stays hidden until the operator
-		// approves it, exactly like a filter Hold. A single HoldDecision releases the
-		// message past every hold source, so approving reveals it here too.
-		if m.HeldByAssessment() && m.HoldDecision != inbound.HoldApproved {
-			continue
+		// Injection assessment is a second security floor (ADR 0032 Amendment 1),
+		// independent of the user filter. Because the disposition is settled at
+		// ingest (eager), this is a pure read of decided state: an UNDECIDED hold is
+		// invisible (the agent shouldn't see it before a human decides), a REJECTED
+		// hold shows a system tombstone (see the serve path — the agent learns a
+		// message was received and reviewed out, with no attacker bytes), and an
+		// APPROVED hold flows through to the user filter with its real body. A single
+		// HoldDecision releases the message past every hold source.
+		if m.HeldByAssessment() {
+			switch m.HoldDecision {
+			case inbound.HoldApproved:
+				// exposed — apply the user filter to the real message below
+			case inbound.HoldRejected:
+				visible = append(visible, m) // tombstone-visible
+				continue
+			default:
+				continue // undecided → invisible
+			}
 		}
 		if flt == nil {
 			visible = append(visible, m)
@@ -458,14 +470,53 @@ func (s *imapSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 		// fetchMessage resolves content lazily: ENVELOPE / RFC822Size / header
 		// fields serve from stored metadata when present, and only a body request
 		// (or a record with no stored metadata) triggers getRaw. A resolve failure
-		// surfaces as an IMAP error, never empty/wrong content.
-		ferr = fetchMessage(w.CreateMessage(seqNum), *m, options, s.rawResolver(*m))
+		// surfaces as an IMAP error, never empty/wrong content. A rejected-hold
+		// message serves the system tombstone for every content field (ADR 0032 A1).
+		tombstone := isTombstone(*m)
+		getRaw := s.rawResolver(*m)
+		if tombstone {
+			getRaw = tombstoneResolver
+		}
+		ferr = fetchMessage(w.CreateMessage(seqNum), *m, options, getRaw, tombstone)
 	})
 	return ferr
 }
 
 // rawFunc lazily resolves a message's raw content.
 type rawFunc func() ([]byte, error)
+
+// tombstoneSubject / tombstoneRaw are the system-authored stand-in served for a
+// REJECTED assessment hold (ADR 0032 Amendment 1): the agent sees that a message
+// was received and reviewed out, carrying no attacker-controlled bytes. Undecided
+// holds are invisible and approved holds serve the real message, so the tombstone
+// is the only placeholder in the model.
+const tombstoneSubject = "[message reviewed out]"
+
+var tombstoneRaw = []byte("From: Darbaan <darbaan@localhost>\r\n" +
+	"Subject: " + tombstoneSubject + "\r\n" +
+	"Content-Type: text/plain; charset=utf-8\r\n" +
+	"\r\n" +
+	"A message was received here and was reviewed out by the operator. Its content is not delivered to the agent.\r\n")
+
+// tombstoneEnvelope is the system envelope served for a rejected hold, so a FETCH
+// ENVELOPE (which serves from stored metadata, not the body) never leaks the real
+// message's attacker-controlled Subject/From.
+func tombstoneEnvelope() *imap.Envelope {
+	return &imap.Envelope{
+		Subject: tombstoneSubject,
+		From:    []imap.Address{{Name: "Darbaan", Mailbox: "darbaan", Host: "localhost"}},
+	}
+}
+
+// isTombstone reports whether m serves the rejected-hold tombstone rather than its
+// real content (ADR 0032 Amendment 1). Keyed on the decided disposition, which is
+// authoritative at read time because assessment is eager-at-ingest.
+func isTombstone(m inbound.Message) bool {
+	return m.HeldByAssessment() && m.HoldDecision == inbound.HoldRejected
+}
+
+// tombstoneResolver is a rawFunc that always yields the system tombstone body.
+func tombstoneResolver() ([]byte, error) { return tombstoneRaw, nil }
 
 // rawResolver returns a memoized resolver for a message's raw content: it calls
 // the content fetcher at most once, and only when a field actually needs the body
@@ -682,7 +733,13 @@ func (s *imapSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCr
 		// criteria on records without stored metadata. If a candidate's content
 		// can't be resolved, skip it (degrade, don't [SERVERBUG] the whole SEARCH)
 		// — but log it: a skipped candidate is a silently-missing result.
-		ok, err := matchSearch(seqNum, m, criteria, s.rawResolver(*m))
+		// A rejected-hold message matches against its tombstone, not its real body,
+		// so SEARCH never leaks held content (ADR 0032 A1).
+		getRaw := s.rawResolver(*m)
+		if isTombstone(*m) {
+			getRaw = tombstoneResolver
+		}
+		ok, err := matchSearch(seqNum, m, criteria, getRaw)
 		if err != nil {
 			slog.Warn("imap search skipped message", "id", m.ID, "err", err)
 			continue
@@ -926,7 +983,7 @@ func (s *imapSession) Idle(_ *imapserver.UpdateWriter, stop <-chan struct{}) err
 	return nil
 }
 
-func fetchMessage(w *imapserver.FetchResponseWriter, m inbound.Message, options *imap.FetchOptions, getRaw rawFunc) error {
+func fetchMessage(w *imapserver.FetchResponseWriter, m inbound.Message, options *imap.FetchOptions, getRaw rawFunc, tombstone bool) error {
 	w.WriteUID(uidOf(m))
 	if options.Flags {
 		w.WriteFlags(flagList(m))
@@ -935,19 +992,36 @@ func fetchMessage(w *imapserver.FetchResponseWriter, m inbound.Message, options 
 		w.WriteInternalDate(m.ReceivedAt)
 	}
 	if options.RFC822Size {
-		size, err := sizeOf(&m, getRaw)
-		if err != nil {
-			return err
+		// A tombstone reports the tombstone's length (getRaw yields it), not the
+		// stored size of the withheld real message (ADR 0032 A1).
+		if tombstone {
+			raw, err := getRaw()
+			if err != nil {
+				return err
+			}
+			w.WriteRFC822Size(int64(len(raw)))
+		} else {
+			size, err := sizeOf(&m, getRaw)
+			if err != nil {
+				return err
+			}
+			w.WriteRFC822Size(size)
 		}
-		w.WriteRFC822Size(size)
 	}
 	if options.Envelope {
-		env, err := envelopeFor(m, getRaw)
-		if err != nil {
-			return err
-		}
-		if env != nil {
-			w.WriteEnvelope(env)
+		// A tombstone serves a system envelope, so ENVELOPE (which reads stored
+		// metadata, not the body) never leaks the rejected message's real
+		// Subject/From (ADR 0032 A1).
+		if tombstone {
+			w.WriteEnvelope(tombstoneEnvelope())
+		} else {
+			env, err := envelopeFor(m, getRaw)
+			if err != nil {
+				return err
+			}
+			if env != nil {
+				w.WriteEnvelope(env)
+			}
 		}
 	}
 	if options.BodyStructure != nil {

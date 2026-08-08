@@ -189,6 +189,12 @@ type InboundStore interface {
 	// content — for lazy sync (ADR 0019). Same idempotency as AddSynced; the
 	// Delivery's Raw is ignored. SetContent fills the body later.
 	AddSyncedPending(Delivery) (added bool, m Message, err error)
+	// AddSyncedAssessed stores a message present AND already-assessed in one atomic
+	// write — metadata, body, and the injection-assessment disposition together
+	// (ADR 0032 Amendment 1, eager-at-ingest). Same idempotency as AddSynced. Used
+	// when assessment is enabled so a message is decided before it is ever exposed,
+	// leaving no visible-unassessed window. Delivery.Raw is the fetched body.
+	AddSyncedAssessed(d Delivery, a *Assessment) (added bool, m Message, err error)
 	// SetContent fills a pending message's body (write the content blob, mark it
 	// present) and returns the now-complete message. Scoped to (owner, inbox).
 	SetContent(owner, inbox, id string, raw []byte) (Message, error)

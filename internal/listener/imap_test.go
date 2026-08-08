@@ -615,8 +615,9 @@ func TestIMAPFilterHidesMessages(t *testing.T) {
 	assert.Equal(t, "keep", msgs[0].Envelope.Subject) // only the allowed one is served
 }
 
-// An assessment-held message (ADR 0032) is hidden from the read face until the
-// operator approves it, exactly like a filter Hold; one approval reveals it.
+// An UNDECIDED assessment hold is invisible to the agent until the operator
+// decides; one approval reveals the real message (ADR 0032 Amendment 1). The
+// rejected→tombstone case is covered separately.
 func TestIMAPAssessmentHold(t *testing.T) {
 	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
 	require.NoError(t, err)
@@ -655,6 +656,46 @@ func TestIMAPAssessmentHold(t *testing.T) {
 	sel2, err := c2.Select("INBOX", nil).Wait()
 	require.NoError(t, err)
 	assert.Equal(t, uint32(2), sel2.NumMessages, "one approval reveals the held message")
+}
+
+// A REJECTED assessment hold is visible but serves a system tombstone — subject,
+// body, and size are all system-authored, never the real attacker-controlled
+// content (ADR 0032 Amendment 1).
+func TestIMAPAssessmentRejectedTombstone(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	_, held, err := store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "danger", UpstreamUID: 1, UIDValidity: 1,
+		Envelope: &inbound.Envelope{Subject: "danger"},
+	})
+	require.NoError(t, err)
+	_, err = store.SetContentAssessed("agent", inbound.DefaultInbox, held.ID,
+		[]byte("Subject: danger\r\n\r\nattacker-body-do-this"),
+		&inbound.Assessment{Disposition: inbound.AssessmentHeld, Summary: "flagged"})
+	require.NoError(t, err)
+	_, err = store.SetHoldDecision("agent", inbound.DefaultInbox, held.ID, inbound.HoldRejected)
+	require.NoError(t, err)
+
+	addr := startIMAPFull(t, store, nil, nil, nil)
+	c, err := imapclient.DialInsecure(addr, nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	sel, err := c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1), sel.NumMessages, "a rejected hold is visible as a tombstone")
+
+	msgs, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{
+		Envelope: true, BodySection: []*imap.FetchItemBodySection{{}},
+	}).Collect()
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "[message reviewed out]", msgs[0].Envelope.Subject, "tombstone subject, not the real one")
+	body := string(msgs[0].FindBodySection(&imap.FetchItemBodySection{}))
+	assert.Contains(t, body, "reviewed out by the operator", "tombstone body served")
+	assert.NotContains(t, body, "attacker-body-do-this", "real content withheld")
 }
 
 // A message held by BOTH assessment and a filter Hold stays hidden, and the
