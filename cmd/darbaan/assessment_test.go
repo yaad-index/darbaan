@@ -105,3 +105,24 @@ func TestBuildAssessHookEnabledProducesHeldAssessment(t *testing.T) {
 	assert.Equal(t, inbound.AssessmentHeld, a.Disposition) // unknown baseline + injection factors → held
 	assert.NotEmpty(t, a.Summary)
 }
+
+// C42/C6: the hook resolves per-sender trust on the NORMALIZED address parsed from
+// the raw From header (as the store's content-write chokepoint does), not the
+// caller's display-form `from` argument — so ADR 0031 per-sender rules can match.
+func TestBuildAssessHookResolvesTrustFromRawAddress(t *testing.T) {
+	cli := &CLI{AssessmentEnabled: true, AssessmentTimeout: time.Second}
+	var gotAddr string
+	resolve := func(inbox, from string) provenance.Stamp {
+		gotAddr = from
+		return provenance.Stamp{Trust: provenance.TrustTrusted}
+	}
+	hook, err := cli.buildAssessHook(nil, resolve, riskscore.DefaultConfig())
+	require.NoError(t, err)
+	require.NotNil(t, hook)
+
+	raw := []byte("From: Alice <ALICE@example.com>\r\nSubject: x\r\n\r\nhello")
+	// The caller passes a display-form From; the hook must ignore it and key trust
+	// on the raw's normalized RFC5321 address instead.
+	_ = hook(inbound.DefaultInbox, "Alice <ALICE@example.com>", raw, &inbound.Envelope{})
+	assert.Equal(t, "alice@example.com", gotAddr, "trust resolved on the normalized raw address, not the display form")
+}

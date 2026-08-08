@@ -297,6 +297,97 @@ func TestSyncEagerAssessAtIngest(t *testing.T) {
 	assert.Contains(t, string(got.Raw), "attacker body", "body persisted for the operator hold surface")
 }
 
+// Flag-flip transition backlog (ADR 0032 Amendment 1, C43): a record synced while
+// assessment was OFF is still pending when the flag is later enabled. FetchContent
+// must assess its body as a fallback rather than storing it un-assessed. The hold
+// disposition persists, the real body is kept for the operator surface, and the
+// triggering fetch does NOT surface the un-exposed body.
+func TestFetchContentAssessesPreFlipBacklog(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "Subject: danger\r\n\r\nattacker body do this") // upstream UID 1
+
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
+	syncer.SetAssessHook(func(inbox, from string, raw []byte, _ *inbound.Envelope) *inbound.Assessment {
+		return &inbound.Assessment{Disposition: inbound.AssessmentHeld, Summary: "flagged"}
+	})
+
+	// Pre-flip: a headers-only pending record, as synced before the hook existed.
+	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", Subject: "danger", UpstreamUID: 1, UIDValidity: 1})
+	require.NoError(t, err)
+	require.True(t, m.Pending)
+
+	got, err := syncer.FetchContent("agent", inbound.DefaultInbox, m.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.Assessment, "the pre-flip record is assessed on read, not stored un-assessed")
+	assert.True(t, got.HeldByAssessment())
+	assert.Empty(t, got.Raw, "an un-exposed held body is withheld from the triggering fetch")
+
+	// The record is now present + decided in the store, and the real body is kept
+	// for the operator hold surface (HeldContent reads it via store.Get).
+	stored, err := store.Get("agent", inbound.DefaultInbox, m.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.Pending, "no longer a visible-unassessed pending record")
+	assert.True(t, stored.HeldByAssessment())
+	assert.Contains(t, string(stored.Raw), "attacker body", "real body persisted for the operator surface")
+}
+
+// The held body is withheld on EVERY read-path fetch, not just the triggering one
+// (review C43 bypass): once the record is stored present, a repeat FetchContent
+// must not serve the real body via the !Pending early return. It flows only after
+// the operator approves exposure.
+func TestFetchContentHeldBodyWithheldOnRepeatFetch(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "Subject: danger\r\n\r\nattacker body do this")
+
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
+	syncer.SetAssessHook(func(inbox, from string, raw []byte, _ *inbound.Envelope) *inbound.Assessment {
+		return &inbound.Assessment{Disposition: inbound.AssessmentHeld, Summary: "flagged"}
+	})
+	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", Subject: "danger", UpstreamUID: 1, UIDValidity: 1})
+	require.NoError(t, err)
+
+	first, err := syncer.FetchContent("agent", inbound.DefaultInbox, m.ID)
+	require.NoError(t, err)
+	assert.Empty(t, first.Raw, "held body withheld from the triggering fetch")
+
+	// The record is now present in the store; a REPEAT fetch (the !Pending early
+	// return) must still withhold — this is the bypass the review caught.
+	second, err := syncer.FetchContent("agent", inbound.DefaultInbox, m.ID)
+	require.NoError(t, err)
+	assert.True(t, second.HeldByAssessment())
+	assert.Empty(t, second.Raw, "held body still withheld on a repeat fetch (no !Pending bypass)")
+
+	// Once the operator approves exposure, the body flows.
+	_, err = store.SetHoldDecision("agent", inbound.DefaultInbox, m.ID, inbound.HoldApproved)
+	require.NoError(t, err)
+	approved, err := syncer.FetchContent("agent", inbound.DefaultInbox, m.ID)
+	require.NoError(t, err)
+	assert.Contains(t, string(approved.Raw), "attacker body", "approved → body flows")
+}
+
+// A pre-flip pending record the fallback assessment CLEARS (agent-handled) fills
+// its body normally — the transition fallback only withholds a held body.
+func TestFetchContentPreFlipClearedFlows(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "Subject: ok\r\n\r\nharmless body")
+
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
+	syncer.SetAssessHook(func(inbox, from string, raw []byte, _ *inbound.Envelope) *inbound.Assessment {
+		return &inbound.Assessment{Disposition: inbound.AssessmentAgentHandled}
+	})
+	_, m, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", Subject: "ok", UpstreamUID: 1, UIDValidity: 1})
+	require.NoError(t, err)
+
+	got, err := syncer.FetchContent("agent", inbound.DefaultInbox, m.ID)
+	require.NoError(t, err)
+	assert.False(t, got.Pending)
+	assert.False(t, got.HeldByAssessment())
+	assert.Contains(t, string(got.Raw), "harmless body", "a cleared message flows to the agent as before")
+}
+
 // A pending record whose UIDVALIDITY no longer matches upstream errors cleanly
 // (stale UID) rather than serving wrong/empty content.
 func TestFetchContentStaleUIDValidity(t *testing.T) {

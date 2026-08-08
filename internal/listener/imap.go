@@ -498,13 +498,42 @@ var tombstoneRaw = []byte("From: Darbaan <darbaan@localhost>\r\n" +
 	"\r\n" +
 	"A message was received here and was reviewed out by the operator. Its content is not delivered to the agent.\r\n")
 
+// tombstoneInboundEnvelope is the system envelope for a rejected hold in the
+// store's IMAP-free form. It is the single source of truth for the tombstone's
+// Subject/From, shared by the FETCH ENVELOPE path (via tombstoneEnvelope) and the
+// SEARCH match path (via tombstoneMessage), so the two can never drift.
+func tombstoneInboundEnvelope() *inbound.Envelope {
+	return &inbound.Envelope{
+		Subject: tombstoneSubject,
+		From:    []inbound.Address{{Name: "Darbaan", Mailbox: "darbaan", Host: "localhost"}},
+	}
+}
+
 // tombstoneEnvelope is the system envelope served for a rejected hold, so a FETCH
 // ENVELOPE (which serves from stored metadata, not the body) never leaks the real
 // message's attacker-controlled Subject/From.
 func tombstoneEnvelope() *imap.Envelope {
-	return &imap.Envelope{
-		Subject: tombstoneSubject,
-		From:    []imap.Address{{Name: "Darbaan", Mailbox: "darbaan", Host: "localhost"}},
+	return toIMAPEnvelope(tombstoneInboundEnvelope())
+}
+
+// tombstoneMessage returns a synthetic record standing in for a rejected-hold
+// message wherever the read face MATCHES or REPORTS metadata — SEARCH criteria and
+// FETCH FLAGS — so neither becomes an oracle over the withheld message's
+// attacker-controlled envelope, size, or keywords (ADR 0032 Amendment 1). It
+// mirrors the FETCH tombstone content path: the system envelope, the tombstone
+// body's length as Size, and no keywords. UID (via ID), received date, and the
+// agent's \Seen read-state are Darbaan-tracked (not attacker content) and are
+// preserved, so mailbox positioning and read-tracking stay correct and consistent
+// between the SEARCH and FETCH tombstone views.
+func tombstoneMessage(m inbound.Message) inbound.Message {
+	return inbound.Message{
+		ID:         m.ID,
+		Owner:      m.Owner,
+		Inbox:      m.Inbox,
+		ReceivedAt: m.ReceivedAt,
+		Seen:       m.Seen,
+		Size:       int64(len(tombstoneRaw)),
+		Envelope:   tombstoneInboundEnvelope(),
 	}
 }
 
@@ -535,6 +564,18 @@ func (s *imapSession) rawResolver(m inbound.Message) rawFunc {
 			var full inbound.Message
 			switch full, err = s.fetch(m.Owner, s.selectedInbox, m.ID); {
 			case err == nil:
+				// Authoritative hold gate (ADR 0032 A1): the selected snapshot is taken
+				// at SELECT and can predate a hold decision (e.g. a pre-flip record
+				// assessed on its first read, or any mid-session hold), so isTombstone on
+				// the snapshot may be false for a now-held record. Re-check the freshly
+				// fetched record and never serve the real body of a message held by
+				// assessment and not operator-approved — whatever the ContentFetch wiring.
+				// A REJECTED hold is already served as a tombstone by the caller; this
+				// closes the UNDECIDED (invisible) stale-snapshot race.
+				if full.HeldByAssessment() && full.HoldDecision != inbound.HoldApproved {
+					raw = nil
+					break
+				}
 				raw = full.Raw
 				// Serve-path backstop (ADR 0030 slice 5): re-run the same sanitize +
 				// stamp as the write chokepoint, keyed strictly on the session's
@@ -733,13 +774,19 @@ func (s *imapSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCr
 		// criteria on records without stored metadata. If a candidate's content
 		// can't be resolved, skip it (degrade, don't [SERVERBUG] the whole SEARCH)
 		// — but log it: a skipped candidate is a silently-missing result.
-		// A rejected-hold message matches against its tombstone, not its real body,
-		// so SEARCH never leaks held content (ADR 0032 A1).
+		// A rejected-hold message is matched against a SYNTHETIC tombstone record
+		// (system envelope, tombstone-body size, no keywords) and its body against
+		// the tombstone, so SEARCH never becomes an oracle over the withheld
+		// message's real subject/sender/size/keywords (ADR 0032 A1). Mirrors the
+		// FETCH tombstone path; the response still keys on the real seq/UID position.
+		match := m
 		getRaw := s.rawResolver(*m)
 		if isTombstone(*m) {
+			t := tombstoneMessage(*m)
+			match = &t
 			getRaw = tombstoneResolver
 		}
-		ok, err := matchSearch(seqNum, m, criteria, getRaw)
+		ok, err := matchSearch(seqNum, match, criteria, getRaw)
 		if err != nil {
 			slog.Warn("imap search skipped message", "id", m.ID, "err", err)
 			continue
@@ -986,7 +1033,14 @@ func (s *imapSession) Idle(_ *imapserver.UpdateWriter, stop <-chan struct{}) err
 func fetchMessage(w *imapserver.FetchResponseWriter, m inbound.Message, options *imap.FetchOptions, getRaw rawFunc, tombstone bool) error {
 	w.WriteUID(uidOf(m))
 	if options.Flags {
-		w.WriteFlags(flagList(m))
+		// A tombstone advertises only system flags (the agent's \Seen read-state) —
+		// never the withheld message's real keywords/labels — matching the SEARCH
+		// tombstone match record (ADR 0032 A1).
+		if tombstone {
+			w.WriteFlags(flagList(tombstoneMessage(m)))
+		} else {
+			w.WriteFlags(flagList(m))
+		}
 	}
 	if options.InternalDate {
 		w.WriteInternalDate(m.ReceivedAt)

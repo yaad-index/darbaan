@@ -341,7 +341,13 @@ func (s *Syncer) FetchContent(owner, inbox, id string) (inbound.Message, error) 
 		return inbound.Message{}, err
 	}
 	if !m.Pending {
-		return m, nil // already present — no upstream contact
+		// Already present — no upstream contact. Still gate the body: a held-and-
+		// unapproved record (stored present by the transition fallback below, or by
+		// eager ingest) must never yield its real body on the read path, even on a
+		// REPEAT fetch — the IMAP snapshot may predate the hold decision, so this is
+		// the authoritative withhold, not just the triggering fetch. The operator
+		// surface reads the stored body via store.Get and is unaffected.
+		return withheldIfHeld(m), nil
 	}
 
 	c, err := s.dial()
@@ -412,11 +418,45 @@ func (s *Syncer) FetchContent(owner, inbox, id string) (inbound.Message, error) 
 		}
 		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: upstream uid %d not found: %w", id, m.UpstreamUID, inbound.ErrContentUnavailable)
 	}
-	// This lazy read-time fetch runs only when assessment is OFF (ADR 0019). With
-	// assessment ON, a message is assessed and stored present at ingest (pull, ADR
-	// 0032 Amendment 1), so it is never pending here — the assessment does not run
-	// on the agent-read path. Store the fetched body without assessment.
-	return s.store.SetContent(owner, inbox, id, raw)
+	// Steady state: with assessment ON a message is assessed and stored present at
+	// ingest (pull, ADR 0032 Amendment 1), so it is never pending here. The
+	// exception is the flag-flip TRANSITION backlog — records synced while
+	// assessment was OFF are still pending when the flag is later enabled, and a
+	// naive SetContent would store their bodies un-assessed, a visible-unassessed
+	// leak the Amendment forbids. So when a hook is installed, assess this pre-flip
+	// record's freshly-fetched body here as a fallback and store it present +
+	// decided, exactly as the ingest path would have. If that assessment HOLDS the
+	// message, do not surface its body on THIS in-flight read — the next SELECT
+	// re-reads the now-decided disposition and hides (undecided) or tombstones
+	// (rejected) it; clearing Raw keeps the triggering FETCH from serving a body the
+	// operator has not exposed. With no hook (assessment off) this is the plain lazy
+	// path, byte-identical to before (ADR 0019).
+	if s.assess == nil {
+		return s.store.SetContent(owner, inbox, id, raw)
+	}
+	a := s.assess(s.inbox, m.From, raw, m.Envelope)
+	full, err := s.store.SetContentAssessed(owner, inbox, id, raw, a)
+	if err != nil {
+		return inbound.Message{}, err
+	}
+	if full.HeldByAssessment() && full.HoldDecision != inbound.HoldApproved {
+		s.logger.Warn("assessed a pre-flip backlog record on read; holding for the operator",
+			"id", id, "inbox", inbound.NormInbox(inbox))
+	}
+	return withheldIfHeld(full), nil
+}
+
+// withheldIfHeld blanks a message's body when the injection assessment holds it
+// and the operator has not approved exposure, so the lazy content path never
+// yields an un-exposed held body on ANY fetch — including a repeat fetch of a
+// record already stored present (ADR 0032 Amendment 1). The real body stays in the
+// store for the operator hold surface (read via store.Get); a later SELECT re-reads
+// the decided state and hides (undecided) or tombstones (rejected) it.
+func withheldIfHeld(m inbound.Message) inbound.Message {
+	if m.HeldByAssessment() && m.HoldDecision != inbound.HoldApproved {
+		m.Raw = nil
+	}
+	return m
 }
 
 // WriteKeywords replicates a message's keyword set to the upstream backend over a
