@@ -60,6 +60,7 @@ func NewServer(addr, token string, svc *Service) (*Server, error) {
 	s.register(mux, "GET /queue/{id}", s.handleShow)
 	s.register(mux, "POST /queue/{id}/approve", s.handleApprove)
 	s.register(mux, "POST /queue/{id}/approve-as/{inbox}", s.handleApproveAs)
+	s.register(mux, "POST /queue/{id}/resend", s.handleResend)
 	s.register(mux, "POST /queue/{id}/reject", s.handleReject)
 
 	// Configured inbox identities for the Change-sender picker (ADR 0023 slice 5).
@@ -205,6 +206,20 @@ func (s *Server) handleApproveAs(w http.ResponseWriter, r *http.Request) {
 	out, err := s.svc.ApproveAs(r.Context(), r.PathValue("id"), r.PathValue("inbox"))
 	if errors.Is(err, ErrUnknownInbox) {
 		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeAction(w, out, err)
+}
+
+// handleResend retries the upstream send of an approved-but-stranded message (C4).
+// ErrNotResendable is a 409 (the message is not in a re-sendable state), distinct
+// from the 404 for an unknown id.
+func (s *Server) handleResend(w http.ResponseWriter, r *http.Request) {
+	out, err := s.svc.ReSend(r.Context(), r.PathValue("id"))
+	// Both are 409: the message is either not in a re-sendable state, or its
+	// approved-as inbox no longer resolves (removed from config while stranded).
+	if errors.Is(err, ErrNotResendable) || errors.Is(err, ErrUnknownInbox) {
+		writeErr(w, http.StatusConflict, err)
 		return
 	}
 	writeAction(w, out, err)

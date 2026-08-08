@@ -120,7 +120,7 @@ func TestLegacyInlineRecordFallback(t *testing.T) {
 	assert.Equal(t, len(legacy.Raw), metas[0].Size)
 
 	// A legacy message still transitions, and the verdict reads back its raw.
-	approved, err := q.Approve("1", "op", nil)
+	approved, err := q.Approve("1", "op", nil, "")
 	require.NoError(t, err)
 	assert.Equal(t, StatusApproved, approved.Status)
 	assert.Equal(t, legacy.Raw, approved.Raw)

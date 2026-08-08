@@ -95,6 +95,12 @@ func (c *Client) ApproveAs(ctx context.Context, id, inbox string) (Outcome, erro
 	return c.action(ctx, "/queue/"+id+"/approve-as/"+inbox, nil)
 }
 
+// ReSend retries the upstream delivery of an approved message whose previous send
+// failed (C4). Only valid for a message stranded in `approved` with a send error.
+func (c *Client) ReSend(ctx context.Context, id string) (Outcome, error) {
+	return c.action(ctx, "/queue/"+id+"/resend", nil)
+}
+
 // Inboxes lists the configured inbox identities for the Change-sender picker
 // (ADR 0023 slice 5).
 func (c *Client) Inboxes(ctx context.Context) ([]InboxIdentity, error) {

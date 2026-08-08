@@ -167,12 +167,14 @@ func (s *bboltStore) List() ([]Meta, error) {
 			metas = append(metas, Meta{
 				ID:         rec.ID,
 				Agent:      rec.Agent,
+				Inbox:      rec.Inbox,
 				From:       rec.From,
 				Rcpt:       rec.Rcpt,
 				Subject:    subject,
 				Size:       size,
 				ReceivedAt: rec.ReceivedAt,
 				Status:     rec.Status,
+				SendErr:    rec.SendErr,
 			})
 			return nil
 		})
@@ -196,7 +198,7 @@ func (s *bboltStore) Get(id string) (Message, error) {
 	return s.withRaw(rec)
 }
 
-func (s *bboltStore) Approve(id, decidedBy string, released []byte) (Message, error) {
+func (s *bboltStore) Approve(id, decidedBy string, released []byte, asInbox string) (Message, error) {
 	return s.transitionFromPending(id, "approve", decidedBy, func(m *Message) {
 		m.Status = StatusApproved
 		m.DecidedBy = decidedBy
@@ -205,6 +207,10 @@ func (s *bboltStore) Approve(id, decidedBy string, released []byte) (Message, er
 		if len(released) > 0 {
 			m.Released = released
 		}
+		// Record the ApproveAs identity choice as decision metadata (ADR 0023 slice
+		// 5): the stored body is unchanged, but a re-send recomputes the From
+		// rewrite from this inbox instead of silently reverting to the original.
+		m.AsInbox = asInbox
 	})
 }
 
@@ -217,13 +223,23 @@ func (s *bboltStore) Reject(id, decidedBy, reason string, retryable bool) (Messa
 	})
 }
 
-func (s *bboltStore) RecordSendAttempt(id string, sendErr error) (Message, error) {
+func (s *bboltStore) RecordSendAttempt(id string, sendErr error, resend bool) (Message, error) {
 	detail := "sent"
 	var out Message
 	err := s.db.Update(func(tx *bbolt.Tx) error {
 		rec, key, err := loadStored(tx, id)
 		if err != nil {
 			return err
+		}
+		// A send is only ever recorded against an approved message. An already-sent
+		// message admits only an idempotent SUCCESS re-record — never a failure
+		// stamp, so a losing concurrent second attempt can't turn a delivered
+		// message into sent-with-error (C26 + review). Pending/rejected are refused.
+		switch {
+		case rec.Status == StatusApproved:
+		case rec.Status == StatusSent && sendErr == nil:
+		default:
+			return fmt.Errorf("%w: message %s is %s", ErrNotApproved, id, rec.Status)
 		}
 		if sendErr != nil {
 			rec.SendErr = sendErr.Error() // stays approved for a manual re-send
@@ -242,7 +258,13 @@ func (s *bboltStore) RecordSendAttempt(id string, sendErr error) (Message, error
 	if sendErr != nil {
 		detail = sendErr.Error()
 	}
-	s.writeAudit(audit.Record{Event: "send_attempt", Agent: out.Agent, Inbox: out.Inbox, MessageID: id, Detail: detail})
+	// A re-send is a distinct, operator-triggered delivery — audit it under its own
+	// event so it is not indistinguishable from the first send in the durable log.
+	event := "send_attempt"
+	if resend {
+		event = "resend_attempt"
+	}
+	s.writeAudit(audit.Record{Event: event, Agent: out.Agent, Inbox: out.Inbox, MessageID: id, Detail: detail})
 	return out, nil
 }
 
