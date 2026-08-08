@@ -37,11 +37,13 @@ type Syncer struct {
 }
 
 // AssessHook, when set, runs the injection assessment on a message's fetched
-// content at ingest and returns the disposition to persist alongside it (ADR
-// 0032). It runs once per message on the sync thread, off the agent-read path.
-// A nil hook (the default) disables assessment entirely: FetchContent behaves
-// exactly as before, storing no assessment. A nil *inbound.Assessment return
-// likewise means "not assessed" → normal flow.
+// content at ingest — during the sync pull, before the message is exposed to the
+// agent — and returns the disposition to persist alongside it (ADR 0032
+// Amendment 1, eager-at-ingest). It runs once per message on the sync thread, off
+// the agent-read path. A nil hook (the default) disables assessment entirely: the
+// pull stores headers-only pending records and the body is fetched lazily on read
+// (ADR 0019), with no assessment. A nil *inbound.Assessment return likewise means
+// "not assessed" → normal flow.
 type AssessHook func(inbox, from string, raw []byte, env *inbound.Envelope) *inbound.Assessment
 
 // SetAssessHook installs the injection-assessment hook (ADR 0032). Leaving it
@@ -185,15 +187,22 @@ func (s *Syncer) pull(c *imapclient.Client, uidValidity, uidNext, last uint32) (
 		return 0, ceiling, nil // nothing to fetch; advance the cursor to the ceiling
 	}
 
-	// Headers-only: ENVELOPE + RFC822.SIZE (stored as metadata so the read face
-	// serves FETCH ENVELOPE / RFC822Size / header SEARCH without the body) but no
-	// BODY[] — the body is fetched on demand when first read (lazy, ADR 0019).
-	cmd := c.Fetch(set, &imap.FetchOptions{
+	// Metadata always: ENVELOPE + RFC822.SIZE (stored so the read face serves FETCH
+	// ENVELOPE / RFC822Size / header SEARCH without the body). The body too when
+	// assessment is enabled, so the message is assessed and its disposition settled
+	// at ingest, before it is ever exposed to the agent (ADR 0032 Amendment 1,
+	// eager-at-ingest). With assessment off this stays headers-only and the body is
+	// fetched on demand when first read (lazy, ADR 0019).
+	opts := &imap.FetchOptions{
 		UID:        true,
 		Flags:      true, // custom keywords/labels (ADR 0020)
 		Envelope:   true,
 		RFC822Size: true,
-	})
+	}
+	if s.assess != nil {
+		opts.BodySection = []*imap.FetchItemBodySection{{}}
+	}
+	cmd := c.Fetch(set, opts)
 
 	stored, highest := 0, last
 	for {
@@ -213,9 +222,21 @@ func (s *Syncer) pull(c *imapclient.Client, uidValidity, uidNext, last uint32) (
 		d := deliveryOf(s.owner, s.inbox, m)
 		d.UpstreamUID = uid
 		d.UIDValidity = uidValidity
-		// Store headers-only (pending); the body is fetched on demand. Idempotent
-		// on (owner, UIDVALIDITY, UID): a re-fetched message is a no-op.
-		added, _, err := s.store.AddSyncedPending(d)
+		// Eager assessment (ADR 0032 Amendment 1): with a hook installed, assess the
+		// fetched body and store the message present + decided in one atomic write,
+		// so no reader ever sees a visible-unassessed record. The screener returns a
+		// fail-safe held (not-cleared) disposition when the body can't be assessed —
+		// a terminal failure, distinct from a transient fetch error, which aborts the
+		// pull below without advancing the cursor so the next sync retries. With no
+		// hook, store headers-only pending as before (lazy, ADR 0019). Idempotent on
+		// (owner, UIDVALIDITY, UID): a re-fetched message is a no-op.
+		var added bool
+		if s.assess != nil {
+			a := s.assess(s.inbox, d.From, d.Raw, d.Envelope)
+			added, _, err = s.store.AddSyncedAssessed(d, a)
+		} else {
+			added, _, err = s.store.AddSyncedPending(d)
+		}
 		if err != nil {
 			_ = cmd.Close()
 			return stored, highest, fmt.Errorf("imapsync: store uid %d: %w", uid, err)
@@ -391,14 +412,11 @@ func (s *Syncer) FetchContent(owner, inbox, id string) (inbound.Message, error) 
 		}
 		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: upstream uid %d not found: %w", id, m.UpstreamUID, inbound.ErrContentUnavailable)
 	}
-	// Assess the fetched content once, at ingest, off the agent-read path (ADR
-	// 0032). With no hook installed this is nil and the write is exactly the prior
-	// SetContent — no behavior change when assessment is off.
-	var assessment *inbound.Assessment
-	if s.assess != nil {
-		assessment = s.assess(inbox, m.From, raw, m.Envelope)
-	}
-	return s.store.SetContentAssessed(owner, inbox, id, raw, assessment)
+	// This lazy read-time fetch runs only when assessment is OFF (ADR 0019). With
+	// assessment ON, a message is assessed and stored present at ingest (pull, ADR
+	// 0032 Amendment 1), so it is never pending here — the assessment does not run
+	// on the agent-read path. Store the fetched body without assessment.
+	return s.store.SetContent(owner, inbox, id, raw)
 }
 
 // WriteKeywords replicates a message's keyword set to the upstream backend over a
