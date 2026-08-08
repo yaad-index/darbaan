@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.1](https://github.com/yaad-index/darbaan/compare/v0.16.0...v0.16.1) (2026-08-08)
+
+
+### Bug Fixes
+
+* close ADR 0032 tombstone SEARCH/FLAGS leak + assess pre-flip backlog ([#239](https://github.com/yaad-index/darbaan/issues/239)) ([215d5c6](https://github.com/yaad-index/darbaan/commit/215d5c6c3a58baf87dd2de6a6f18dff18149e9e2))
+
 ## [0.16.0](https://github.com/yaad-index/darbaan/compare/v0.15.0...v0.16.0) (2026-08-08)
 
 
