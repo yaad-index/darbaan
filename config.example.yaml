@@ -97,16 +97,24 @@ agent-username: ""
 approval-strict: [manual]
 approval-light: [manual]
 
-# Incoming-message injection assessment (ADR 0032). OFF by default. When enabled,
-# each incoming message is assessed once at ingest for prompt-injection risk; a
-# high-risk message is HELD for the operator in the same hold-for-human queue as
-# other holds (`darbaan holds ls|expose|drop`), and a low/medium message flows to
-# the agent as before. Enabling it changes how inbound mail is dispositioned on a
+# Incoming-message injection assessment (ADR 0032, Amendment 1). OFF by default.
+# When enabled, each incoming message is assessed for prompt-injection risk
+# EAGERLY at ingest — the sync fetches and assesses the body before the message
+# is ever exposed to the agent, so a held message is decided before its first
+# read (no first-read window). A high-risk message is HELD for the operator in
+# the hold-for-human queue (`darbaan holds ls|expose|drop`), where the operator
+# sees its reason and fenced body to judge Expose vs Drop; a low/medium message
+# flows to the agent normally.
+#
+# What the agent sees on the read face is a read of the decided state: an
+# UNDECIDED hold is invisible, an EXPOSED (approved) one is the real message, and
+# a REJECTED one is a system tombstone (never the original attacker-controlled
+# bytes). Enabling assessment changes how inbound mail is dispositioned on a
 # running inbox, so it is a deliberate opt-in. The detector and scorer are
 # constructed and alignment-checked at startup even when disabled, so a
 # misconfiguration fails startup rather than lurking behind the flag; disabled is
-# a clean no-op (no assessment, no new holds). On assessor timeout the message is
-# held (fail-safe).
+# a clean no-op (headers-only lazy sync, no assessment, no new holds). On an
+# assessor timeout or an unassessable body the message is held (fail-safe).
 assessment-enabled: false
 assessment-timeout: 5s
 
