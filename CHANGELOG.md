@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/yaad-index/darbaan/compare/v0.15.0...v0.16.0) (2026-08-08)
+
+
+### Features
+
+* document eager-at-ingest injection assessment + invisible/tombstone model (ADR 0032 A1) ([#230](https://github.com/yaad-index/darbaan/issues/230)) ([355e4ac](https://github.com/yaad-index/darbaan/commit/355e4ac8204acbe884941feb9a7854adc41296bb))
+
 ## [0.15.0](https://github.com/yaad-index/darbaan/compare/v0.14.0...v0.15.0) (2026-08-08)
 
 
