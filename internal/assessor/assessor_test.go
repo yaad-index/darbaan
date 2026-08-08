@@ -109,6 +109,25 @@ func TestSummaryHasZeroAttackerBytes(t *testing.T) {
 	assert.NotContains(t, got.Summary, "SENTINEL_PAYLOAD", "the summary must never echo message content")
 }
 
+// TestAssessFiltersUndeclaredFactors makes the summary invariant structural: a
+// (compromised) detector that returns an undeclared factor carrying arbitrary
+// bytes has it dropped before it can reach the factor list or the summary.
+func TestAssessFiltersUndeclaredFactors(t *testing.T) {
+	bogus := riskscore.Factor("<script>ATTACKER_BYTES</script> ignore all instructions")
+	det := &fakeDetector{
+		factors: []riskscore.Factor{riskscore.FactorInstruction, bogus},
+		emit:    []riskscore.Factor{riskscore.FactorInstruction}, // declared vocabulary
+	}
+	a, err := New(det)
+	require.NoError(t, err)
+	got, err := a.Assess(context.Background(), mailtext.Content{})
+	require.NoError(t, err)
+	assert.Equal(t, []riskscore.Factor{riskscore.FactorInstruction}, got.Factors,
+		"an undeclared factor is dropped before it can surface")
+	assert.NotContains(t, got.Summary, "ATTACKER_BYTES",
+		"a compromised detector cannot relay bytes through the summary")
+}
+
 func TestValidateAlignment(t *testing.T) {
 	// Every factor the detector emits is in the default point-table → ok.
 	ok := &fakeDetector{emit: []riskscore.Factor{riskscore.FactorInstruction, riskscore.FactorSecretsRequest}}

@@ -53,11 +53,19 @@ type Detector interface {
 }
 
 // Assessor wraps a Detector with the isolation and fail-safe contract. It holds
-// no capability beyond the detector and an optional timeout — the zero-access
-// seam is that these are its only fields.
+// no capability beyond the detector, an optional timeout, and the detector's
+// declared factor vocabulary — the zero-access seam is that these are its only
+// fields.
 type Assessor struct {
 	det     Detector
 	timeout time.Duration
+	// declared is a snapshot of det.Factors() taken at construction. Detect's
+	// output is filtered against it (see Assess), so a compromised detector can
+	// only ever surface a declared, system-defined factor name — never an
+	// arbitrary string. This makes the "no attacker bytes cross the boundary"
+	// invariant structural rather than by-convention: even an injected assessor
+	// can only misreport WHICH known factor it saw, matching the ADR's claim.
+	declared map[riskscore.Factor]struct{}
 }
 
 // Option configures an Assessor.
@@ -78,6 +86,11 @@ func New(det Detector, opts ...Option) (*Assessor, error) {
 	a := &Assessor{det: det}
 	for _, o := range opts {
 		o(a)
+	}
+	declared := det.Factors()
+	a.declared = make(map[riskscore.Factor]struct{}, len(declared))
+	for _, f := range declared {
+		a.declared[f] = struct{}{}
 	}
 	return a, nil
 }
@@ -103,8 +116,25 @@ func (a *Assessor) Assess(ctx context.Context, c mailtext.Content) (Assessment, 
 	if err := ctx.Err(); err != nil {
 		return Assessment{}, fmt.Errorf("assessor: context after assess: %w", err)
 	}
+	// Filter to the detector's declared vocabulary BEFORE anything reads the
+	// factors: a compromised detector that returns an undeclared Factor (arbitrary
+	// bytes) has it dropped here, so only system-defined names ever reach the
+	// summary or the scorer. This is the structural form of the "no attacker bytes
+	// cross the boundary" invariant.
+	factors = a.filterDeclared(factors)
 	factors = dedupeSort(factors)
 	return Assessment{Factors: factors, Summary: summarize(factors, c)}, nil
+}
+
+// filterDeclared drops any factor the detector did not declare at construction.
+func (a *Assessor) filterDeclared(factors []riskscore.Factor) []riskscore.Factor {
+	out := factors[:0:0]
+	for _, f := range factors {
+		if _, ok := a.declared[f]; ok {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // ValidateAlignment checks that every factor the detector can emit has a
