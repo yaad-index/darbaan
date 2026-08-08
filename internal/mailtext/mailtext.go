@@ -221,14 +221,17 @@ func (st *walkState) budgetText(text string) string {
 }
 
 // readCapped reads at most MaxPartText bytes from a part body, reporting whether
-// the cap was hit. go-message has already decoded transfer-encoding and charset.
+// the result is incomplete — either because the cap was hit or because the read
+// errored mid-part. go-message has already decoded transfer-encoding and charset.
+// A read error surfaces as truncation so the caller flags the extraction partial
+// rather than trusting a silently-cut part.
 func (st *walkState) readCapped(r io.Reader) (string, bool) {
 	limit := st.lim.MaxPartText
-	b, _ := io.ReadAll(io.LimitReader(r, int64(limit)+1))
+	b, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
 	if len(b) > limit {
 		return string(b[:limit]), true
 	}
-	return string(b), false
+	return string(b), err != nil
 }
 
 func attachmentFilename(dispParams, ctParams map[string]string) string {

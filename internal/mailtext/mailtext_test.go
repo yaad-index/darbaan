@@ -1,12 +1,35 @@
 package mailtext
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// errReader yields some bytes, then an error — to exercise a mid-part read fault.
+type errReader struct {
+	data []byte
+	err  error
+}
+
+func (e *errReader) Read(p []byte) (int, error) {
+	if len(e.data) > 0 {
+		n := copy(p, e.data)
+		e.data = e.data[n:]
+		return n, nil
+	}
+	return 0, e.err
+}
+
+func TestReadCappedErrorSetsTruncated(t *testing.T) {
+	st := &walkState{lim: DefaultLimits()}
+	s, trunc := st.readCapped(&errReader{data: []byte("partial"), err: errors.New("boom")})
+	assert.Equal(t, "partial", s)
+	assert.True(t, trunc, "a mid-part read error surfaces as truncation")
+}
 
 // crlf joins lines with CRLF and a trailing CRLF, so tests read as readable
 // message sources.
@@ -272,4 +295,17 @@ func TestHTMLToTextBlockTagsBecomeBreaks(t *testing.T) {
 	assert.Contains(t, got, "line one")
 	assert.Contains(t, got, "line two")
 	assert.Contains(t, got, "\n", "block tags produce a line break")
+}
+
+func TestHTMLToTextSelfClosingBreak(t *testing.T) {
+	got := htmlToText("one<br/>two")
+	assert.Contains(t, got, "one")
+	assert.Contains(t, got, "two")
+	assert.Contains(t, got, "\n", "a self-closing block tag produces a line break")
+}
+
+func TestHTMLToTextInlineKept(t *testing.T) {
+	// Inline formatting is dropped as tags but its text is kept, on one line.
+	got := htmlToText("a <b>bold</b> and <i>italic</i> word")
+	assert.Equal(t, "a bold and italic word", got)
 }

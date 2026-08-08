@@ -13,6 +13,7 @@ require (
 	github.com/go-telegram/bot v1.22.0
 	github.com/stretchr/testify v1.11.1
 	go.etcd.io/bbolt v1.5.0
+	golang.org/x/net v0.21.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
