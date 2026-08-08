@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.15.0](https://github.com/yaad-index/darbaan/compare/v0.14.0...v0.15.0) (2026-08-08)
+
+
+### Features
+
+* ADR 0032 slice 4b — live ingest integration (default-off) ([#225](https://github.com/yaad-index/darbaan/issues/225)) ([4d935a2](https://github.com/yaad-index/darbaan/commit/4d935a2a0efee586325b5e2814966c68394f996c))
+* **assessor:** ADR 0032 slice 3 — isolated zero-access injection assessor ([#223](https://github.com/yaad-index/darbaan/issues/223)) ([c45504f](https://github.com/yaad-index/darbaan/commit/c45504fe004c48aa30a59fe19bc76ec608bb0f3f))
+* **mailtext:** ADR 0032 slice 2 — bounded/inert content extraction ([#221](https://github.com/yaad-index/darbaan/issues/221)) ([b11cd62](https://github.com/yaad-index/darbaan/commit/b11cd62a27dc2609b0cdf531a5f53592ffe3ff9a))
+* **riskscore:** ADR 0032 slice 1 — deterministic scoring + config core ([#219](https://github.com/yaad-index/darbaan/issues/219)) ([24ea5e8](https://github.com/yaad-index/darbaan/commit/24ea5e86eff282940f6132d2e64b5bc8117a149d))
+* **screener:** ADR 0032 slice 4a — assessment orchestrator (pure) ([#224](https://github.com/yaad-index/darbaan/issues/224)) ([c4d154a](https://github.com/yaad-index/darbaan/commit/c4d154ab02e8f9135b8f92a9dc425a0cf448f5b6))
+
 ## [0.14.0](https://github.com/yaad-index/darbaan/compare/v0.13.0...v0.14.0) (2026-07-23)
 
 
