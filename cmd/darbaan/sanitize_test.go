@@ -23,6 +23,7 @@ func TestSanitizeFieldStripsTerminalControlRunes(t *testing.T) {
 		{"bidi-isolate", "a\u2066b\u2069c"},
 		{"zero-width", "acme\u200bcorp\u200d.example"},
 		{"BOM", "\ufeffheader"},
+		{"ALM-bidi", "a\u061cb"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -42,6 +43,9 @@ func TestSanitizeFieldPreservesOrdinaryText(t *testing.T) {
 		"Re: quarterly report \U00002014cafe resume",
 		"invoice \U000053d1\U00007968",
 		"emoji ok \U0001f381",
+		// U+200C (ZWNJ) is a semantic Persian joiner and must pass through
+		// unchanged (mi<ZWNJ>ravad), not become a replacement char.
+		"mi\u200cravad",
 	} {
 		assert.Equal(t, s, sanitizeField(s))
 	}
@@ -58,11 +62,12 @@ func isDangerousRune(r rune) bool {
 		return true
 	case r >= 0x80 && r <= 0x9f:
 		return true
-	case r == 0x200e || r == 0x200f,
+	case r == 0x061c,
+		r == 0x200e || r == 0x200f,
 		r >= 0x202a && r <= 0x202e,
 		r >= 0x2066 && r <= 0x2069:
 		return true
-	case r == 0x200b || r == 0x200c || r == 0x200d || r == 0xfeff:
+	case r == 0x200b || r == 0x200d || r == 0xfeff:
 		return true
 	}
 	return false

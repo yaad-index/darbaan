@@ -1346,6 +1346,14 @@ func truncate(s string, n int) string {
 // rewrite what the human sees while they choose whether to expose a message; every
 // such rune is replaced with U+FFFD. Apply before truncate so the rune budget
 // counts cleaned text.
+//
+// U+200C (ZWNJ) is deliberately passed through: it is a semantic joiner in Persian
+// (and other scripts) that changes word meaning (mi-ravad vs miravad), so
+// neutralizing it corrupts legitimate subjects for the very operators reading this
+// surface. It carries no reordering or escape-injection capability, so it is not a
+// terminal-hijack vector — unlike the bidi controls (U+061C ALM, LRM/RLM, the
+// LRE..RLO embeddings/overrides, and the isolates) and the remaining zero-width
+// runes, which stay neutralized.
 func sanitizeField(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch {
@@ -1353,11 +1361,12 @@ func sanitizeField(s string) string {
 			return '�'
 		case r >= 0x80 && r <= 0x9f: // C1 controls
 			return '�'
-		case r == 0x200e || r == 0x200f, // LRM / RLM
+		case r == 0x061c, // ALM (Arabic Letter Mark)
+			r == 0x200e || r == 0x200f, // LRM / RLM
 			r >= 0x202a && r <= 0x202e, // LRE / RLE / PDF / LRO / RLO
 			r >= 0x2066 && r <= 0x2069: // LRI / RLI / FSI / PDI
 			return '�'
-		case r == 0x200b || r == 0x200c || r == 0x200d || r == 0xfeff: // ZWSP / ZWNJ / ZWJ / BOM
+		case r == 0x200b || r == 0x200d || r == 0xfeff: // ZWSP / ZWJ / BOM (ZWNJ U+200C passes through)
 			return '�'
 		}
 		return r
