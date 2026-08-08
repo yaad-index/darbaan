@@ -151,13 +151,22 @@ func (s *Service) SetSenders(senders map[string]backend.Sender) {
 	}
 }
 
-// senderFor returns the upstream sender for a message's inbox, falling back to the
-// default inbox's sender when the message carries no/unknown inbox (ADR 0023).
-func (s *Service) senderFor(inbox string) backend.Sender {
-	if snd := s.senders[inbound.NormInbox(inbox)]; snd != nil {
-		return snd
-	}
-	return s.senders[inbound.DefaultInbox]
+// errNoSender marks a refused send: the message's stamped inbox has no configured
+// sender, so it was removed from config while the message was held (C25). It is a
+// config fault, never permanent — the message stays approved and re-sendable once
+// the inbox is restored, and it never bounces the agent.
+var errNoSender = errors.New("admin: inbox has no configured sender")
+
+// senderFor returns the upstream sender for a message's inbox (ADR 0023). ok=false
+// means the inbox has no configured sender: a message stamped with a named inbox
+// that was removed from config while held (C25). The caller must refuse the send
+// rather than silently deliver it through the default account under the wrong
+// identity. The default inbox is keyed under DefaultInbox and NormInbox folds the
+// empty inbox to it, so a default-routed message resolves here directly — the old
+// fall-through to the default sender only ever masked the removed-inbox case.
+func (s *Service) senderFor(inbox string) (backend.Sender, bool) {
+	snd := s.senders[inbound.NormInbox(inbox)]
+	return snd, snd != nil
 }
 
 // SetInboundHolds wires the inbound hold-for-human queue (ADR 0021/0023): the
@@ -430,7 +439,7 @@ func (s *Service) approve(ctx context.Context, id, asInbox string) (Outcome, err
 		slog.Info("approved-as", "message_id", m.ID, "inbox", inbound.NormInbox(asInbox), "identity", identity)
 	}
 
-	sendErr := s.senderFor(sendInbox).Send(ctx, sendMsg)
+	sendErr := s.sendVia(ctx, sendInbox, sendMsg)
 	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr, false)
 	if rerr != nil {
 		return Outcome{}, rerr
@@ -446,6 +455,8 @@ func (s *Service) approve(ctx context.Context, id, asInbox string) (Outcome, err
 		out.Detail = sentDetail
 	case isSendPending(sendErr):
 		out.Detail = "approved; no real Sender configured — nothing left Darbaan"
+	case errors.Is(sendErr, errNoSender):
+		out.Warn = "inbox has no configured sender (removed from config?); not sent — stays approved"
 	case backend.IsPermanent(sendErr):
 		// Permanent failure: bounce the agent with a generic reason (never the
 		// upstream body). The verdict still committed.
@@ -458,6 +469,18 @@ func (s *Service) approve(ctx context.Context, id, asInbox string) (Outcome, err
 		out.Warn = "upstream send failed (transient); stays approved for re-send"
 	}
 	return out, nil
+}
+
+// sendVia delivers sendMsg through the given inbox's sender, or returns errNoSender
+// when that inbox has no configured sender — refusing rather than silently routing
+// through the default account (C25). Recording it as a send error keeps the message
+// approved, visible (SendErr), and re-sendable once the inbox is restored.
+func (s *Service) sendVia(ctx context.Context, inbox string, sendMsg sluice.Message) error {
+	snd, ok := s.senderFor(inbox)
+	if !ok {
+		return fmt.Errorf("%w: %q", errNoSender, inbound.NormInbox(inbox))
+	}
+	return snd.Send(ctx, sendMsg)
 }
 
 // ErrNotResendable is returned by ReSend when the message is not an approved
@@ -512,7 +535,7 @@ func (s *Service) ReSend(ctx context.Context, id string) (Outcome, error) {
 	}
 	slog.Info("resend", "message_id", m.ID, "inbox", inbound.NormInbox(sendInbox), "identity", identity)
 
-	sendErr := s.senderFor(sendInbox).Send(ctx, sendMsg)
+	sendErr := s.sendVia(ctx, sendInbox, sendMsg)
 	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr, true)
 	if rerr != nil {
 		return Outcome{}, rerr
@@ -523,6 +546,8 @@ func (s *Service) ReSend(ctx context.Context, id string) (Outcome, error) {
 		out.Detail = "re-sent upstream"
 	case isSendPending(sendErr):
 		out.Detail = "re-send: no real Sender configured — nothing left Darbaan"
+	case errors.Is(sendErr, errNoSender):
+		out.Warn = "inbox has no configured sender (removed from config?); not sent — stays approved"
 	case backend.IsPermanent(sendErr):
 		if bErr := s.deliverBounce(m, "upstream delivery failed permanently", false); bErr != nil {
 			out.Warn = fmt.Sprintf("re-send failed permanently AND bounce delivery failed: %v", bErr)

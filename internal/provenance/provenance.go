@@ -6,12 +6,19 @@ package provenance
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"net/mail"
 	"strings"
 
 	"github.com/emersion/go-message/textproto"
 )
+
+// NormalizeAddress is the one canonical form for an RFC 5321 address across the
+// gate — lower-cased and trimmed. From, the submit-time header/envelope check
+// (C27), and the ADR 0031 per-sender trust chokepoint all compare through it, so
+// there is a single normalizer, not two that could drift.
+func NormalizeAddress(addr string) string { return strings.ToLower(strings.TrimSpace(addr)) }
 
 // From extracts the sender address from a raw message's From header, normalized
 // to a lower-cased RFC 5321 address (e.g. "alice@example.com"), or "" when there
@@ -28,7 +35,41 @@ func From(raw []byte) string {
 	if err != nil {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(addr.Address))
+	return NormalizeAddress(addr.Address)
+}
+
+// SubmitFromAddress returns the normalized RFC 5321 address of a submitted
+// message's From header for the submit-time spoof check (C27), enforcing that the
+// visible From is unambiguous before it is compared to the envelope sender:
+//   - no From header            → ("", nil): allowed, nothing to compare
+//   - exactly one From, one addr → (addr, nil)
+//   - unparseable header block, more than one From header, or a From that is not
+//     exactly one address → ("", err): the caller rejects fail-closed
+//
+// Rejecting the ambiguous cases (rather than comparing only the first) closes the
+// gap where a client renders a different From than the one checked. Scope is
+// From-only by decision — Reply-To/Sender are a softer reply-path vector, out of
+// scope here.
+func SubmitFromAddress(raw []byte) (string, error) {
+	hdr, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
+	if err != nil {
+		return "", fmt.Errorf("unparseable header block: %w", err)
+	}
+	froms := hdr.Values("From")
+	switch {
+	case len(froms) == 0:
+		return "", nil // no From header — nothing to compare
+	case len(froms) > 1:
+		return "", fmt.Errorf("message has %d From headers", len(froms))
+	}
+	list, err := mail.ParseAddressList(froms[0])
+	if err != nil {
+		return "", fmt.Errorf("unparseable From header: %w", err)
+	}
+	if len(list) != 1 {
+		return "", fmt.Errorf("From header must be a single address, got %d", len(list))
+	}
+	return NormalizeAddress(list[0].Address), nil
 }
 
 // Namespace is the header-name prefix darbaan reserves for its own
