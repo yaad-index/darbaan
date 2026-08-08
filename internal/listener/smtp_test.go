@@ -256,6 +256,45 @@ func TestSubmitQueueFailureIsTransientAndOpaque(t *testing.T) {
 	assert.NotContains(t, se.Message, "internal detail")
 }
 
+// C27: the submit face rejects a message whose header From address diverges from
+// the envelope MAIL FROM (a send-granted agent can't present an identity it holds
+// no grant on). A matching address with a display name, and an absent From, pass.
+func TestSubmitRejectsHeaderEnvelopeFromMismatch(t *testing.T) {
+	q := newSluice(t)
+	addr := startServer(t, listener.ServerConfig{
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{selfSigned(t)}},
+	}, q)
+
+	dial := func() *smtp.Client {
+		c, err := smtp.DialStartTLS(addr, &tls.Config{InsecureSkipVerify: true})
+		require.NoError(t, err)
+		require.NoError(t, c.Auth(sasl.NewPlainClient("", testUser, testPass)))
+		return c
+	}
+
+	// Header From differs from the envelope → rejected at DATA, nothing queued.
+	c := dial()
+	mismatch := "From: ceo@local\r\nTo: d@x.test\r\n\r\nbody\r\n"
+	require.Error(t, c.SendMail("agent@local", []string{"d@x.test"}, strings.NewReader(mismatch)))
+	_ = c.Close()
+
+	// Matching address with a display name → accepted (address-only comparison).
+	c = dial()
+	display := "From: Agent <agent@local>\r\nTo: d@x.test\r\n\r\nbody\r\n"
+	require.NoError(t, c.SendMail("agent@local", []string{"d@x.test"}, strings.NewReader(display)))
+	_ = c.Quit()
+
+	// Absent From → accepted (nothing to compare).
+	c = dial()
+	noFrom := "Subject: hi\r\nTo: d@x.test\r\n\r\nbody\r\n"
+	require.NoError(t, c.SendMail("agent@local", []string{"d@x.test"}, strings.NewReader(noFrom)))
+	_ = c.Quit()
+
+	metas, err := q.List()
+	require.NoError(t, err)
+	assert.Len(t, metas, 2, "only the matching-From and absent-From submissions are queued")
+}
+
 func TestPlaintextRequiresAuth(t *testing.T) {
 	q := newSluice(t)
 	addr := startServer(t, listener.ServerConfig{AllowInsecure: true}, q)

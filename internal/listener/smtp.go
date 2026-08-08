@@ -12,6 +12,7 @@ import (
 	"github.com/emersion/go-smtp"
 
 	"github.com/yaad-index/darbaan/internal/inbound"
+	"github.com/yaad-index/darbaan/internal/provenance"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
@@ -139,6 +140,22 @@ func (s *session) Data(r io.Reader) error {
 	raw, err := io.ReadAll(r)
 	if err != nil {
 		return err
+	}
+	// Routing + ADR 0027 send-scoping key on the envelope MAIL FROM, but recipients
+	// see the header From. Reject at submit when the visible header From diverges
+	// from the routed/scoped envelope sender (C27), so a send-granted agent cannot
+	// present an identity it holds no grant on. An ambiguous From (unparseable
+	// header block, more than one From header, or not exactly one address) is
+	// rejected fail-closed; an absent From is allowed. The legitimate "send as a
+	// different identity" path is the operator's ApproveAs, not a divergent header.
+	hdrFrom, err := provenance.SubmitFromAddress(raw)
+	if err != nil {
+		slog.Warn("submission rejected: ambiguous From header", "agent", s.agent, "inbox", s.inbox, "error", err)
+		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "message From header is malformed or ambiguous"}
+	}
+	if hdrFrom != "" && hdrFrom != provenance.NormalizeAddress(s.from) {
+		slog.Warn("submission rejected: header From differs from envelope sender", "agent", s.agent, "inbox", s.inbox)
+		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "message From header does not match the envelope sender"}
 	}
 	if _, err := s.backend.queue.Enqueue(sluice.Submission{
 		Agent: s.agent,

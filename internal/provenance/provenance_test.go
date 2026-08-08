@@ -215,3 +215,30 @@ func TestFrom(t *testing.T) {
 	assert.Equal(t, "", provenance.From([]byte("Subject: no from\r\n\r\nbody")), "no From → empty")
 	assert.Equal(t, "", provenance.From([]byte("not a message")), "unparseable → empty")
 }
+
+// C27: SubmitFromAddress normalizes a single From, allows an absent From (nothing
+// to compare), and rejects every ambiguous shape fail-closed so the submit check
+// can never be bypassed by a header a client renders differently than we compare.
+func TestSubmitFromAddress(t *testing.T) {
+	ok := func(raw, want string) func(*testing.T) {
+		return func(t *testing.T) {
+			got, err := provenance.SubmitFromAddress([]byte(raw))
+			require.NoError(t, err)
+			assert.Equal(t, want, got)
+		}
+	}
+	bad := func(raw string) func(*testing.T) {
+		return func(t *testing.T) {
+			_, err := provenance.SubmitFromAddress([]byte(raw))
+			require.Error(t, err)
+		}
+	}
+	t.Run("single address", ok("From: alice@example.com\r\n\r\nbody", "alice@example.com"))
+	t.Run("case+space normalized", ok("From:   Alice@Example.COM \r\n\r\nbody", "alice@example.com"))
+	t.Run("display name stripped", ok("From: Alice <alice@example.com>\r\n\r\nbody", "alice@example.com"))
+	t.Run("absent From allowed", ok("Subject: hi\r\n\r\nbody", ""))
+	t.Run("two From headers rejected", bad("From: a@x.test\r\nFrom: b@y.test\r\n\r\nbody"))
+	t.Run("two addresses rejected", bad("From: a@x.test, b@y.test\r\n\r\nbody"))
+	t.Run("unparseable From rejected", bad("From: not-an-address\r\n\r\nbody"))
+	t.Run("unparseable header block rejected", bad("this-is-not-a-header\r\n\r\nbody"))
+}

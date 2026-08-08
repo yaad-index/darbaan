@@ -140,6 +140,65 @@ func TestReSendApprovedAsRefusesVanishedInbox(t *testing.T) {
 	assert.Equal(t, sluice.StatusApproved, stored.Status, "refused re-send leaves it approved, not delivered under the wrong identity")
 }
 
+// C25: a message stamped with an inbox whose sender was removed from config is
+// refused rather than silently delivered through the default account — it stays
+// approved, warned, and re-sendable (SendErr set) once the inbox is restored.
+func TestApproveRefusesSendWhenInboxSenderRemoved(t *testing.T) {
+	q, _ := seedStore(t)
+	m, err := q.Enqueue(sluice.Submission{
+		Agent: "agent", Inbox: "work", From: "a@x.test", Rcpt: []string{"d@y.test"},
+		Raw: []byte("From: a@x.test\r\n\r\nb\r\n"),
+	})
+	require.NoError(t, err)
+
+	svc := admin.NewService(q, newInbound(t), backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	var defaultUsed bool
+	// The "work" inbox's sender is gone; only the default remains.
+	svc.SetSenders(map[string]backend.Sender{
+		inbound.DefaultInbox: senderFunc(func(sluice.Message) error { defaultUsed = true; return nil }),
+	})
+
+	out, err := svc.ApproveID(context.Background(), m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(sluice.StatusApproved), out.Status, "a refused send stays approved")
+	assert.NotEmpty(t, out.Warn, "the operator is warned")
+	assert.False(t, defaultUsed, "must NOT fall back to the default account")
+
+	stored, err := q.Get(m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, sluice.StatusApproved, stored.Status)
+	assert.NotEmpty(t, stored.SendErr, "the refusal is visible and re-sendable")
+}
+
+// C25: the same refusal guards the re-send path — a plain-approved message whose
+// inbox sender vanished while stranded is refused, not delivered via the default.
+func TestReSendRefusesWhenInboxSenderRemoved(t *testing.T) {
+	q, _ := seedStore(t)
+	m, err := q.Enqueue(sluice.Submission{
+		Agent: "agent", Inbox: "work", From: "a@x.test", Rcpt: []string{"d@y.test"},
+		Raw: []byte("From: a@x.test\r\n\r\nb\r\n"),
+	})
+	require.NoError(t, err)
+
+	svc := admin.NewService(q, newInbound(t), backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	svc.SetSenders(map[string]backend.Sender{
+		inbound.DefaultInbox: senderFunc(func(sluice.Message) error { return nil }),
+		"work":               senderFunc(func(sluice.Message) error { return errors.New("dial tcp: connection refused") }),
+	})
+
+	// Strand it (transient failure), then the work sender is removed from config.
+	_, err = svc.ApproveID(context.Background(), m.ID)
+	require.NoError(t, err)
+	svc.SetSenders(map[string]backend.Sender{
+		inbound.DefaultInbox: senderFunc(func(sluice.Message) error { return nil }),
+	})
+
+	out, err := svc.ReSend(context.Background(), m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(sluice.StatusApproved), out.Status, "refused re-send stays approved")
+	assert.NotEmpty(t, out.Warn)
+}
+
 // C4: re-send only acts on an approved message with a recorded send error; a
 // pending or already-sent message is refused with ErrNotResendable.
 func TestReSendRejectsNonResendable(t *testing.T) {
