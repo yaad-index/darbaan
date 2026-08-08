@@ -383,6 +383,36 @@ func (s *Service) ApproveAs(ctx context.Context, id, asInbox string) (Outcome, e
 // it is sent via asInbox's sender — the send-time rewrite never mutates the
 // stored record.
 func (s *Service) approve(ctx context.Context, id, asInbox string) (Outcome, error) {
+	// ApproveAs rewrites the From identity at send time. Resolve the target inbox
+	// and pre-compute the rewrite BEFORE committing the approve verdict (C5): an
+	// unknown inbox or a malformed header must fail with the message still pending
+	// and re-approvable, never leave it stranded in `approved` with no send
+	// attempted (decide() then refuses the retry as ErrNotPending).
+	var identity string
+	var rewritten []byte
+	if asInbox != "" {
+		identity = s.identities[inbound.NormInbox(asInbox)]
+		if identity == "" {
+			return Outcome{}, fmt.Errorf("%w: %q", ErrUnknownInbox, asInbox)
+		}
+		pending, err := s.store.Get(id)
+		if err != nil {
+			return Outcome{}, err
+		}
+		if pending.Status != sluice.StatusPending {
+			return Outcome{}, fmt.Errorf("%w: message %s is %s", sluice.ErrNotPending, id, pending.Status)
+		}
+		// The committed body is byte-identical to the pending body: v1 has no
+		// amendment flow, so the human Approve verdict carries no Amended and
+		// Approve never overwrites Released. The rewrite computed here is exactly
+		// what will be sent. (If an amendment flow is ever added, this must move
+		// to operate on the post-decide body.)
+		rewritten, err = rewriteFrom(sendBody(pending), identity)
+		if err != nil {
+			return Outcome{}, fmt.Errorf("admin: rewrite From to %q: %w", identity, err)
+		}
+	}
+
 	m, err := s.decide(ctx, id, approver.Verdict{Disposition: approver.Approve})
 	if err != nil {
 		return Outcome{}, err
@@ -393,16 +423,7 @@ func (s *Service) approve(ctx context.Context, id, asInbox string) (Outcome, err
 	out := Outcome{ID: m.ID, Status: string(sluice.StatusApproved), Detail: fmt.Sprintf("approved by %s", m.DecidedBy)}
 
 	sendInbox, sendMsg := m.Inbox, m
-	var identity string
 	if asInbox != "" {
-		identity = s.identities[inbound.NormInbox(asInbox)]
-		if identity == "" {
-			return Outcome{}, fmt.Errorf("%w: %q", ErrUnknownInbox, asInbox)
-		}
-		rewritten, rwErr := rewriteFrom(sendBody(m), identity)
-		if rwErr != nil {
-			return Outcome{}, fmt.Errorf("admin: rewrite From to %q: %w", identity, rwErr)
-		}
 		sendInbox = asInbox
 		sendMsg.From = identity      // envelope MAIL FROM
 		sendMsg.Released = rewritten // the sender prefers Released over Raw (send-time only)

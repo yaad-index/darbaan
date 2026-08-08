@@ -1327,7 +1327,7 @@ func (*QueueLsCmd) Run(cli *CLI) error {
 	_, _ = fmt.Fprintln(w, "ID\tSTATUS\tAGENT\tFROM\tSUBJECT\tRCPT\tSIZE\tRECEIVED")
 	for _, m := range metas {
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
-			m.ID, m.Status, m.Agent, m.From, truncate(m.Subject, 40), len(m.Rcpt), m.Size, m.ReceivedAt.Format(time.RFC3339))
+			m.ID, m.Status, sanitizeField(m.Agent), sanitizeField(m.From), truncate(sanitizeField(m.Subject), 40), len(m.Rcpt), m.Size, m.ReceivedAt.Format(time.RFC3339))
 	}
 	return w.Flush()
 }
@@ -1338,6 +1338,39 @@ func truncate(s string, n int) string {
 		return string(r[:n-1]) + "…"
 	}
 	return s
+}
+
+// sanitizeField neutralizes attacker-controlled header text (From/Subject) before
+// it reaches the operator's terminal on the decision surface (C22). A MIME
+// encoded-word can decode to CR/LF/ESC or Unicode bidi/zero-width runes that
+// rewrite what the human sees while they choose whether to expose a message; every
+// such rune is replaced with U+FFFD. Apply before truncate so the rune budget
+// counts cleaned text.
+//
+// U+200C (ZWNJ) is deliberately passed through: it is a semantic joiner in Persian
+// (and other scripts) that changes word meaning (mi-ravad vs miravad), so
+// neutralizing it corrupts legitimate subjects for the very operators reading this
+// surface. It carries no reordering or escape-injection capability, so it is not a
+// terminal-hijack vector — unlike the bidi controls (U+061C ALM, LRM/RLM, the
+// LRE..RLO embeddings/overrides, and the isolates) and the remaining zero-width
+// runes, which stay neutralized.
+func sanitizeField(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r < 0x20, r == 0x7f: // C0 controls + DEL
+			return '�'
+		case r >= 0x80 && r <= 0x9f: // C1 controls
+			return '�'
+		case r == 0x061c, // ALM (Arabic Letter Mark)
+			r == 0x200e || r == 0x200f, // LRM / RLM
+			r >= 0x202a && r <= 0x202e, // LRE / RLE / PDF / LRO / RLO
+			r >= 0x2066 && r <= 0x2069: // LRI / RLI / FSI / PDI
+			return '�'
+		case r == 0x200b || r == 0x200d || r == 0xfeff: // ZWSP / ZWJ / BOM (ZWNJ U+200C passes through)
+			return '�'
+		}
+		return r
+	}, s)
 }
 
 // QueueShowCmd dumps a held message's raw RFC 822.
@@ -1432,7 +1465,7 @@ func (*HoldsLsCmd) Run(cli *CLI) error {
 	_, _ = fmt.Fprintln(w, "ID\tFROM\tSUBJECT\tRECEIVED")
 	for _, m := range held {
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-			m.ID, m.From, truncate(m.Subject, 40), m.ReceivedAt.Format(time.RFC3339))
+			m.ID, sanitizeField(m.From), truncate(sanitizeField(m.Subject), 40), m.ReceivedAt.Format(time.RFC3339))
 	}
 	if err := w.Flush(); err != nil {
 		return err

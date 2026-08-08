@@ -3,8 +3,8 @@ package listener
 import (
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"time"
 
@@ -147,7 +147,15 @@ func (s *session) Data(r io.Reader) error {
 		Rcpt:  s.rcpt,
 		Raw:   raw,
 	}); err != nil {
-		return fmt.Errorf("trap submission: %w", err)
+		// A queue write can fail transiently (locked DB, disk hiccup). Return a
+		// 4xx so a correct client retries instead of dropping the mail, and keep
+		// the internal error server-side only — never leak it to the agent (C12).
+		slog.Error("trap submission failed", "agent", s.agent, "inbox", s.inbox, "error", err)
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+			Message:      "temporary queue failure",
+		}
 	}
 	return nil
 }

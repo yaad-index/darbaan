@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"math/big"
 	"net"
 	"path/filepath"
@@ -220,6 +221,39 @@ func TestSubmitRoutesFromToInbox(t *testing.T) {
 	metas, err = q.List()
 	require.NoError(t, err)
 	assert.Len(t, metas, 1)
+}
+
+// failingEnqueuer simulates a transient queue-write failure (locked DB / disk
+// hiccup) and carries an internal error string that must never reach the agent.
+type failingEnqueuer struct{}
+
+func (failingEnqueuer) Enqueue(sluice.Submission) (sluice.Message, error) {
+	return sluice.Message{}, errors.New("bbolt: database is locked (internal detail)")
+}
+
+// C12: a failed Enqueue must map to a transient 4xx so a correct client retries
+// instead of dropping the mail, and the internal error detail must not leak to
+// the agent.
+func TestSubmitQueueFailureIsTransientAndOpaque(t *testing.T) {
+	addr := startServer(t, listener.ServerConfig{
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{selfSigned(t)}},
+	}, failingEnqueuer{})
+
+	c, err := smtp.DialStartTLS(addr, &tls.Config{InsecureSkipVerify: true})
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Auth(sasl.NewPlainClient("", testUser, testPass)))
+
+	const raw = "From: agent@local\r\nTo: d@x.test\r\n\r\nbody\r\n"
+	err = c.SendMail("agent@local", []string{"d@x.test"}, strings.NewReader(raw))
+	require.Error(t, err)
+
+	var se *smtp.SMTPError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, 451, se.Code, "transient queue failure must be a 4xx (retry), not a 5xx (drop)")
+	assert.Equal(t, smtp.EnhancedCode{4, 3, 0}, se.EnhancedCode)
+	assert.NotContains(t, se.Message, "database is locked", "internal error must not leak to the agent")
+	assert.NotContains(t, se.Message, "internal detail")
 }
 
 func TestPlaintextRequiresAuth(t *testing.T) {
