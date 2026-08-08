@@ -71,6 +71,12 @@ type Message struct {
 	Retryable bool   `json:"retryable,omitempty"`
 	Released  []byte `json:"released,omitempty"` // edited body approved instead of Raw (ADR 0004); nil = original
 	SendErr   string `json:"send_err,omitempty"` // result of the last send attempt
+	// AsInbox is the inbox whose identity an ApproveAs chose (ADR 0023 slice 5),
+	// recorded as decision metadata at approve commit. The stored body stays as
+	// submitted — the identity rewrite is recomputed from this inbox at send time —
+	// so a re-send delivers what the operator approved rather than the original
+	// From. "" means the message was approved to send as-stamped.
+	AsInbox string `json:"as_inbox,omitempty"`
 }
 
 // Meta is the listing view of a queued message: everything but the raw body.
@@ -116,15 +122,19 @@ type MessageStore interface {
 	List() ([]Meta, error)
 	// Get returns the full message (including the raw body), or ErrNotFound.
 	Get(id string) (Message, error)
-	// Approve marks a pending message approved, recording the deciding approver
-	// and (when edited) the released body. It does not send. ErrNotPending if
-	// the message is not pending.
-	Approve(id, decidedBy string, released []byte) (Message, error)
+	// Approve marks a pending message approved, recording the deciding approver,
+	// (when edited) the released body, and (when an ApproveAs chose one) the
+	// asInbox whose identity to send from — decision metadata only; the stored
+	// body is unchanged. It does not send. ErrNotPending if not pending.
+	Approve(id, decidedBy string, released []byte, asInbox string) (Message, error)
 	// Reject marks a pending message rejected with a reason and retryable flag.
 	Reject(id, decidedBy, reason string, retryable bool) (Message, error)
 	// RecordSendAttempt records the result of attempting to release an approved
-	// message to the upstream Sender.
-	RecordSendAttempt(id string, sendErr error) (Message, error)
+	// message to the upstream Sender. resend marks an operator-triggered re-send
+	// (a distinct audit event from the first delivery). It refuses any record
+	// against a non-approved message, and against an already-sent message admits
+	// only an idempotent success — never a failure stamp onto a sent record.
+	RecordSendAttempt(id string, sendErr error, resend bool) (Message, error)
 	// Close releases the underlying resources.
 	Close() error
 }

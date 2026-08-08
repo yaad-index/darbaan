@@ -101,7 +101,7 @@ func TestApproveTransitionsAndAudits(t *testing.T) {
 	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("orig")})
 	require.NoError(t, err)
 
-	approved, err := q.Approve(m.ID, "manual", nil)
+	approved, err := q.Approve(m.ID, "manual", nil, "")
 	require.NoError(t, err)
 	assert.Equal(t, sluice.StatusApproved, approved.Status)
 	assert.Equal(t, "manual", approved.DecidedBy)
@@ -115,7 +115,7 @@ func TestApproveStoresEditedBody(t *testing.T) {
 	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("orig")})
 	require.NoError(t, err)
 
-	approved, err := q.Approve(m.ID, "manual", []byte("edited"))
+	approved, err := q.Approve(m.ID, "manual", []byte("edited"), "")
 	require.NoError(t, err)
 	assert.Equal(t, []byte("edited"), approved.Released)
 }
@@ -137,10 +137,10 @@ func TestDoubleDecisionRejected(t *testing.T) {
 	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("orig")})
 	require.NoError(t, err)
 
-	_, err = q.Approve(m.ID, "manual", nil)
+	_, err = q.Approve(m.ID, "manual", nil, "")
 	require.NoError(t, err)
 
-	_, err = q.Approve(m.ID, "manual", nil)
+	_, err = q.Approve(m.ID, "manual", nil, "")
 	require.ErrorIs(t, err, sluice.ErrNotPending)
 	_, err = q.Reject(m.ID, "manual", "too late", false)
 	require.ErrorIs(t, err, sluice.ErrNotPending)
@@ -150,10 +150,10 @@ func TestRecordSendAttemptStoresError(t *testing.T) {
 	q, al := newStore(t)
 	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("orig")})
 	require.NoError(t, err)
-	_, err = q.Approve(m.ID, "manual", nil)
+	_, err = q.Approve(m.ID, "manual", nil, "")
 	require.NoError(t, err)
 
-	out, err := q.RecordSendAttempt(m.ID, errors.New("upstream send pending"))
+	out, err := q.RecordSendAttempt(m.ID, errors.New("upstream send pending"), false)
 	require.NoError(t, err)
 	assert.Equal(t, "upstream send pending", out.SendErr)
 	require.NoError(t, al.Verify())
@@ -168,25 +168,35 @@ func TestRecordSendAttemptRejectsNonApproved(t *testing.T) {
 	require.NoError(t, err)
 
 	// Pending → refused.
-	_, err = q.RecordSendAttempt(m.ID, errors.New("boom"))
+	_, err = q.RecordSendAttempt(m.ID, errors.New("boom"), false)
 	require.ErrorIs(t, err, sluice.ErrNotApproved)
 
 	// Rejected → refused.
 	_, err = q.Reject(m.ID, "manual", "no", false)
 	require.NoError(t, err)
-	_, err = q.RecordSendAttempt(m.ID, errors.New("boom"))
+	_, err = q.RecordSendAttempt(m.ID, errors.New("boom"), false)
 	require.ErrorIs(t, err, sluice.ErrNotApproved)
 
 	// Approved → allowed; and idempotent once sent.
 	m2, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("two")})
 	require.NoError(t, err)
-	_, err = q.Approve(m2.ID, "manual", nil)
+	_, err = q.Approve(m2.ID, "manual", nil, "")
 	require.NoError(t, err)
-	sent, err := q.RecordSendAttempt(m2.ID, nil)
+	sent, err := q.RecordSendAttempt(m2.ID, nil, false)
 	require.NoError(t, err)
 	require.Equal(t, sluice.StatusSent, sent.Status)
-	_, err = q.RecordSendAttempt(m2.ID, nil) // idempotent on an already-sent message
+	_, err = q.RecordSendAttempt(m2.ID, nil, false) // idempotent on an already-sent message
 	require.NoError(t, err)
+
+	// A failure recorded against an already-sent message is refused — a losing
+	// concurrent second attempt can never turn a delivered message into
+	// sent-with-error (review note).
+	_, err = q.RecordSendAttempt(m2.ID, errors.New("late failure"), true)
+	require.ErrorIs(t, err, sluice.ErrNotApproved)
+	after, err := q.Get(m2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, sluice.StatusSent, after.Status)
+	assert.Empty(t, after.SendErr, "a sent message keeps no send error")
 }
 
 // C21: the listing view surfaces the routed inbox and the last send error, so an
@@ -195,9 +205,9 @@ func TestListSurfacesInboxAndSendErr(t *testing.T) {
 	q, _ := newStore(t)
 	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Inbox: "work", From: "f", Raw: []byte("Subject: s\r\n\r\nb")})
 	require.NoError(t, err)
-	_, err = q.Approve(m.ID, "manual", nil)
+	_, err = q.Approve(m.ID, "manual", nil, "")
 	require.NoError(t, err)
-	_, err = q.RecordSendAttempt(m.ID, errors.New("451 temporary failure"))
+	_, err = q.RecordSendAttempt(m.ID, errors.New("451 temporary failure"), false)
 	require.NoError(t, err)
 
 	metas, err := q.List()
@@ -244,7 +254,7 @@ func TestTransitionsSucceedWhenAuditFails(t *testing.T) {
 
 	t.Run("approve", func(t *testing.T) {
 		q, id := seedFailing(t)
-		out, err := q.Approve(id, "manual", nil)
+		out, err := q.Approve(id, "manual", nil, "")
 		require.NoError(t, err)
 		assert.Equal(t, sluice.StatusApproved, out.Status)
 	})
@@ -258,9 +268,9 @@ func TestTransitionsSucceedWhenAuditFails(t *testing.T) {
 
 	t.Run("record send attempt", func(t *testing.T) {
 		q, id := seedFailing(t)
-		_, err := q.Approve(id, "manual", nil)
+		_, err := q.Approve(id, "manual", nil, "")
 		require.NoError(t, err)
-		out, err := q.RecordSendAttempt(id, errors.New("upstream send pending"))
+		out, err := q.RecordSendAttempt(id, errors.New("upstream send pending"), false)
 		require.NoError(t, err)
 		assert.Equal(t, "upstream send pending", out.SendErr)
 	})

@@ -216,7 +216,9 @@ func (s *Server) handleApproveAs(w http.ResponseWriter, r *http.Request) {
 // from the 404 for an unknown id.
 func (s *Server) handleResend(w http.ResponseWriter, r *http.Request) {
 	out, err := s.svc.ReSend(r.Context(), r.PathValue("id"))
-	if errors.Is(err, ErrNotResendable) {
+	// Both are 409: the message is either not in a re-sendable state, or its
+	// approved-as inbox no longer resolves (removed from config while stranded).
+	if errors.Is(err, ErrNotResendable) || errors.Is(err, ErrUnknownInbox) {
 		writeErr(w, http.StatusConflict, err)
 		return
 	}

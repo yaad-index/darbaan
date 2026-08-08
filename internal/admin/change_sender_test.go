@@ -54,6 +54,92 @@ func TestReSendRecoversStrandedApproved(t *testing.T) {
 	assert.Empty(t, sent.SendErr)
 }
 
+// C4 (review fix): a re-send of an approved-AS message that stranded must deliver
+// the operator's chosen identity — recomputed from the persisted AsInbox — not
+// silently revert to the original From.
+func TestReSendApprovedAsRecomputesIdentity(t *testing.T) {
+	q, _ := seedStore(t)
+	m, err := q.Enqueue(sluice.Submission{
+		Agent: "agent", Inbox: inbound.DefaultInbox, From: "assistant@x.test", Rcpt: []string{"d@y.test"},
+		Raw: []byte("From: assistant@x.test\r\nTo: d@y.test\r\nSubject: hi\r\n\r\nbody\r\n"),
+	})
+	require.NoError(t, err)
+
+	svc := admin.NewService(q, newInbound(t), backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	fail := true
+	var sentVia string
+	var sent sluice.Message
+	svc.SetSenders(map[string]backend.Sender{
+		inbound.DefaultInbox: senderFunc(func(msg sluice.Message) error { sentVia = "default"; sent = msg; return nil }),
+		"work": senderFunc(func(msg sluice.Message) error {
+			if fail {
+				return errors.New("dial tcp: connection refused") // transient
+			}
+			sentVia = "work"
+			sent = msg
+			return nil
+		}),
+	})
+	svc.SetInboxIdentities(map[string]string{inbound.DefaultInbox: "default@x.test", "work": "work@x.test"})
+
+	// ApproveAs work, but the send fails transiently → stranded approved-as.
+	out, err := svc.ApproveAs(context.Background(), m.ID, "work")
+	require.NoError(t, err)
+	require.Equal(t, string(sluice.StatusApproved), out.Status)
+	stranded, err := q.Get(m.ID)
+	require.NoError(t, err)
+	require.Equal(t, "work", stranded.AsInbox, "the as-choice is persisted for recovery")
+	require.NotEmpty(t, stranded.SendErr)
+
+	// Re-send delivers via the chosen inbox with the rewritten From — never the original.
+	fail = false
+	out, err = svc.ReSend(context.Background(), m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(sluice.StatusSent), out.Status)
+	assert.Equal(t, "work", sentVia, "re-send routes through the chosen inbox's sender")
+	assert.Equal(t, "work@x.test", sent.From, "envelope From recomputed to the chosen identity")
+	assert.Contains(t, string(sent.Released), "From: work@x.test", "header From recomputed")
+	assert.NotContains(t, string(sent.Released), "assistant@x.test")
+
+	// The stored record still keeps the original From (send-time rewrite only).
+	stored, err := q.Get(m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "assistant@x.test", stored.From)
+}
+
+// C4 (review fix): if the approved-as inbox no longer resolves (removed from config
+// while the message was stranded), the re-send is refused fail-closed rather than
+// delivered under the original identity.
+func TestReSendApprovedAsRefusesVanishedInbox(t *testing.T) {
+	q, _ := seedStore(t)
+	m, err := q.Enqueue(sluice.Submission{
+		Agent: "agent", Inbox: inbound.DefaultInbox, From: "assistant@x.test", Rcpt: []string{"d@y.test"},
+		Raw: []byte("From: assistant@x.test\r\nTo: d@y.test\r\n\r\nbody\r\n"),
+	})
+	require.NoError(t, err)
+
+	svc := admin.NewService(q, newInbound(t), backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	svc.SetSenders(map[string]backend.Sender{
+		inbound.DefaultInbox: senderFunc(func(sluice.Message) error { return nil }),
+		"work":               senderFunc(func(sluice.Message) error { return errors.New("dial tcp: connection refused") }),
+	})
+	svc.SetInboxIdentities(map[string]string{inbound.DefaultInbox: "default@x.test", "work": "work@x.test"})
+
+	// Strand it as approved-as work.
+	_, err = svc.ApproveAs(context.Background(), m.ID, "work")
+	require.NoError(t, err)
+
+	// The work inbox is removed from config before the operator retries.
+	svc.SetInboxIdentities(map[string]string{inbound.DefaultInbox: "default@x.test"})
+
+	_, err = svc.ReSend(context.Background(), m.ID)
+	assert.ErrorIs(t, err, admin.ErrUnknownInbox)
+
+	stored, err := q.Get(m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, sluice.StatusApproved, stored.Status, "refused re-send leaves it approved, not delivered under the wrong identity")
+}
+
 // C4: re-send only acts on an approved message with a recorded send error; a
 // pending or already-sent message is refused with ErrNotResendable.
 func TestReSendRejectsNonResendable(t *testing.T) {

@@ -323,7 +323,7 @@ func (s *Service) Show(id string) (sluice.Message, error) { return s.store.Get(i
 
 // decide runs the approval chain for one message and commits the outcome —
 // nothing more (pure). Everything downstream lives in Approve/Reject.
-func (s *Service) decide(ctx context.Context, id string, human approver.Verdict) (sluice.Message, error) {
+func (s *Service) decide(ctx context.Context, id string, human approver.Verdict, asInbox string) (sluice.Message, error) {
 	msg, err := s.store.Get(id)
 	if err != nil {
 		return sluice.Message{}, err
@@ -353,7 +353,7 @@ func (s *Service) decide(ctx context.Context, id string, human approver.Verdict)
 	}
 	switch outcome.Disposition {
 	case approver.Approve:
-		return s.store.Approve(id, outcome.DecidedBy, outcome.Released)
+		return s.store.Approve(id, outcome.DecidedBy, outcome.Released, asInbox)
 	case approver.Reject:
 		return s.store.Reject(id, outcome.DecidedBy, outcome.Reason, outcome.Retryable)
 	default:
@@ -413,7 +413,7 @@ func (s *Service) approve(ctx context.Context, id, asInbox string) (Outcome, err
 		}
 	}
 
-	m, err := s.decide(ctx, id, approver.Verdict{Disposition: approver.Approve})
+	m, err := s.decide(ctx, id, approver.Verdict{Disposition: approver.Approve}, asInbox)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -431,7 +431,7 @@ func (s *Service) approve(ctx context.Context, id, asInbox string) (Outcome, err
 	}
 
 	sendErr := s.senderFor(sendInbox).Send(ctx, sendMsg)
-	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr)
+	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr, false)
 	if rerr != nil {
 		return Outcome{}, rerr
 	}
@@ -469,10 +469,21 @@ var ErrNotResendable = errors.New("admin: message is not awaiting re-send (needs
 // SendErr: decide() refuses non-pending messages, so a plain re-approve returns
 // ErrNotPending. Allowed only when Status==approved && SendErr!=""; it re-runs the
 // send and records the attempt (the RecordSendAttempt guard, C26, keeps this the
-// only way SendErr/Sent can be re-stamped). The message is delivered as stored —
-// the ADR 0023 slice 5 ApproveAs identity rewrite is send-time only and was never
-// persisted, so a re-send of an approved-as message goes through its stamped inbox
-// with its original From.
+// only way SendErr/Sent can be re-stamped).
+//
+// An approved-as message (AsInbox set) is re-sent AS APPROVED: the identity rewrite
+// is recomputed from the persisted inbox choice — the same computation the approve
+// path did at send time — so a re-send never silently reverts to the original From.
+// If that inbox no longer resolves to an identity (removed from config while the
+// message was stranded), the re-send is refused fail-closed rather than delivered
+// under the wrong identity.
+//
+// NOTE: the approved+SendErr check and the send are not atomic, so two concurrent
+// re-sends of the same id can both deliver (duplicate mail). The RecordSendAttempt
+// guard keeps the loser from corrupting the record (a failure can't stamp a sent
+// message), but full de-duplication needs an in-flight marker — tracked as a #232
+// follow-up; clearing SendErr before the attempt is NOT an option (it reintroduces
+// the stranded-invisible state).
 func (s *Service) ReSend(ctx context.Context, id string) (Outcome, error) {
 	m, err := s.store.Get(id)
 	if err != nil {
@@ -481,10 +492,28 @@ func (s *Service) ReSend(ctx context.Context, id string) (Outcome, error) {
 	if m.Status != sluice.StatusApproved || m.SendErr == "" {
 		return Outcome{}, fmt.Errorf("%w: message %s is %s", ErrNotResendable, id, m.Status)
 	}
-	slog.Info("resend", "message_id", m.ID, "inbox", inbound.NormInbox(m.Inbox))
 
-	sendErr := s.senderFor(m.Inbox).Send(ctx, m)
-	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr)
+	sendInbox, sendMsg := m.Inbox, m
+	var identity string
+	if m.AsInbox != "" {
+		identity = s.identities[inbound.NormInbox(m.AsInbox)]
+		if identity == "" {
+			// The chosen inbox lost its identity while the message was stranded;
+			// refuse rather than deliver from the original From (fail-closed).
+			return Outcome{}, fmt.Errorf("%w: approved-as inbox %q no longer resolves to an identity", ErrUnknownInbox, m.AsInbox)
+		}
+		rewritten, rwErr := rewriteFrom(sendBody(m), identity)
+		if rwErr != nil {
+			return Outcome{}, fmt.Errorf("admin: rewrite From to %q: %w", identity, rwErr)
+		}
+		sendInbox = m.AsInbox
+		sendMsg.From = identity      // envelope MAIL FROM
+		sendMsg.Released = rewritten // send-time rewrite only; the stored record is untouched
+	}
+	slog.Info("resend", "message_id", m.ID, "inbox", inbound.NormInbox(sendInbox), "identity", identity)
+
+	sendErr := s.senderFor(sendInbox).Send(ctx, sendMsg)
+	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr, true)
 	if rerr != nil {
 		return Outcome{}, rerr
 	}
@@ -509,7 +538,7 @@ func (s *Service) ReSend(ctx context.Context, id string) (Outcome, error) {
 // RejectID rejects a held message: commit, then deliver the DSN bounce
 // (downstream of commit, never mistaken for a reject failure, ADR 0006).
 func (s *Service) RejectID(ctx context.Context, id, reason string, retryable bool) (Outcome, error) {
-	m, err := s.decide(ctx, id, approver.Verdict{Disposition: approver.Reject, Reason: reason, Retryable: retryable})
+	m, err := s.decide(ctx, id, approver.Verdict{Disposition: approver.Reject, Reason: reason, Retryable: retryable}, "")
 	if err != nil {
 		return Outcome{}, err
 	}
