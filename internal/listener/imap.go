@@ -89,7 +89,7 @@ type IMAPServer struct {
 // before.
 // syncNow triggers a debounced on-demand upstream pull of an inbox on STATUS
 // (ADR 0028); nil disables on-demand sync (STATUS stays a plain query).
-func NewIMAPServer(cfg IMAPServerConfig, auth *Auth, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter, filters map[string]*filter.Filter, guard *bounceguard.Guard, holdSpoof bool, mailOwner func(inbox string) string, syncNow SyncTrigger) (*IMAPServer, error) {
+func NewIMAPServer(cfg IMAPServerConfig, auth *Auth, store inbound.InboundStore, fetch ContentFetch, writeKeywords KeywordWriter, filters map[string]*filter.Filter, guard *bounceguard.Guard, holdSpoof bool, mailOwner func(inbox string) string, syncNow SyncTrigger, assessmentEnabled bool) (*IMAPServer, error) {
 	if cfg.TLSConfig == nil && !cfg.AllowInsecure {
 		return nil, errors.New("listener: IMAP TLS required (set TLSConfig, or AllowInsecure for local testing)")
 	}
@@ -101,7 +101,7 @@ func NewIMAPServer(cfg IMAPServerConfig, auth *Auth, store inbound.InboundStore,
 	}
 	srv := imapserver.New(&imapserver.Options{
 		NewSession: func(_ *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return &imapSession{auth: auth, store: store, fetch: fetch, writeKeywords: writeKeywords, filters: filters, guard: guard, holdSpoof: holdSpoof, mailOwner: mailOwner, syncNow: syncNow, serveStamp: cfg.ServeStamp}, nil, nil
+			return &imapSession{auth: auth, store: store, fetch: fetch, writeKeywords: writeKeywords, filters: filters, guard: guard, holdSpoof: holdSpoof, mailOwner: mailOwner, syncNow: syncNow, serveStamp: cfg.ServeStamp, assessmentOn: assessmentEnabled}, nil, nil
 		},
 		TLSConfig:    cfg.TLSConfig,
 		InsecureAuth: cfg.AllowInsecure,
@@ -135,6 +135,7 @@ type imapSession struct {
 	mailOwner     func(inbox string) string // synced-mail owner key per inbox (ADR 0027); nil = key by the connecting agent
 	syncNow       SyncTrigger               // debounced on-demand pull on STATUS (ADR 0028); nil = disabled
 	serveStamp    ServeStamp                // serve-path provenance re-stamp (ADR 0030 slice 5); nil = serve as stored
+	assessmentOn  bool                      // injection assessment enabled (ADR 0032): gates the placeholder read-face
 	owner         string
 	selectedInbox string // the inbox name of the SELECTed mailbox (ADR 0023)
 	authed        bool
@@ -246,11 +247,24 @@ func (s *imapSession) listAndFilter(inbox string) (full, visible []inbound.Messa
 			}
 		}
 		// Injection assessment is a second security floor (ADR 0032), independent of
-		// the user filter: an assessment-held message stays hidden until the operator
-		// approves it, exactly like a filter Hold. A single HoldDecision releases the
-		// message past every hold source, so approving reveals it here too.
-		if m.HeldByAssessment() && m.HoldDecision != inbound.HoldApproved {
-			continue
+		// the user filter. Unlike a filter Hold, an assessment-held message is not
+		// hidden outright (ADR 0032 change B): the operator prefers the agent see a
+		// message genuinely awaiting approval over a silent gap. So an UNDECIDED
+		// assessment hold is shown with the system placeholder body (substituted at
+		// content-serve time, rawResolver), a REJECTED one stays hidden (the operator
+		// dropped it), and an APPROVED one falls through to the user filter with its
+		// real body. A single HoldDecision releases past every hold source, so an
+		// approve reveals the real content here too.
+		if m.HeldByAssessment() {
+			switch m.HoldDecision {
+			case inbound.HoldApproved:
+				// exposed — apply the user filter to the real message below
+			case inbound.HoldRejected:
+				continue // operator dropped it: stays hidden, fail-safe
+			default:
+				visible = append(visible, m) // undecided: placeholder-visible
+				continue
+			}
 		}
 		if flt == nil {
 			visible = append(visible, m)
@@ -459,7 +473,8 @@ func (s *imapSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 		// fields serve from stored metadata when present, and only a body request
 		// (or a record with no stored metadata) triggers getRaw. A resolve failure
 		// surfaces as an IMAP error, never empty/wrong content.
-		ferr = fetchMessage(w.CreateMessage(seqNum), *m, options, s.rawResolver(*m))
+		getRaw, isHeld := s.rawResolver(*m)
+		ferr = fetchMessage(w.CreateMessage(seqNum), *m, options, getRaw, isHeld, s.assessmentOn)
 	})
 	return ferr
 }
@@ -467,51 +482,116 @@ func (s *imapSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, optio
 // rawFunc lazily resolves a message's raw content.
 type rawFunc func() ([]byte, error)
 
-// rawResolver returns a memoized resolver for a message's raw content: it calls
+// heldFunc reports whether the resolved content is the ADR-0032 held placeholder
+// (see rawResolver). It shares rawFunc's single memoized resolve, so calling
+// either forces at most one content fetch.
+type heldFunc func() (bool, error)
+
+// heldSubjectMask replaces a held message's Subject on the read face (ADR
+// 0032 change B): the assessment scores the body + attachments, not the Subject,
+// so a subject-borne directive would otherwise still reach the agent via ENVELOPE
+// while the body is withheld. Masked while undecided; the real Subject returns on
+// operator Expose (approve).
+const heldSubjectMask = "[held for review]"
+
+// heldPlaceholderRaw is the system-authored body the read face serves in place of
+// a message the injection assessment holds pending operator approval (ADR 0032
+// change B). It carries no sender bytes, so it is safe for the agent to consume.
+// The X-Darbaan-Assessment header is a stable, system-set marker the agent client
+// can key on (presence ⟺ placeholder): a real body is Sanitized at the write
+// chokepoint and re-stamped on serve, both of which strip the whole X-Darbaan-*
+// namespace (provenance.rewrite), so a sender cannot spoof this marker onto real
+// mail — and the placeholder deliberately bypasses that serve-path stamp so its
+// marker survives.
+var heldPlaceholderRaw = []byte("From: Darbaan <darbaan@localhost>\r\n" +
+	"Subject: " + heldSubjectMask + "\r\n" +
+	"X-Darbaan-Assessment: held\r\n" +
+	"Content-Type: text/plain; charset=utf-8\r\n" +
+	"\r\n" +
+	"This message was flagged as a possible injection and is held by Darbaan pending operator approval. Its content is withheld from the agent until an operator approves it.\r\n")
+
+// mightBeHeld reports whether a message could serve the held placeholder, so the
+// read face only forces a resolve (to learn the authoritative disposition) for
+// these — with assessment enabled a pending record is not yet assessed and may
+// become held on this very fetch (the first-read window ADR 0032 change B
+// closes), and an already held-and-not-approved record is held now. Everything
+// else (assessed agent-handled, held-and-approved, or never assessed) serves its
+// real content without a forced resolve. When assessment is off, a pending record
+// can never become held, so the lazy-metadata path is preserved unchanged: only
+// an already-stored hold (from an earlier assessment-on run) still forces.
+func mightBeHeld(m inbound.Message, assessmentOn bool) bool {
+	return (assessmentOn && m.Pending) || (m.HeldByAssessment() && m.HoldDecision != inbound.HoldApproved)
+}
+
+// rawResolver returns a memoized resolver for a message's raw content plus a
+// companion that reports whether that content is the held placeholder. It calls
 // the content fetcher at most once, and only when a field actually needs the body
 // (BodyStructure/BodySection, or ENVELOPE/size/header on a record with no stored
-// metadata). Present records resolve from a local blob; a pending record fetches
-// upstream once, then is cached present.
-func (s *imapSession) rawResolver(m inbound.Message) rawFunc {
+// metadata) or the held state is queried. Present records resolve from a local
+// blob; a pending record fetches upstream once, then is cached present.
+//
+// ADR 0032 change B: the fetch is also where a pending message is assessed, so
+// the very read that holds a message must not hand back its body. When the
+// freshly-resolved message is held and not operator-approved, the resolver serves
+// heldPlaceholderRaw (bypassing serveStamp — the placeholder is system-authored,
+// carries no sender bytes, and its X-Darbaan-Assessment marker must survive) and
+// reports held. Persistence is unaffected: the real raw + assessment are already
+// stored, so the human hold surface still shows real content and, after Expose,
+// the predicate flips and the real body serves on a subsequent FETCH. Note the
+// tradeoff: an agent that already read the placeholder will not re-FETCH the same
+// UID without a re-SELECT or explicit FETCH, so the real body reaches it only on a
+// fresh read — the placeholder signals "pending," which is the expected behavior.
+func (s *imapSession) rawResolver(m inbound.Message) (rawFunc, heldFunc) {
 	var (
 		raw  []byte
+		held bool
 		err  error
 		done bool
 	)
-	return func() ([]byte, error) {
-		if !done {
-			done = true
-			var full inbound.Message
-			switch full, err = s.fetch(m.Owner, s.selectedInbox, m.ID); {
-			case err == nil:
-				raw = full.Raw
-				// Serve-path backstop (ADR 0030 slice 5): re-run the same sanitize +
-				// stamp as the write chokepoint, keyed strictly on the session's
-				// server-side selected inbox (never anything from the blob), so a
-				// pre-ADR/legacy blob serves with its real trust and the stamp stays
-				// fresh on a config change. Idempotent on an already-stamped blob. A
-				// blob that can't be safely re-stamped serves empty rather than
-				// un-sanitized — real stored blobs are sanitized at write, so this is
-				// a near-dead edge.
-				if s.serveStamp != nil {
-					if stamped, serr := s.serveStamp(s.selectedInbox, raw); serr == nil {
-						raw = stamped
-					} else {
-						raw = nil
-					}
-				}
-			case errors.Is(err, inbound.ErrContentUnavailable):
-				// The upstream content can't be resolved (a stale local→upstream UID
-				// mapping, #190). Serve an empty body rather than erroring: the FETCH
-				// response stays well-formed and the command completes, so one
-				// unresolvable UID can't stall the client's whole poll. The event is
-				// surfaced by the syncer at WARN and the stale mapping is dropped there;
-				// the message's stored ENVELOPE / SIZE / FLAGS still serve normally.
-				raw, err = nil, nil
-			}
+	resolve := func() {
+		if done {
+			return
 		}
-		return raw, err
+		done = true
+		var full inbound.Message
+		switch full, err = s.fetch(m.Owner, s.selectedInbox, m.ID); {
+		case err == nil:
+			if full.HeldByAssessment() && full.HoldDecision != inbound.HoldApproved {
+				// Withhold the real body: serve the system placeholder instead, and do
+				// NOT run serveStamp — the placeholder is authoritative as-is and its
+				// marker header must not be stripped.
+				raw, held = heldPlaceholderRaw, true
+				return
+			}
+			raw = full.Raw
+			// Serve-path backstop (ADR 0030 slice 5): re-run the same sanitize +
+			// stamp as the write chokepoint, keyed strictly on the session's
+			// server-side selected inbox (never anything from the blob), so a
+			// pre-ADR/legacy blob serves with its real trust and the stamp stays
+			// fresh on a config change. Idempotent on an already-stamped blob. A
+			// blob that can't be safely re-stamped serves empty rather than
+			// un-sanitized — real stored blobs are sanitized at write, so this is
+			// a near-dead edge.
+			if s.serveStamp != nil {
+				if stamped, serr := s.serveStamp(s.selectedInbox, raw); serr == nil {
+					raw = stamped
+				} else {
+					raw = nil
+				}
+			}
+		case errors.Is(err, inbound.ErrContentUnavailable):
+			// The upstream content can't be resolved (a stale local→upstream UID
+			// mapping, #190). Serve an empty body rather than erroring: the FETCH
+			// response stays well-formed and the command completes, so one
+			// unresolvable UID can't stall the client's whole poll. The event is
+			// surfaced by the syncer at WARN and the stale mapping is dropped there;
+			// the message's stored ENVELOPE / SIZE / FLAGS still serve normally.
+			raw, err = nil, nil
+		}
 	}
+	getRaw := func() ([]byte, error) { resolve(); return raw, err }
+	isHeld := func() (bool, error) { resolve(); return held, err }
+	return getRaw, isHeld
 }
 
 func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) error {
@@ -682,7 +762,8 @@ func (s *imapSession) Search(numKind imapserver.NumKind, criteria *imap.SearchCr
 		// criteria on records without stored metadata. If a candidate's content
 		// can't be resolved, skip it (degrade, don't [SERVERBUG] the whole SEARCH)
 		// — but log it: a skipped candidate is a silently-missing result.
-		ok, err := matchSearch(seqNum, m, criteria, s.rawResolver(*m))
+		getRaw, _ := s.rawResolver(*m)
+		ok, err := matchSearch(seqNum, m, criteria, getRaw)
 		if err != nil {
 			slog.Warn("imap search skipped message", "id", m.ID, "err", err)
 			continue
@@ -926,7 +1007,7 @@ func (s *imapSession) Idle(_ *imapserver.UpdateWriter, stop <-chan struct{}) err
 	return nil
 }
 
-func fetchMessage(w *imapserver.FetchResponseWriter, m inbound.Message, options *imap.FetchOptions, getRaw rawFunc) error {
+func fetchMessage(w *imapserver.FetchResponseWriter, m inbound.Message, options *imap.FetchOptions, getRaw rawFunc, isHeld heldFunc, assessmentOn bool) error {
 	w.WriteUID(uidOf(m))
 	if options.Flags {
 		w.WriteFlags(flagList(m))
@@ -934,10 +1015,34 @@ func fetchMessage(w *imapserver.FetchResponseWriter, m inbound.Message, options 
 	if options.InternalDate {
 		w.WriteInternalDate(m.ReceivedAt)
 	}
+	// ADR 0032 change B: a held message serves the system placeholder for
+	// every content-bearing field — body, size, and a masked Subject — so neither
+	// the body NOR a subject-borne directive reaches the agent pre-approval. Learn
+	// the authoritative held state once, forcing the resolve only for a message
+	// that could be held and only when a leak-sensitive field is requested (an
+	// unassessed pending record is assessed by this very resolve, closing the
+	// first-read window even for an ENVELOPE- or SIZE-only fetch).
+	held := false
+	if mightBeHeld(m, assessmentOn) && (options.RFC822Size || options.Envelope || options.BodyStructure != nil || len(options.BodySection) > 0) {
+		h, err := isHeld()
+		if err != nil {
+			return err
+		}
+		held = h
+	}
 	if options.RFC822Size {
 		size, err := sizeOf(&m, getRaw)
 		if err != nil {
 			return err
+		}
+		if held {
+			// getRaw now yields the placeholder; report its length, not the stored
+			// size of the withheld real message.
+			raw, err := getRaw()
+			if err != nil {
+				return err
+			}
+			size = int64(len(raw))
 		}
 		w.WriteRFC822Size(size)
 	}
@@ -947,6 +1052,9 @@ func fetchMessage(w *imapserver.FetchResponseWriter, m inbound.Message, options 
 			return err
 		}
 		if env != nil {
+			if held {
+				env.Subject = heldSubjectMask
+			}
 			w.WriteEnvelope(env)
 		}
 	}

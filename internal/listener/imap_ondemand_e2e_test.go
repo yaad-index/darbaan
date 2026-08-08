@@ -93,7 +93,7 @@ func TestOnDemandSyncEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
 		listener.SingleAuth("agent", "pw"), store, nil, nil,
-		map[string]*filter.Filter{inbound.DefaultInbox: nil}, nil, false, nil, syncNow)
+		map[string]*filter.Filter{inbound.DefaultInbox: nil}, nil, false, nil, syncNow, false)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })

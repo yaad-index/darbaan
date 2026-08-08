@@ -24,7 +24,7 @@ func startIMAPSyncTrigger(t *testing.T, store inbound.InboundStore, syncNow list
 	require.NoError(t, err)
 	filters := map[string]*filter.Filter{inbound.DefaultInbox: nil}
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		listener.SingleAuth("agent", "pw"), store, nil, nil, filters, nil, false, nil, syncNow)
+		listener.SingleAuth("agent", "pw"), store, nil, nil, filters, nil, false, nil, syncNow, false)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })

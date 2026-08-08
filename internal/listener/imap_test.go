@@ -23,7 +23,7 @@ func startIMAPServeStamp(t *testing.T, store inbound.InboundStore, ss listener.S
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true, ServeStamp: ss},
-		listener.SingleAuth("agent", "pw"), store, nil, nil, map[string]*filter.Filter{inbound.DefaultInbox: nil}, nil, false, nil, nil)
+		listener.SingleAuth("agent", "pw"), store, nil, nil, map[string]*filter.Filter{inbound.DefaultInbox: nil}, nil, false, nil, nil, false)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -59,7 +59,22 @@ func startIMAPFull(t *testing.T, store inbound.InboundStore, fetch listener.Cont
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		listener.SingleAuth("agent", "pw"), store, fetch, wk, map[string]*filter.Filter{inbound.DefaultInbox: flt}, nil, false, nil, nil)
+		listener.SingleAuth("agent", "pw"), store, fetch, wk, map[string]*filter.Filter{inbound.DefaultInbox: flt}, nil, false, nil, nil, false)
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return l.Addr().String()
+}
+
+// startIMAPAssess wires the read face with injection assessment enabled (ADR
+// 0032 change B), so a pending record forces a resolve to learn its disposition
+// and a held record serves the placeholder.
+func startIMAPAssess(t *testing.T, store inbound.InboundStore, fetch listener.ContentFetch, flt *filter.Filter) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
+		listener.SingleAuth("agent", "pw"), store, fetch, nil, map[string]*filter.Filter{inbound.DefaultInbox: flt}, nil, false, nil, nil, true)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -71,7 +86,7 @@ func startIMAPMulti(t *testing.T, store inbound.InboundStore, filters map[string
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		listener.SingleAuth("agent", "pw"), store, nil, nil, filters, nil, false, nil, nil)
+		listener.SingleAuth("agent", "pw"), store, nil, nil, filters, nil, false, nil, nil, false)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -83,7 +98,7 @@ func startIMAPAuth(t *testing.T, store inbound.InboundStore, filters map[string]
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		auth, store, nil, nil, filters, nil, false, nil, nil)
+		auth, store, nil, nil, filters, nil, false, nil, nil, false)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -615,17 +630,23 @@ func TestIMAPFilterHidesMessages(t *testing.T) {
 	assert.Equal(t, "keep", msgs[0].Envelope.Subject) // only the allowed one is served
 }
 
-// An assessment-held message (ADR 0032) is hidden from the read face until the
-// operator approves it, exactly like a filter Hold; one approval reveals it.
+// An assessment-held message (ADR 0032 change B) stays visible on the read face
+// but serves a system placeholder body + masked Subject until the operator
+// approves it; one approval reveals the real content. Undecided → placeholder,
+// approved → real.
 func TestIMAPAssessmentHold(t *testing.T) {
 	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 
-	_, _, err = store.AddSyncedPending(inbound.Delivery{
+	_, keep, err := store.AddSyncedPending(inbound.Delivery{
 		Owner: "agent", Subject: "keep", UpstreamUID: 1, UIDValidity: 1,
 		Envelope: &inbound.Envelope{Subject: "keep"},
 	})
+	require.NoError(t, err)
+	_, err = store.SetContentAssessed("agent", inbound.DefaultInbox, keep.ID,
+		[]byte("Subject: keep\r\n\r\nkeepbody"),
+		&inbound.Assessment{Disposition: inbound.AssessmentAgentHandled})
 	require.NoError(t, err)
 	_, held, err := store.AddSyncedPending(inbound.Delivery{
 		Owner: "agent", Subject: "danger", UpstreamUID: 2, UIDValidity: 1,
@@ -633,19 +654,42 @@ func TestIMAPAssessmentHold(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, err = store.SetContentAssessed("agent", inbound.DefaultInbox, held.ID,
-		[]byte("Subject: danger\r\n\r\nx"),
+		[]byte("Subject: danger\r\n\r\nattacker-body-do-this"),
 		&inbound.Assessment{Disposition: inbound.AssessmentHeld, Summary: "flagged"})
 	require.NoError(t, err)
 
-	addr := startIMAPFull(t, store, nil, nil, nil) // no user filter
+	addr := startIMAPAssess(t, store, nil, nil) // no user filter
 	c, err := imapclient.DialInsecure(addr, nil)
 	require.NoError(t, err)
 	defer func() { _ = c.Close() }()
 	require.NoError(t, c.Login("agent", "pw").Wait())
 	sel, err := c.Select("INBOX", nil).Wait()
 	require.NoError(t, err)
-	assert.Equal(t, uint32(1), sel.NumMessages, "assessment-held message hidden pending a decision")
+	assert.Equal(t, uint32(2), sel.NumMessages, "held message stays visible with a placeholder, not hidden")
 
+	// The held message's body is withheld: masked Subject + placeholder body
+	// carrying the system marker, and never the attacker bytes.
+	msgs, err := c.Fetch(imap.SeqSetNum(2), &imap.FetchOptions{
+		Envelope: true, BodySection: []*imap.FetchItemBodySection{{}},
+	}).Collect()
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "[held for review]", msgs[0].Envelope.Subject, "Subject masked while held")
+	body := string(msgs[0].FindBodySection(&imap.FetchItemBodySection{}))
+	assert.Contains(t, body, "held by Darbaan", "placeholder body served")
+	assert.Contains(t, body, "X-Darbaan-Assessment: held", "system marker on placeholder")
+	assert.NotContains(t, body, "attacker-body-do-this", "real body withheld")
+
+	// The un-held neighbour still serves its real body + Subject.
+	keepMsgs, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{
+		Envelope: true, BodySection: []*imap.FetchItemBodySection{{}},
+	}).Collect()
+	require.NoError(t, err)
+	require.Len(t, keepMsgs, 1)
+	assert.Equal(t, "keep", keepMsgs[0].Envelope.Subject)
+	assert.Contains(t, string(keepMsgs[0].FindBodySection(&imap.FetchItemBodySection{})), "keepbody")
+
+	// Approve → the real Subject + body serve on a fresh fetch.
 	_, err = store.SetHoldDecision("agent", inbound.DefaultInbox, held.ID, inbound.HoldApproved)
 	require.NoError(t, err)
 	c2, err := imapclient.DialInsecure(addr, nil)
@@ -654,11 +698,19 @@ func TestIMAPAssessmentHold(t *testing.T) {
 	require.NoError(t, c2.Login("agent", "pw").Wait())
 	sel2, err := c2.Select("INBOX", nil).Wait()
 	require.NoError(t, err)
-	assert.Equal(t, uint32(2), sel2.NumMessages, "one approval reveals the held message")
+	assert.Equal(t, uint32(2), sel2.NumMessages)
+	after, err := c2.Fetch(imap.SeqSetNum(2), &imap.FetchOptions{
+		Envelope: true, BodySection: []*imap.FetchItemBodySection{{}},
+	}).Collect()
+	require.NoError(t, err)
+	require.Len(t, after, 1)
+	assert.Equal(t, "danger", after[0].Envelope.Subject, "real Subject returns on approve")
+	assert.Contains(t, string(after[0].FindBodySection(&imap.FetchItemBodySection{})), "attacker-body-do-this", "real body serves on approve")
 }
 
-// A message held by BOTH assessment and a filter Hold stays hidden, and the
-// single HoldDecision releases it past both sources (the documented model).
+// A message held by BOTH assessment and a filter Hold serves the assessment
+// placeholder (visible), and the single HoldDecision releases it past both
+// sources to its real body (the documented one-decision-releases-all model).
 func TestIMAPAssessmentAndFilterHold(t *testing.T) {
 	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
 	require.NoError(t, err)
@@ -676,7 +728,7 @@ func TestIMAPAssessmentAndFilterHold(t *testing.T) {
 
 	flt, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]"))
 	require.NoError(t, err)
-	addr := startIMAPFull(t, store, nil, nil, flt)
+	addr := startIMAPAssess(t, store, nil, flt)
 
 	c, err := imapclient.DialInsecure(addr, nil)
 	require.NoError(t, err)
@@ -684,7 +736,7 @@ func TestIMAPAssessmentAndFilterHold(t *testing.T) {
 	require.NoError(t, c.Login("agent", "pw").Wait())
 	sel, err := c.Select("INBOX", nil).Wait()
 	require.NoError(t, err)
-	assert.Equal(t, uint32(0), sel.NumMessages, "held by both → hidden")
+	assert.Equal(t, uint32(1), sel.NumMessages, "held by both → placeholder-visible (assessment floor)")
 
 	_, err = store.SetHoldDecision("agent", inbound.DefaultInbox, both.ID, inbound.HoldApproved)
 	require.NoError(t, err)
@@ -695,6 +747,62 @@ func TestIMAPAssessmentAndFilterHold(t *testing.T) {
 	sel2, err := c2.Select("INBOX", nil).Wait()
 	require.NoError(t, err)
 	assert.Equal(t, uint32(1), sel2.NumMessages, "one approval releases it past both hold sources")
+}
+
+// The first-read window (ADR 0032 change B): a message is still pending
+// (unassessed) at SELECT, so it is visible; the client's own body FETCH is what
+// assesses + holds it. That very fetch must serve the placeholder, not the real
+// body — the leak the live test caught. The real raw is still persisted for the
+// human hold surface.
+func TestIMAPAssessmentFirstReadWindow(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	_, pend, err := store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "danger", UpstreamUID: 1, UIDValidity: 1,
+		Envelope: &inbound.Envelope{Subject: "danger"},
+	})
+	require.NoError(t, err)
+
+	// fetch mirrors Syncer.FetchContent with a live assess hook that holds: it
+	// persists the real raw + a held assessment and returns the resulting message.
+	realRaw := []byte("Subject: danger\r\n\r\nattacker-body-do-this")
+	fetch := func(owner, inbox, id string) (inbound.Message, error) {
+		return store.SetContentAssessed(owner, inbox, id, realRaw,
+			&inbound.Assessment{Disposition: inbound.AssessmentHeld, Summary: "flagged"})
+	}
+
+	addr := startIMAPAssess(t, store, fetch, nil)
+	c, err := imapclient.DialInsecure(addr, nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	sel, err := c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1), sel.NumMessages, "still pending at SELECT → visible")
+
+	// The fetch that assesses + holds must hand back the placeholder, never the
+	// attacker body, and mask the Subject.
+	msgs, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{
+		Envelope: true, BodySection: []*imap.FetchItemBodySection{{}},
+	}).Collect()
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "[held for review]", msgs[0].Envelope.Subject)
+	body := string(msgs[0].FindBodySection(&imap.FetchItemBodySection{}))
+	assert.Contains(t, body, "held by Darbaan")
+	assert.NotContains(t, body, "attacker-body-do-this", "first-read leak closed")
+
+	// The real raw is persisted for the human hold surface even though it was
+	// withheld from the agent.
+	got, err := store.Get("agent", inbound.DefaultInbox, pend.ID)
+	require.NoError(t, err)
+	// The stored blob is sanitized/stamped at the write chokepoint, so it is not
+	// byte-identical to realRaw, but it still carries the real body for the human
+	// hold surface.
+	assert.Contains(t, string(got.Raw), "attacker-body-do-this", "real content persisted for the operator")
+	assert.True(t, got.HeldByAssessment())
 }
 
 // A hold-for-human message is hidden until approved, then becomes visible (ADR
@@ -772,7 +880,7 @@ func TestIMAPBadAuthRejected(t *testing.T) {
 
 func TestIMAPRequiresTLS(t *testing.T) {
 	_, err := listener.NewIMAPServer(listener.IMAPServerConfig{},
-		listener.SingleAuth("agent", "pw"), seedInbound(t), nil, nil, nil, nil, false, nil, nil)
+		listener.SingleAuth("agent", "pw"), seedInbound(t), nil, nil, nil, nil, false, nil, nil, false)
 	require.Error(t, err)
 }
 
@@ -781,7 +889,7 @@ func startIMAPDecoupled(t *testing.T, store inbound.InboundStore, filters map[st
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv, err := listener.NewIMAPServer(listener.IMAPServerConfig{AllowInsecure: true},
-		auth, store, nil, nil, filters, nil, false, mailOwner, nil)
+		auth, store, nil, nil, filters, nil, false, mailOwner, nil, false)
 	require.NoError(t, err)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })

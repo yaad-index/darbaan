@@ -1232,7 +1232,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 		ServeStamp: func(inbox string, raw []byte) ([]byte, error) {
 			return provenance.Sanitize(raw, provResolver(inbox, provenance.From(raw)))
 		},
-	}, auth, inbox, imapContentFetch(syncers, inbox), imapKeywordWriter(syncers), filters, guard, holdSpoof, pw.mailOwner, syncNow)
+	}, auth, inbox, imapContentFetch(syncers, inbox), imapKeywordWriter(syncers), filters, guard, holdSpoof, pw.mailOwner, syncNow, cli.AssessmentEnabled)
 	if err != nil {
 		return err
 	}
