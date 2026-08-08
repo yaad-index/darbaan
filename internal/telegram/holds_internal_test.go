@@ -64,6 +64,14 @@ func TestFormatHoldTruncatesBody(t *testing.T) {
 	assert.Contains(t, s, "END UNTRUSTED", "fence still closes after truncation")
 }
 
+// A pathological subject is clamped so the header alone can't blow the Telegram
+// limit and fail the send.
+func TestFormatHoldClampsHeader(t *testing.T) {
+	s := formatHold(inbound.Message{ID: "12", Subject: strings.Repeat("A", 10_000)}, nil)
+	assert.LessOrEqual(t, len([]rune(s)), telegramTextLimit, "clamped header stays under the limit")
+	assert.Contains(t, s, "…", "the over-long subject is truncated with a marker")
+}
+
 func TestHoldKeyboard(t *testing.T) {
 	kb := holdKeyboard("7")
 	var data []string

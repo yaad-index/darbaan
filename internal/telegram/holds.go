@@ -57,10 +57,24 @@ func (c *Client) notifyHold(ctx context.Context, m inbound.Message) error {
 // is truncated to keep the whole notification under it (ADR 0032 change A).
 const telegramTextLimit = 4096
 
+// holdFieldMax bounds each metadata field (from/to/subject) in a hold
+// notification, so a pathological header can't push the whole message past the
+// Telegram limit and fail the send — the header is budgeted, not just the fenced
+// body (ADR 0032 change A).
+const holdFieldMax = 300
+
+// clampField truncates an over-long metadata field on a rune boundary.
+func clampField(s string) string {
+	if r := []rune(s); len(r) > holdFieldMax {
+		return string(r[:holdFieldMax]) + "…"
+	}
+	return s
+}
+
 func formatHold(m inbound.Message, raw []byte) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Held inbound message — expose to the agent?\nid: %s\nfrom: %s\nto: %s\nsubject: %s",
-		m.ID, m.From, m.To, displaySubject(m.Subject))
+		m.ID, clampField(m.From), clampField(m.To), clampField(displaySubject(m.Subject)))
 	if line := holdAssessmentLine(m.Assessment); line != "" {
 		fmt.Fprintf(&b, "\nassessment: %s", line)
 	}
