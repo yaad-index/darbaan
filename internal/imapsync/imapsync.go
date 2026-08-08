@@ -33,7 +33,20 @@ type Syncer struct {
 	labelStore LabelStoreFunc // Gmail X-GM-LABELS writer; nil = plain keywords only (ADR 0020)
 	logger     *slog.Logger   // structured logger; defaults to slog.Default(), injectable via SetLogger
 	audit      audit.AuditLog // retract audit sink for on-demand stale-mapping drops (#190); nil = no audit
+	assess     AssessHook     // injection assessment at ingest (ADR 0032); nil = off
 }
+
+// AssessHook, when set, runs the injection assessment on a message's fetched
+// content at ingest and returns the disposition to persist alongside it (ADR
+// 0032). It runs once per message on the sync thread, off the agent-read path.
+// A nil hook (the default) disables assessment entirely: FetchContent behaves
+// exactly as before, storing no assessment. A nil *inbound.Assessment return
+// likewise means "not assessed" → normal flow.
+type AssessHook func(inbox, from string, raw []byte, env *inbound.Envelope) *inbound.Assessment
+
+// SetAssessHook installs the injection-assessment hook (ADR 0032). Leaving it
+// unset keeps assessment off.
+func (s *Syncer) SetAssessHook(h AssessHook) { s.assess = h }
 
 // SetAudit installs the audit sink for on-demand retractions — when a content
 // fetch finds the upstream UID gone, the stale mapping is dropped and a "retract"
@@ -378,7 +391,14 @@ func (s *Syncer) FetchContent(owner, inbox, id string) (inbound.Message, error) 
 		}
 		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: upstream uid %d not found: %w", id, m.UpstreamUID, inbound.ErrContentUnavailable)
 	}
-	return s.store.SetContent(owner, inbox, id, raw)
+	// Assess the fetched content once, at ingest, off the agent-read path (ADR
+	// 0032). With no hook installed this is nil and the write is exactly the prior
+	// SetContent — no behavior change when assessment is off.
+	var assessment *inbound.Assessment
+	if s.assess != nil {
+		assessment = s.assess(inbox, m.From, raw, m.Envelope)
+	}
+	return s.store.SetContentAssessed(owner, inbox, id, raw, assessment)
 }
 
 // WriteKeywords replicates a message's keyword set to the upstream backend over a

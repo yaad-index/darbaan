@@ -242,6 +242,39 @@ func TestFetchContentFillsPending(t *testing.T) {
 	assert.False(t, again.Pending)
 }
 
+// The assessment hook runs once, at content fetch, and persists its disposition.
+// With no hook installed, no assessment is written — FetchContent is unchanged.
+func TestFetchContentAssessHook(t *testing.T) {
+	addr, user := startUpstream(t)
+	appendMsg(t, user, "Subject: a\r\n\r\nbody one") // uid 1
+	appendMsg(t, user, "Subject: b\r\n\r\nbody two") // uid 2
+
+	store := newInbound(t)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
+	_, m1, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1})
+	require.NoError(t, err)
+	_, m2, err := store.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 2, UIDValidity: 1})
+	require.NoError(t, err)
+
+	// No hook: assessment off → nothing persisted.
+	off, err := syncer.FetchContent("agent", inbound.DefaultInbox, m1.ID)
+	require.NoError(t, err)
+	assert.Nil(t, off.Assessment, "with no hook installed, no assessment is written")
+
+	// Hook installed: the fetched content is assessed and the disposition persisted.
+	var gotRaw []byte
+	syncer.SetAssessHook(func(inbox, from string, raw []byte, _ *inbound.Envelope) *inbound.Assessment {
+		gotRaw = raw
+		return &inbound.Assessment{Disposition: inbound.AssessmentHeld, Summary: "flagged"}
+	})
+	on, err := syncer.FetchContent("agent", inbound.DefaultInbox, m2.ID)
+	require.NoError(t, err)
+	require.NotNil(t, on.Assessment)
+	assert.Equal(t, inbound.AssessmentHeld, on.Assessment.Disposition)
+	assert.True(t, on.HeldByAssessment())
+	assert.Contains(t, string(gotRaw), "body two", "the hook receives the fetched content")
+}
+
 // A pending record whose UIDVALIDITY no longer matches upstream errors cleanly
 // (stale UID) rather than serving wrong/empty content.
 func TestFetchContentStaleUIDValidity(t *testing.T) {

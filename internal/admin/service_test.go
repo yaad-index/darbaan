@@ -82,6 +82,9 @@ func (failingInbound) AddSyncedPending(inbound.Delivery) (bool, inbound.Message,
 func (failingInbound) SetContent(string, string, string, []byte) (inbound.Message, error) {
 	return inbound.Message{}, errors.New("inbound store down")
 }
+func (failingInbound) SetContentAssessed(string, string, string, []byte, *inbound.Assessment) (inbound.Message, error) {
+	return inbound.Message{}, errors.New("inbound store down")
+}
 func (failingInbound) SetKeywords(string, string, string, []string) (inbound.Message, error) {
 	return inbound.Message{}, errors.New("inbound store down")
 }
@@ -275,6 +278,38 @@ func TestInboundHoldQueue(t *testing.T) {
 	_, held2, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 3, UIDValidity: 1, Keywords: []string{"review"}})
 	require.NoError(t, err)
 	_, err = svc.DropHeld(held2.ID)
+	require.NoError(t, err)
+	list, err = svc.HeldList()
+	require.NoError(t, err)
+	assert.Empty(t, list)
+}
+
+// An assessment-held message (ADR 0032) surfaces in the held queue with its
+// reason, and one expose decides it — the same human flow as a filter Hold.
+func TestInboundHoldQueueIncludesAssessment(t *testing.T) {
+	q, _ := seedStore(t)
+	inbox := newInbound(t)
+	svc := admin.NewService(q, inbox, backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	// A filter that holds nothing, so the assessment is the only hold source.
+	flt, err := filter.Compile([]byte("rules: []"))
+	require.NoError(t, err)
+	svc.SetInboundHolds(map[string]*filter.Filter{inbound.DefaultInbox: flt}, func(string) string { return "agent" }, nil, false)
+
+	_, m, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1})
+	require.NoError(t, err)
+	_, err = inbox.SetContentAssessed("agent", inbound.DefaultInbox, m.ID,
+		[]byte("Subject: x\r\n\r\ny"),
+		&inbound.Assessment{Disposition: inbound.AssessmentHeld, Summary: "flagged"})
+	require.NoError(t, err)
+
+	list, err := svc.HeldList()
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, m.ID, list[0].ID)
+	require.NotNil(t, list[0].Assessment)
+	assert.Equal(t, "flagged", list[0].Assessment.Summary, "the reason is surfaced for the operator")
+
+	_, err = svc.ExposeHeld(m.ID)
 	require.NoError(t, err)
 	list, err = svc.HeldList()
 	require.NoError(t, err)

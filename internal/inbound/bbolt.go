@@ -188,6 +188,14 @@ func (s *bboltStore) addSynced(d Delivery, pending bool) (bool, Message, error) 
 // SetContent fills a pending message's body: write the content blob and mark the
 // record present. Owner-scoped; returns the now-complete message.
 func (s *bboltStore) SetContent(owner, inbox, id string, raw []byte) (Message, error) {
+	return s.SetContentAssessed(owner, inbox, id, raw, nil)
+}
+
+// SetContentAssessed fills a pending message's body and, in the same write txn,
+// persists the injection-assessment disposition (ADR 0032). A nil assessment
+// leaves the record un-assessed — identical to SetContent — so this is a no-op
+// change on the content path when assessment is off.
+func (s *bboltStore) SetContentAssessed(owner, inbox, id string, raw []byte, a *Assessment) (Message, error) {
 	var msg Message
 	err := s.db.Update(func(tx *bbolt.Tx) error {
 		rec, key, err := loadStored(tx, id)
@@ -204,6 +212,7 @@ func (s *bboltStore) SetContent(owner, inbox, id string, raw []byte) (Message, e
 		}
 		rec.Pending = false
 		rec.Blobbed = true
+		rec.Assessment = a // persisted with the content; nil = not assessed
 		msg = rec.Message
 		msg.Raw = clean
 		return putStored(tx, key, rec)

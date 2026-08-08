@@ -32,6 +32,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/admin"
 	"github.com/yaad-index/darbaan/internal/admincfg"
 	"github.com/yaad-index/darbaan/internal/agentcfg"
+	"github.com/yaad-index/darbaan/internal/assessor"
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
 	"github.com/yaad-index/darbaan/internal/bounceguard"
@@ -42,6 +43,8 @@ import (
 	"github.com/yaad-index/darbaan/internal/listener"
 	"github.com/yaad-index/darbaan/internal/policy"
 	"github.com/yaad-index/darbaan/internal/provenance"
+	"github.com/yaad-index/darbaan/internal/riskscore"
+	"github.com/yaad-index/darbaan/internal/screener"
 	"github.com/yaad-index/darbaan/internal/signer"
 	"github.com/yaad-index/darbaan/internal/sluice"
 	"github.com/yaad-index/darbaan/internal/telegram"
@@ -101,6 +104,15 @@ type CLI struct {
 
 	ApprovalStrict []string `name:"approval-strict" default:"manual" help:"Approver chain for the strict path."`
 	ApprovalLight  []string `name:"approval-light" default:"manual" help:"Approver chain for the light path."`
+
+	// Incoming-message injection assessment (ADR 0032). OFF by default: enabling it
+	// changes how inbound mail is dispositioned (a high-risk message is held for the
+	// operator), so activation on a running inbox is a deliberate opt-in. The
+	// detector/scorer are still constructed and alignment-checked at startup even
+	// when disabled, so a misconfiguration fails startup rather than lurking behind
+	// the flag; disabled is a clean no-op.
+	AssessmentEnabled bool          `name:"assessment-enabled" default:"false" help:"Assess incoming mail for prompt-injection risk and hold high-risk messages for the operator (ADR 0032). Off by default; enabling it changes inbound disposition on a running inbox."`
+	AssessmentTimeout time.Duration `name:"assessment-timeout" default:"5s" help:"Per-message timeout for the injection assessor; on timeout the message is held (fail-safe)."`
 
 	LogLevel  string `name:"log-level" default:"info" enum:"debug,info,warn,error" help:"Log verbosity."`
 	LogFormat string `name:"log-format" default:"text" enum:"text,json" help:"Log handler: text (human-readable) or json (structured ingest)."`
@@ -507,6 +519,91 @@ func parseMaxAge(s string) (time.Duration, error) {
 		return time.Duration(val * float64(mult)), nil
 	}
 	return time.ParseDuration(s)
+}
+
+// buildAssessHook constructs the injection-assessment pipeline (scorer, heuristic
+// detector, assessor, screener) and validates the detector/scorer factor
+// alignment — ALWAYS, even when assessment is disabled — so a misconfiguration
+// fails startup rather than hiding behind the enable flag and surprising the
+// operator on flip. It returns the ingest hook only when assessment is enabled; a
+// nil hook means assessment is off and FetchContent is byte-identical to before
+// (ADR 0032).
+func (cli *CLI) buildAssessHook(inboxes []inboxcfg.Inbox, resolve inbound.ProvenanceResolver, cfg riskscore.Config) (imapsync.AssessHook, error) {
+	scorer, err := riskscore.New(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("assessment scorer: %w", err)
+	}
+	detector := assessor.NewHeuristicDetector()
+	if err := assessor.ValidateAlignment(detector, scorer.Config()); err != nil {
+		return nil, fmt.Errorf("assessment detector/scorer misaligned: %w", err)
+	}
+	asr, err := assessor.New(detector, assessor.WithTimeout(cli.AssessmentTimeout))
+	if err != nil {
+		return nil, fmt.Errorf("assessment assessor: %w", err)
+	}
+	scr, err := screener.New(scorer, asr)
+	if err != nil {
+		return nil, fmt.Errorf("assessment screener: %w", err)
+	}
+	if !cli.AssessmentEnabled {
+		slog.Info("injection assessment disabled (default); detector/scorer alignment verified")
+		return nil, nil
+	}
+	slog.Warn("injection assessment ENABLED (ADR 0032): high-risk inbound mail is held for the operator")
+	identity := inboxIdentities(inboxes)
+	return func(inbox, from string, raw []byte, env *inbound.Envelope) *inbound.Assessment {
+		trust := resolve(inbox, from).Trust
+		var to, cc []string
+		if env != nil {
+			to = envAddrStrings(env.To)
+			cc = envAddrStrings(env.Cc)
+		}
+		rcpt := screener.ResolveRecipient(identity[inbound.NormInbox(inbox)], to, cc)
+		return outcomeToAssessment(scr.Screen(context.Background(), raw, trust, rcpt))
+	}, nil
+}
+
+// outcomeToAssessment maps the screener Outcome to the persisted, stringly-typed
+// inbound.Assessment. Result.Reason is deliberately dropped: it is operator/log
+// only and may wrap a raw decoder error, so it never enters the stored or
+// rendered record (only the system-defined Summary crosses to a human).
+func outcomeToAssessment(o screener.Outcome) *inbound.Assessment {
+	r := o.Result
+	return &inbound.Assessment{
+		Disposition: string(r.Disposition),
+		NotCleared:  r.NotCleared,
+		Score:       r.Score,
+		Band:        string(r.Band),
+		Factors:     factorStrings(r.Factors),
+		Summary:     o.Summary,
+	}
+}
+
+func factorStrings(fs []riskscore.Factor) []string {
+	if len(fs) == 0 {
+		return nil
+	}
+	out := make([]string, len(fs))
+	for i, f := range fs {
+		out[i] = string(f)
+	}
+	return out
+}
+
+func envAddrStrings(as []inbound.Address) []string {
+	out := make([]string, 0, len(as))
+	for _, a := range as {
+		out = append(out, a.Mailbox+"@"+a.Host)
+	}
+	return out
+}
+
+func inboxIdentities(inboxes []inboxcfg.Inbox) map[string]string {
+	m := make(map[string]string, len(inboxes))
+	for _, in := range inboxes {
+		m[inbound.NormInbox(in.Name)] = in.Identity
+	}
+	return m
 }
 
 // imapContentFetch is the read face's on-demand content resolver: it dispatches a
@@ -1039,6 +1136,16 @@ func (*ServeCmd) Run(cli *CLI) error {
 		return err
 	}
 
+	// Injection assessment (ADR 0032). Constructed and alignment-checked here
+	// regardless of the enable flag, so a detector/scorer misconfiguration fails
+	// startup instead of lurking behind the flag and surprising the operator on
+	// flip. The hook is only installed on the syncers when enabled; disabled leaves
+	// FetchContent byte-identical to before (no Screen call, no Assessment written).
+	assessHook, err := cli.buildAssessHook(inboxes, provResolver, riskscore.DefaultConfig())
+	if err != nil {
+		return err
+	}
+
 	// One inbound syncer per inbox with an upstream (ADR 0019/0023), built before
 	// the read face so per-inbox FetchContent serves pending bodies on demand. An
 	// empty map = no inbox syncs.
@@ -1047,6 +1154,11 @@ func (*ServeCmd) Run(cli *CLI) error {
 		return err
 	}
 	defer stopSync()
+	if assessHook != nil {
+		for _, syn := range syncers {
+			syn.SetAssessHook(assessHook)
+		}
+	}
 
 	// On-demand sync (ADR 0028): STATUS for an opted-in inbox triggers a debounced
 	// upstream pull before the counts are computed, so the agent can "sync now"
@@ -1317,7 +1429,47 @@ func (*HoldsLsCmd) Run(cli *CLI) error {
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
 			m.ID, m.From, truncate(m.Subject, 40), m.ReceivedAt.Format(time.RFC3339))
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	// Surface the injection-assessment reason for every assessment-flagged message,
+	// so the operator sees WHY it was held before deciding to expose it (ADR 0032).
+	// The one HoldDecision releases a message past all sources, so this reason must
+	// be visible here — the only release path is `holds expose <id>` off this list.
+	var shownHeader bool
+	for _, m := range held {
+		if !m.HeldByAssessment() {
+			continue
+		}
+		if !shownHeader {
+			_, _ = fmt.Fprintln(os.Stdout, "\ninjection assessment (ADR 0032):")
+			shownHeader = true
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "  %s  %s\n", m.ID, assessmentReason(m.Assessment))
+	}
+	return nil
+}
+
+// assessmentReason renders the human-facing injection-assessment reason. It keys
+// on NotCleared/Disposition — a not-cleared hold has no composed score, so it
+// shows the summary only, never a meaningless band/score — and draws solely on
+// the system-defined Summary/Band/Score fields (the operator/log-only Reason is
+// not part of the stored record, so it can never surface here).
+func assessmentReason(a *inbound.Assessment) string {
+	if a == nil {
+		return ""
+	}
+	if a.NotCleared {
+		if a.Summary != "" {
+			return "not cleared — " + a.Summary
+		}
+		return "not cleared (held fail-safe: the message could not be assessed)"
+	}
+	reason := fmt.Sprintf("%s risk, score %d", a.Band, a.Score)
+	if a.Summary != "" {
+		reason += " — " + a.Summary
+	}
+	return reason
 }
 
 // HoldsExposeCmd exposes a held message to the agent.

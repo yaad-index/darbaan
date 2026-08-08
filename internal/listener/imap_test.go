@@ -615,6 +615,88 @@ func TestIMAPFilterHidesMessages(t *testing.T) {
 	assert.Equal(t, "keep", msgs[0].Envelope.Subject) // only the allowed one is served
 }
 
+// An assessment-held message (ADR 0032) is hidden from the read face until the
+// operator approves it, exactly like a filter Hold; one approval reveals it.
+func TestIMAPAssessmentHold(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	_, _, err = store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "keep", UpstreamUID: 1, UIDValidity: 1,
+		Envelope: &inbound.Envelope{Subject: "keep"},
+	})
+	require.NoError(t, err)
+	_, held, err := store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "danger", UpstreamUID: 2, UIDValidity: 1,
+		Envelope: &inbound.Envelope{Subject: "danger"},
+	})
+	require.NoError(t, err)
+	_, err = store.SetContentAssessed("agent", inbound.DefaultInbox, held.ID,
+		[]byte("Subject: danger\r\n\r\nx"),
+		&inbound.Assessment{Disposition: inbound.AssessmentHeld, Summary: "flagged"})
+	require.NoError(t, err)
+
+	addr := startIMAPFull(t, store, nil, nil, nil) // no user filter
+	c, err := imapclient.DialInsecure(addr, nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	sel, err := c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1), sel.NumMessages, "assessment-held message hidden pending a decision")
+
+	_, err = store.SetHoldDecision("agent", inbound.DefaultInbox, held.ID, inbound.HoldApproved)
+	require.NoError(t, err)
+	c2, err := imapclient.DialInsecure(addr, nil)
+	require.NoError(t, err)
+	defer func() { _ = c2.Close() }()
+	require.NoError(t, c2.Login("agent", "pw").Wait())
+	sel2, err := c2.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(2), sel2.NumMessages, "one approval reveals the held message")
+}
+
+// A message held by BOTH assessment and a filter Hold stays hidden, and the
+// single HoldDecision releases it past both sources (the documented model).
+func TestIMAPAssessmentAndFilterHold(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	_, both, err := store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Subject: "danger", UpstreamUID: 1, UIDValidity: 1,
+		Envelope: &inbound.Envelope{Subject: "danger"}, Keywords: []string{"review"},
+	})
+	require.NoError(t, err)
+	_, err = store.SetContentAssessed("agent", inbound.DefaultInbox, both.ID,
+		[]byte("Subject: danger\r\n\r\nx"),
+		&inbound.Assessment{Disposition: inbound.AssessmentHeld, Summary: "flagged"})
+	require.NoError(t, err)
+
+	flt, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]"))
+	require.NoError(t, err)
+	addr := startIMAPFull(t, store, nil, nil, flt)
+
+	c, err := imapclient.DialInsecure(addr, nil)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Login("agent", "pw").Wait())
+	sel, err := c.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0), sel.NumMessages, "held by both → hidden")
+
+	_, err = store.SetHoldDecision("agent", inbound.DefaultInbox, both.ID, inbound.HoldApproved)
+	require.NoError(t, err)
+	c2, err := imapclient.DialInsecure(addr, nil)
+	require.NoError(t, err)
+	defer func() { _ = c2.Close() }()
+	require.NoError(t, c2.Login("agent", "pw").Wait())
+	sel2, err := c2.Select("INBOX", nil).Wait()
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1), sel2.NumMessages, "one approval releases it past both hold sources")
+}
+
 // A hold-for-human message is hidden until approved, then becomes visible (ADR
 // 0021): undecided → hidden; HoldApproved → served.
 func TestIMAPHoldForHuman(t *testing.T) {
