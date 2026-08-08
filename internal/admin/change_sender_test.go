@@ -56,6 +56,44 @@ func TestApproveAsUnknownInbox(t *testing.T) {
 
 	_, err = svc.ApproveAs(context.Background(), m.ID, "nope")
 	assert.ErrorIs(t, err, admin.ErrUnknownInbox)
+
+	// C5: the failed ApproveAs must not have committed the approve verdict — the
+	// message stays pending and re-approvable, never stranded in `approved` with
+	// no send attempted.
+	stored, err := q.Get(m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, sluice.StatusPending, stored.Status, "unknown-inbox ApproveAs must leave the message pending")
+
+	// And a plain approve still works afterwards (the strand would have made this
+	// fail with ErrNotPending). The default StubSender leaves it `approved` (no real
+	// upstream), which is the un-stranded success we care about here.
+	out, err := svc.ApproveID(context.Background(), m.ID)
+	require.NoError(t, err)
+	assert.NotEqual(t, sluice.StatusPending, sluice.Status(out.Status), "re-approve must move the message off pending")
+	assert.NotErrorIs(t, err, sluice.ErrNotPending)
+}
+
+// C5: when the rewrite fails (a malformed header block that textproto cannot
+// parse) the approve verdict must not commit — the message stays pending.
+func TestApproveAsRewriteFailureStaysPending(t *testing.T) {
+	q, _ := seedStore(t)
+	// A header line with no colon is not a valid field; textproto.ReadHeader
+	// rejects it, so rewriteFrom fails.
+	m, err := q.Enqueue(sluice.Submission{
+		Agent: "agent", From: "a@x.test", Rcpt: []string{"d@y.test"},
+		Raw: []byte("this-is-not-a-header\r\n\r\nbody\r\n"),
+	})
+	require.NoError(t, err)
+
+	svc := admin.NewService(q, newInbound(t), backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	svc.SetInboxIdentities(map[string]string{"work": "work@x.test"})
+
+	_, err = svc.ApproveAs(context.Background(), m.ID, "work")
+	require.Error(t, err)
+
+	stored, err := q.Get(m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, sluice.StatusPending, stored.Status, "rewrite-failure ApproveAs must leave the message pending")
 }
 
 // Inboxes lists only inboxes with a non-empty identity, sorted by name.
