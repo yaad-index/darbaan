@@ -198,7 +198,9 @@ func (s *Service) HeldList() ([]inbound.Message, error) {
 			if m.HoldDecision != "" {
 				continue // already decided
 			}
-			if (flt != nil && flt.Decide(m, now) == filter.Hold) || s.guardHoldsSpoof(m, inbox) {
+			// An assessment-held message (ADR 0032) joins the queue as another hold
+			// source; a single HoldDecision releases it past all sources.
+			if (flt != nil && flt.Decide(m, now) == filter.Hold) || s.guardHoldsSpoof(m, inbox) || m.HeldByAssessment() {
 				held = append(held, m)
 			}
 		}

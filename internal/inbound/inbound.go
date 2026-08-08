@@ -118,7 +118,15 @@ type Message struct {
 	// 0021): "" = undecided (held, hidden from the agent), "approved" = exposed to
 	// the agent, "rejected" = stays hidden. Only meaningful while a hold rule
 	// matches the message; it is the one persisted, human-supplied filter state.
+	// A single HoldDecision releases the message past EVERY hold source it matches
+	// (filter, bounce-spoof guard, injection assessment) — there is no per-source
+	// approval.
 	HoldDecision string `json:"hold_decision,omitempty"`
+
+	// Assessment is the persisted injection-assessment disposition (ADR 0032),
+	// computed once at ingest. Nil means the message was not assessed (assessment
+	// disabled, or a pre-feature record) → normal flow, never held.
+	Assessment *Assessment `json:"assessment,omitempty"`
 }
 
 // Hold decision values for Message.HoldDecision (ADR 0021).
@@ -126,6 +134,32 @@ const (
 	HoldApproved = "approved"
 	HoldRejected = "rejected"
 )
+
+// Assessment is the persisted result of the injection assessment for a message
+// (ADR 0032). Every field is system-defined and carries no message bytes; the
+// operator/log-only reason string from the scorer is deliberately excluded from
+// the stored (and therefore rendered) record.
+type Assessment struct {
+	Disposition string   `json:"disposition"`           // AssessmentAgentHandled | AssessmentHeld
+	NotCleared  bool     `json:"not_cleared,omitempty"` // fail-safe hold: no composed score
+	Score       int      `json:"score,omitempty"`
+	Band        string   `json:"band,omitempty"`
+	Factors     []string `json:"factors,omitempty"`
+	Summary     string   `json:"summary,omitempty"` // sanitized, safe to surface to a human
+}
+
+// Assessment disposition values. These mirror the scorer's disposition strings;
+// a test pins them equal so the stringly-typed store boundary can't drift.
+const (
+	AssessmentAgentHandled = "agent_handled"
+	AssessmentHeld         = "held"
+)
+
+// HeldByAssessment reports whether the injection assessment holds this message
+// for a human. A nil (not-assessed) assessment is never held.
+func (m Message) HeldByAssessment() bool {
+	return m.Assessment != nil && m.Assessment.Disposition == AssessmentHeld
+}
 
 // DefaultInbox is the implicit single inbox (ADR 0023). A record stored before
 // multi-inbox carries no Inbox and reads as DefaultInbox, and a single-inbox
@@ -158,6 +192,10 @@ type InboundStore interface {
 	// SetContent fills a pending message's body (write the content blob, mark it
 	// present) and returns the now-complete message. Scoped to (owner, inbox).
 	SetContent(owner, inbox, id string, raw []byte) (Message, error)
+	// SetContentAssessed is SetContent that also persists the injection-assessment
+	// disposition atomically with the content write (ADR 0032). A nil assessment
+	// is exactly SetContent — the message is not assessed and flows normally.
+	SetContentAssessed(owner, inbox, id string, raw []byte, a *Assessment) (Message, error)
 	// SetKeywords replaces a message's keyword set (ADR 0020) and marks it dirty
 	// for upstream reconcile. Local store is canonical. Scoped to (owner, inbox).
 	SetKeywords(owner, inbox, id string, keywords []string) (Message, error)

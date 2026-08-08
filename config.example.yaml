@@ -97,6 +97,19 @@ agent-username: ""
 approval-strict: [manual]
 approval-light: [manual]
 
+# Incoming-message injection assessment (ADR 0032). OFF by default. When enabled,
+# each incoming message is assessed once at ingest for prompt-injection risk; a
+# high-risk message is HELD for the operator in the same hold-for-human queue as
+# other holds (`darbaan holds ls|expose|drop`), and a low/medium message flows to
+# the agent as before. Enabling it changes how inbound mail is dispositioned on a
+# running inbox, so it is a deliberate opt-in. The detector and scorer are
+# constructed and alignment-checked at startup even when disabled, so a
+# misconfiguration fails startup rather than lurking behind the flag; disabled is
+# a clean no-op (no assessment, no new holds). On assessor timeout the message is
+# held (fail-safe).
+assessment-enabled: false
+assessment-timeout: 5s
+
 # --- Multi-inbox + multi-agent (optional; ADR 0023 / ADR 0027) ---------------
 # The flat fields above define ONE inbox and ONE implicit agent. To front several
 # inboxes and/or several agent principals, add `inboxes:` and `agents:` lists.

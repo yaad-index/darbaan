@@ -245,6 +245,13 @@ func (s *imapSession) listAndFilter(inbox string) (full, visible []inbound.Messa
 				continue
 			}
 		}
+		// Injection assessment is a second security floor (ADR 0032), independent of
+		// the user filter: an assessment-held message stays hidden until the operator
+		// approves it, exactly like a filter Hold. A single HoldDecision releases the
+		// message past every hold source, so approving reveals it here too.
+		if m.HeldByAssessment() && m.HoldDecision != inbound.HoldApproved {
+			continue
+		}
 		if flt == nil {
 			visible = append(visible, m)
 			continue
