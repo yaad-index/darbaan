@@ -118,6 +118,7 @@ type CLI struct {
 	LogFormat string `name:"log-format" default:"text" enum:"text,json" help:"Log handler: text (human-readable) or json (structured ingest)."`
 
 	Serve      ServeCmd      `cmd:"" help:"Run the SMTP + IMAP faces and the admin API."`
+	Audit      AuditCmd      `cmd:"" help:"Inspect the tamper-evident audit log (ADR 0011)."`
 	Queue      QueueCmd      `cmd:"" help:"Inspect and decide held messages (via the running serve's admin API)."`
 	Holds      HoldsCmd      `cmd:"" help:"Inspect and decide inbound messages held for a human (ADR 0021)."`
 	Reconcile  ReconcileCmd  `cmd:"" help:"Inspect and release inboxes held by the reconcile safety cap (ADR 0026)."`
@@ -991,6 +992,38 @@ func (*VersionCmd) Run() error {
 	return nil
 }
 
+// AuditCmd groups audit-log inspection subcommands. They open the audit database
+// directly (no running serve), so they operate on the on-disk chain.
+type AuditCmd struct {
+	Verify AuditVerifyCmd `cmd:"" help:"Verify the audit log's hash chain and sequence integrity (ADR 0011). Non-zero exit on any tampering or truncation."`
+}
+
+// AuditVerifyCmd runs the audit log's integrity check (ADR 0011, C15): the
+// hash-chain links, per-entry hashes, a gap-free sequence keyed to each record,
+// and that the tail was not truncated. It exits non-zero on the first violation
+// so it is usable as a monitoring / incident-response gate.
+type AuditVerifyCmd struct{}
+
+func (*AuditVerifyCmd) Run(cli *CLI) error {
+	if cli.AuditType != "bbolt" {
+		// audit-type=null keeps no on-disk chain; there is nothing to verify.
+		fmt.Printf("audit-type=%s: no audit chain to verify\n", cli.AuditType)
+		return nil
+	}
+	// Read-only open takes bbolt's shared lock and never writes, so it cannot run
+	// while serve holds the exclusive write lock — stop serve first.
+	al, err := audit.OpenReadOnly(cli.AuditDB)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = al.Close() }()
+	if err := al.Verify(); err != nil {
+		return err // a real integrity violation: surface it and exit non-zero
+	}
+	fmt.Println("audit: chain verified OK")
+	return nil
+}
+
 // ServeCmd runs the SMTP + IMAP faces and the operator admin API.
 type ServeCmd struct{}
 
@@ -1053,6 +1086,9 @@ func (*ServeCmd) Run(cli *CLI) error {
 	// The admin API owns the approval orchestration; it fails closed without a
 	// token (no unauthenticated admin surface).
 	svc := admin.NewService(q, inbox, sender, sgn, cli.router(), cli.ListenerDomain)
+	// Inbound hold verdicts (expose/drop) audit to the same shared log the message
+	// store writes outbound verdicts to (ADR 0011, C29).
+	svc.SetAuditLog(al)
 	adminSrv, err := admin.NewServer(cli.AdminAddr, os.Getenv("DARBAAN_ADMIN_TOKEN"), svc)
 	if err != nil {
 		return err

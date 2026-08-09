@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -14,12 +15,32 @@ import (
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
-// credential is one admin-API bearer credential (ADR 0029): the SHA-256 of its
-// full "Bearer <token>" header value (fixed-width, so the constant-time compare
-// can never leak token length) and the set of scopes it grants.
+// credential is one admin-API bearer credential (ADR 0029): the acting client's
+// name (for audit attribution), the SHA-256 of its full "Bearer <token>" header
+// value (fixed-width, so the constant-time compare can never leak token length),
+// and the set of scopes it grants.
 type credential struct {
+	name   string
 	hash   [32]byte
 	scopes map[string]bool
+}
+
+// actorCtxKey carries the acting operator client's name (ADR 0029) from the
+// authenticated request down to the service, so a state-changing verdict's audit
+// row can attribute who decided it (C30). Unexported: only this package sets it
+// (in scoped) and reads it (actorFrom).
+type actorCtxKey struct{}
+
+// withActor returns ctx carrying the acting client's name.
+func withActor(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, actorCtxKey{}, name)
+}
+
+// actorFrom returns the acting client name carried on ctx, or "" when none is set
+// (a direct service call, e.g. in a test).
+func actorFrom(ctx context.Context) string {
+	name, _ := ctx.Value(actorCtxKey{}).(string)
+	return name
 }
 
 // Server is the localhost-only HTTP admin API. It is the operator's approval
@@ -51,6 +72,7 @@ func NewServer(addr, token string, svc *Service) (*Server, error) {
 	}
 	s := &Server{svc: svc}
 	s.creds = append(s.creds, credential{
+		name:   "root", // the full-scope break-glass credential (ADR 0029)
 		hash:   hashBearer(token),
 		scopes: scopeSet(admincfg.AllScopes()),
 	})
@@ -94,6 +116,7 @@ func (s *Server) SetScopedClients(clients []ScopedClient) {
 			continue
 		}
 		s.creds = append(s.creds, credential{
+			name:   c.Name,
 			hash:   hashBearer(c.Token),
 			scopes: scopeSet(c.Scopes),
 		})
@@ -148,7 +171,9 @@ func (s *Server) scoped(required string, next http.HandlerFunc) http.HandlerFunc
 			writeErr(w, http.StatusForbidden, errors.New("forbidden: missing scope "+required))
 			return
 		}
-		next(w, r)
+		// Attribute the acting client on every authorized request, so a state-changing
+		// handler's audit row records who decided it (ADR 0029 / C30).
+		next(w, r.WithContext(withActor(r.Context(), cred.name)))
 	}
 }
 
@@ -257,12 +282,12 @@ func (s *Server) handleHeldContent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExpose(w http.ResponseWriter, r *http.Request) {
-	m, err := s.svc.ExposeHeld(r.PathValue("id"))
+	m, err := s.svc.ExposeHeld(r.Context(), r.PathValue("id"))
 	s.writeHold(w, m, err)
 }
 
 func (s *Server) handleDrop(w http.ResponseWriter, r *http.Request) {
-	m, err := s.svc.DropHeld(r.PathValue("id"))
+	m, err := s.svc.DropHeld(r.Context(), r.PathValue("id"))
 	s.writeHold(w, m, err)
 }
 

@@ -198,8 +198,8 @@ func (s *bboltStore) Get(id string) (Message, error) {
 	return s.withRaw(rec)
 }
 
-func (s *bboltStore) Approve(id, decidedBy string, released []byte, asInbox string) (Message, error) {
-	return s.transitionFromPending(id, "approve", decidedBy, func(m *Message) {
+func (s *bboltStore) Approve(id, decidedBy string, released []byte, asInbox, actor string) (Message, error) {
+	return s.transitionFromPending(id, "approve", decidedBy, actor, nil, func(m *Message) {
 		m.Status = StatusApproved
 		m.DecidedBy = decidedBy
 		// An amended body (ADR 0004) is recorded inline; it is nil in v1 (no
@@ -214,17 +214,26 @@ func (s *bboltStore) Approve(id, decidedBy string, released []byte, asInbox stri
 	})
 }
 
-func (s *bboltStore) Reject(id, decidedBy, reason string, retryable bool) (Message, error) {
-	return s.transitionFromPending(id, "reject", reason, func(m *Message) {
+func (s *bboltStore) Reject(id, decidedBy, reason string, retryable bool, actor string) (Message, error) {
+	out, err := s.transitionFromPending(id, "reject", reason, actor, &retryable, func(m *Message) {
 		m.Status = StatusRejected
 		m.DecidedBy = decidedBy
 		m.Reason = reason
 		m.Retryable = retryable
 	})
+	if err == nil && !retryable {
+		// A permanent (5xx) reject is an operator security signal (ADR 0006, C28):
+		// surface it loudly, distinct from the routine transient reject.
+		slog.Warn("outbound message permanently rejected", "message_id", id, "agent", out.Agent, "inbox", out.Inbox, "actor", actor)
+	}
+	return out, err
 }
 
-func (s *bboltStore) RecordSendAttempt(id string, sendErr error, resend bool) (Message, error) {
+func (s *bboltStore) RecordSendAttempt(id string, sendErr error, resend bool, actor, asIdentity string) (Message, error) {
 	detail := "sent"
+	if asIdentity != "" {
+		detail = "sent as " + asIdentity // ApproveAs identity, audited (C16)
+	}
 	var out Message
 	err := s.db.Update(func(tx *bbolt.Tx) error {
 		rec, key, err := loadStored(tx, id)
@@ -257,6 +266,9 @@ func (s *bboltStore) RecordSendAttempt(id string, sendErr error, resend bool) (M
 	}
 	if sendErr != nil {
 		detail = sendErr.Error()
+		if asIdentity != "" {
+			detail += " (as " + asIdentity + ")"
+		}
 	}
 	// A re-send is a distinct, operator-triggered delivery — audit it under its own
 	// event so it is not indistinguishable from the first send in the durable log.
@@ -264,7 +276,7 @@ func (s *bboltStore) RecordSendAttempt(id string, sendErr error, resend bool) (M
 	if resend {
 		event = "resend_attempt"
 	}
-	s.writeAudit(audit.Record{Event: event, Agent: out.Agent, Inbox: out.Inbox, MessageID: id, Detail: detail})
+	s.writeAudit(audit.Record{Event: event, Agent: out.Agent, Inbox: out.Inbox, Actor: actor, MessageID: id, Detail: detail})
 	return out, nil
 }
 
@@ -272,7 +284,7 @@ func (s *bboltStore) RecordSendAttempt(id string, sendErr error, resend bool) (M
 // writes a best-effort audit entry. It errors if the message is not pending, so
 // a verdict can never be applied twice. The returned message includes the raw
 // body (the approve/reject callers send it / attach it to a bounce).
-func (s *bboltStore) transitionFromPending(id, event, detail string, mutate func(*Message)) (Message, error) {
+func (s *bboltStore) transitionFromPending(id, event, detail, actor string, retryable *bool, mutate func(*Message)) (Message, error) {
 	var rec stored
 	err := s.db.Update(func(tx *bbolt.Tx) error {
 		r, key, err := loadStored(tx, id)
@@ -293,7 +305,7 @@ func (s *bboltStore) transitionFromPending(id, event, detail string, mutate func
 	if err != nil {
 		return Message{}, err
 	}
-	s.writeAudit(audit.Record{Event: event, Agent: out.Agent, Inbox: out.Inbox, MessageID: id, Detail: detail})
+	s.writeAudit(audit.Record{Event: event, Agent: out.Agent, Inbox: out.Inbox, Actor: actor, MessageID: id, Detail: detail, Retryable: retryable})
 	return out, nil
 }
 
