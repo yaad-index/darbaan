@@ -75,8 +75,10 @@ func (l *bboltLog) Append(rec Record) error {
 	})
 }
 
-// Verify walks the chain and reports the first prev_hash-link or hash mismatch.
-// It proves integrity, not completeness — see the AuditLog.Verify godoc.
+// Verify walks the chain and reports the first integrity violation: a key that
+// disagrees with its entry's Seq, a gap in the Seq run, a broken prev_hash link,
+// or a hash mismatch — then confirms the tail is whole. It proves integrity, not
+// cross-store completeness (see the AuditLog.Verify godoc).
 func (l *bboltLog) Verify() error {
 	return l.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketName)
@@ -84,10 +86,24 @@ func (l *bboltLog) Verify() error {
 			return nil
 		}
 		prevHash := ""
-		return b.ForEach(func(_, v []byte) error {
+		var wantSeq uint64 = 1 // NextSequence issues 1 for the first entry
+		var lastSeq uint64
+		if err := b.ForEach(func(k, v []byte) error {
 			var e Entry
 			if err := json.Unmarshal(v, &e); err != nil {
 				return err
+			}
+			// The key IS the entry's Seq (seqkey-encoded): a record moved to a
+			// different slot, or a Seq edited to fake continuity, disagrees here.
+			if keySeq := seqkey.Decode(k); keySeq != e.Seq {
+				return fmt.Errorf("audit: chain broken at key %d: entry seq is %d", keySeq, e.Seq)
+			}
+			// Seq must be a gap-free run from 1. A deleted interior entry, or a
+			// truncate-then-append (which resumes at the higher, delete-proof
+			// counter value), breaks the run — the check that makes truncation
+			// evident rather than silently re-chained (ADR 0011).
+			if e.Seq != wantSeq {
+				return fmt.Errorf("audit: chain broken at seq %d: expected %d (gap or truncation)", e.Seq, wantSeq)
 			}
 			if e.PrevHash != prevHash {
 				return fmt.Errorf("audit: chain broken at seq %d: prev_hash link mismatch", e.Seq)
@@ -95,19 +111,43 @@ func (l *bboltLog) Verify() error {
 			if want := computeHash(prevHash, e); want != e.Hash {
 				return fmt.Errorf("audit: chain broken at seq %d: hash mismatch", e.Seq)
 			}
-			// Gap-detection seam (not built): completeness — that every
-			// committed message has its audit entries — cannot be checked here.
-			// Because audit is written after the message-store commit, a missing
-			// entry never appears in this log at all, so Verify walks past it.
-			// Detecting that is a separate message-store-to-audit cross-reference
-			// keyed by message id, deliberately out of scope (ADR 0011).
 			prevHash = e.Hash
+			lastSeq = e.Seq
+			wantSeq++
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
+		// The bucket's sequence counter is monotonic and survives deletes, so the
+		// last surviving entry's Seq must equal it. A truncated tail (delete the
+		// last N with no re-append) leaves the counter ahead of the head — the
+		// check that makes plain tail deletion evident, not just interior edits.
+		// Completeness across the message store stays out of scope (a never-written
+		// entry never advanced this counter); see the AuditLog.Verify godoc.
+		if seq := b.Sequence(); seq != lastSeq {
+			return fmt.Errorf("audit: tail truncated: last entry seq %d but %d were issued", lastSeq, seq)
+		}
+		return nil
 	})
 }
 
 func (l *bboltLog) Close() error { return l.db.Close() }
+
+// OpenReadOnly opens an existing bbolt audit log read-only for offline integrity
+// verification (the `darbaan audit verify` command). It never writes and takes
+// bbolt's shared lock, so it cannot run while a serve process holds the exclusive
+// write lock — stop serve first, or it fails fast on the lock timeout. A missing
+// bucket / empty database verifies clean.
+func OpenReadOnly(path string) (AuditLog, error) {
+	if path == "" {
+		return nil, fmt.Errorf("audit: bbolt requires a database path (audit-db)")
+	}
+	db, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: time.Second, ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("audit: open db read-only: %w", err)
+	}
+	return &bboltLog{db: db}, nil
+}
 
 // computeHash is the deterministic chain hash: sha256(prevHash || payload),
 // where payload is the entry without its own Hash field.

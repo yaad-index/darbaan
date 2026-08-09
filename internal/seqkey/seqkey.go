@@ -12,3 +12,13 @@ func Encode(seq uint64) []byte {
 	binary.BigEndian.PutUint64(b, seq)
 	return b
 }
+
+// Decode reads back a key written by Encode. A key that is not exactly 8 bytes
+// decodes to 0, which callers that pair keys with a stored sequence treat as a
+// mismatch (the audit Verify uses it to assert key↔Seq agreement).
+func Decode(key []byte) uint64 {
+	if len(key) != 8 {
+		return 0
+	}
+	return binary.BigEndian.Uint64(key)
+}

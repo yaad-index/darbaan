@@ -271,7 +271,7 @@ func TestInboundHoldQueue(t *testing.T) {
 	assert.Equal(t, held.ID, list[0].ID)
 
 	// Expose decides it → off the held list, and the read face would now show it.
-	_, err = svc.ExposeHeld(held.ID)
+	_, err = svc.ExposeHeld(context.Background(), held.ID)
 	require.NoError(t, err)
 	list, err = svc.HeldList()
 	require.NoError(t, err)
@@ -280,11 +280,48 @@ func TestInboundHoldQueue(t *testing.T) {
 	// Drop also decides (stays hidden) → off the held list.
 	_, held2, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 3, UIDValidity: 1, Keywords: []string{"review"}})
 	require.NoError(t, err)
-	_, err = svc.DropHeld(held2.ID)
+	_, err = svc.DropHeld(context.Background(), held2.ID)
 	require.NoError(t, err)
 	list, err = svc.HeldList()
 	require.NoError(t, err)
 	assert.Empty(t, list)
+}
+
+// capturingAudit records appended entries for assertion (an in-memory AuditLog).
+type capturingAudit struct{ records []audit.Record }
+
+func (c *capturingAudit) Append(r audit.Record) error { c.records = append(c.records, r); return nil }
+func (c *capturingAudit) Verify() error               { return nil }
+func (c *capturingAudit) Close() error                { return nil }
+
+// C29: inbound hold verdicts (expose/drop) are audited — ADR 0011's "every
+// verdict" covers inbound holds, not just outbound.
+func TestInboundHoldVerdictsAudited(t *testing.T) {
+	q, _ := seedStore(t)
+	inbox := newInbound(t)
+	svc := admin.NewService(q, inbox, backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	cap := &capturingAudit{}
+	svc.SetAuditLog(cap)
+	flt, err := filter.Compile([]byte("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]"))
+	require.NoError(t, err)
+	svc.SetInboundHolds(map[string]*filter.Filter{inbound.DefaultInbox: flt}, func(string) string { return "agent" }, nil, false)
+
+	_, exposed, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 1, UIDValidity: 1, Keywords: []string{"review"}})
+	require.NoError(t, err)
+	_, dropped, err := inbox.AddSyncedPending(inbound.Delivery{Owner: "agent", UpstreamUID: 2, UIDValidity: 1, Keywords: []string{"review"}})
+	require.NoError(t, err)
+
+	em, err := svc.ExposeHeld(context.Background(), exposed.ID)
+	require.NoError(t, err)
+	_, err = svc.DropHeld(context.Background(), dropped.ID)
+	require.NoError(t, err)
+
+	require.Len(t, cap.records, 2)
+	assert.Equal(t, "expose", cap.records[0].Event)
+	assert.Equal(t, exposed.ID, cap.records[0].MessageID)
+	assert.Equal(t, em.Inbox, cap.records[0].Inbox)
+	assert.Equal(t, "drop", cap.records[1].Event)
+	assert.Equal(t, dropped.ID, cap.records[1].MessageID)
 }
 
 // HeldContent (ADR 0032 change A) returns a held message's stored body for the
@@ -313,7 +350,7 @@ func TestHeldContentRestrictedToHeld(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, raw, "a non-held id returns no content")
 
-	_, err = svc.ExposeHeld(held.ID)
+	_, err = svc.ExposeHeld(context.Background(), held.ID)
 	require.NoError(t, err)
 	raw, err = svc.HeldContent(held.ID)
 	require.NoError(t, err)
@@ -345,7 +382,7 @@ func TestInboundHoldQueueIncludesAssessment(t *testing.T) {
 	require.NotNil(t, list[0].Assessment)
 	assert.Equal(t, "flagged", list[0].Assessment.Summary, "the reason is surfaced for the operator")
 
-	_, err = svc.ExposeHeld(m.ID)
+	_, err = svc.ExposeHeld(context.Background(), m.ID)
 	require.NoError(t, err)
 	list, err = svc.HeldList()
 	require.NoError(t, err)
@@ -377,7 +414,7 @@ func TestInboundHoldQueueMultiInbox(t *testing.T) {
 	require.Len(t, list, 2) // aggregated across both inboxes
 
 	// ExposeHeld resolves the personal inbox from the id; work's hold remains.
-	_, err = svc.ExposeHeld(persHeld.ID)
+	_, err = svc.ExposeHeld(context.Background(), persHeld.ID)
 	require.NoError(t, err)
 	list, err = svc.HeldList()
 	require.NoError(t, err)
@@ -386,7 +423,7 @@ func TestInboundHoldQueueMultiInbox(t *testing.T) {
 	assert.Equal(t, "work", list[0].Inbox)
 
 	// An unknown id resolves to no inbox.
-	_, err = svc.ExposeHeld("99999")
+	_, err = svc.ExposeHeld(context.Background(), "99999")
 	require.ErrorIs(t, err, inbound.ErrNotFound)
 }
 
@@ -424,7 +461,7 @@ func TestInboundBounceGuardHold(t *testing.T) {
 	assert.Equal(t, spoof.ID, list[0].ID)
 
 	// Dropping decides it → off the held list.
-	_, err = svc.DropHeld(spoof.ID)
+	_, err = svc.DropHeld(context.Background(), spoof.ID)
 	require.NoError(t, err)
 	list, err = svc.HeldList()
 	require.NoError(t, err)

@@ -101,7 +101,7 @@ func TestApproveTransitionsAndAudits(t *testing.T) {
 	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("orig")})
 	require.NoError(t, err)
 
-	approved, err := q.Approve(m.ID, "manual", nil, "")
+	approved, err := q.Approve(m.ID, "manual", nil, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, sluice.StatusApproved, approved.Status)
 	assert.Equal(t, "manual", approved.DecidedBy)
@@ -115,7 +115,7 @@ func TestApproveStoresEditedBody(t *testing.T) {
 	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("orig")})
 	require.NoError(t, err)
 
-	approved, err := q.Approve(m.ID, "manual", []byte("edited"), "")
+	approved, err := q.Approve(m.ID, "manual", []byte("edited"), "", "")
 	require.NoError(t, err)
 	assert.Equal(t, []byte("edited"), approved.Released)
 }
@@ -125,7 +125,7 @@ func TestRejectRecordsReason(t *testing.T) {
 	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("orig")})
 	require.NoError(t, err)
 
-	rejected, err := q.Reject(m.ID, "manual", "looks like exfiltration", false)
+	rejected, err := q.Reject(m.ID, "manual", "looks like exfiltration", false, "")
 	require.NoError(t, err)
 	assert.Equal(t, sluice.StatusRejected, rejected.Status)
 	assert.Equal(t, "looks like exfiltration", rejected.Reason)
@@ -137,12 +137,12 @@ func TestDoubleDecisionRejected(t *testing.T) {
 	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("orig")})
 	require.NoError(t, err)
 
-	_, err = q.Approve(m.ID, "manual", nil, "")
+	_, err = q.Approve(m.ID, "manual", nil, "", "")
 	require.NoError(t, err)
 
-	_, err = q.Approve(m.ID, "manual", nil, "")
+	_, err = q.Approve(m.ID, "manual", nil, "", "")
 	require.ErrorIs(t, err, sluice.ErrNotPending)
-	_, err = q.Reject(m.ID, "manual", "too late", false)
+	_, err = q.Reject(m.ID, "manual", "too late", false, "")
 	require.ErrorIs(t, err, sluice.ErrNotPending)
 }
 
@@ -150,10 +150,10 @@ func TestRecordSendAttemptStoresError(t *testing.T) {
 	q, al := newStore(t)
 	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("orig")})
 	require.NoError(t, err)
-	_, err = q.Approve(m.ID, "manual", nil, "")
+	_, err = q.Approve(m.ID, "manual", nil, "", "")
 	require.NoError(t, err)
 
-	out, err := q.RecordSendAttempt(m.ID, errors.New("upstream send pending"), false)
+	out, err := q.RecordSendAttempt(m.ID, errors.New("upstream send pending"), false, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, "upstream send pending", out.SendErr)
 	require.NoError(t, al.Verify())
@@ -168,30 +168,30 @@ func TestRecordSendAttemptRejectsNonApproved(t *testing.T) {
 	require.NoError(t, err)
 
 	// Pending → refused.
-	_, err = q.RecordSendAttempt(m.ID, errors.New("boom"), false)
+	_, err = q.RecordSendAttempt(m.ID, errors.New("boom"), false, "", "")
 	require.ErrorIs(t, err, sluice.ErrNotApproved)
 
 	// Rejected → refused.
-	_, err = q.Reject(m.ID, "manual", "no", false)
+	_, err = q.Reject(m.ID, "manual", "no", false, "")
 	require.NoError(t, err)
-	_, err = q.RecordSendAttempt(m.ID, errors.New("boom"), false)
+	_, err = q.RecordSendAttempt(m.ID, errors.New("boom"), false, "", "")
 	require.ErrorIs(t, err, sluice.ErrNotApproved)
 
 	// Approved → allowed; and idempotent once sent.
 	m2, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("two")})
 	require.NoError(t, err)
-	_, err = q.Approve(m2.ID, "manual", nil, "")
+	_, err = q.Approve(m2.ID, "manual", nil, "", "")
 	require.NoError(t, err)
-	sent, err := q.RecordSendAttempt(m2.ID, nil, false)
+	sent, err := q.RecordSendAttempt(m2.ID, nil, false, "", "")
 	require.NoError(t, err)
 	require.Equal(t, sluice.StatusSent, sent.Status)
-	_, err = q.RecordSendAttempt(m2.ID, nil, false) // idempotent on an already-sent message
+	_, err = q.RecordSendAttempt(m2.ID, nil, false, "", "") // idempotent on an already-sent message
 	require.NoError(t, err)
 
 	// A failure recorded against an already-sent message is refused — a losing
 	// concurrent second attempt can never turn a delivered message into
 	// sent-with-error (review note).
-	_, err = q.RecordSendAttempt(m2.ID, errors.New("late failure"), true)
+	_, err = q.RecordSendAttempt(m2.ID, errors.New("late failure"), true, "", "")
 	require.ErrorIs(t, err, sluice.ErrNotApproved)
 	after, err := q.Get(m2.ID)
 	require.NoError(t, err)
@@ -205,9 +205,9 @@ func TestListSurfacesInboxAndSendErr(t *testing.T) {
 	q, _ := newStore(t)
 	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Inbox: "work", From: "f", Raw: []byte("Subject: s\r\n\r\nb")})
 	require.NoError(t, err)
-	_, err = q.Approve(m.ID, "manual", nil, "")
+	_, err = q.Approve(m.ID, "manual", nil, "", "")
 	require.NoError(t, err)
-	_, err = q.RecordSendAttempt(m.ID, errors.New("451 temporary failure"), false)
+	_, err = q.RecordSendAttempt(m.ID, errors.New("451 temporary failure"), false, "", "")
 	require.NoError(t, err)
 
 	metas, err := q.List()
@@ -254,23 +254,23 @@ func TestTransitionsSucceedWhenAuditFails(t *testing.T) {
 
 	t.Run("approve", func(t *testing.T) {
 		q, id := seedFailing(t)
-		out, err := q.Approve(id, "manual", nil, "")
+		out, err := q.Approve(id, "manual", nil, "", "")
 		require.NoError(t, err)
 		assert.Equal(t, sluice.StatusApproved, out.Status)
 	})
 
 	t.Run("reject", func(t *testing.T) {
 		q, id := seedFailing(t)
-		out, err := q.Reject(id, "manual", "no", false)
+		out, err := q.Reject(id, "manual", "no", false, "")
 		require.NoError(t, err)
 		assert.Equal(t, sluice.StatusRejected, out.Status)
 	})
 
 	t.Run("record send attempt", func(t *testing.T) {
 		q, id := seedFailing(t)
-		_, err := q.Approve(id, "manual", nil, "")
+		_, err := q.Approve(id, "manual", nil, "", "")
 		require.NoError(t, err)
-		out, err := q.RecordSendAttempt(id, errors.New("upstream send pending"), false)
+		out, err := q.RecordSendAttempt(id, errors.New("upstream send pending"), false, "", "")
 		require.NoError(t, err)
 		assert.Equal(t, "upstream send pending", out.SendErr)
 	})
@@ -303,4 +303,58 @@ func TestEnqueueAuditRecordsAgentAndInbox(t *testing.T) {
 	assert.Equal(t, "enqueue", cap.records[0].Event)
 	assert.Equal(t, "agent-a", cap.records[0].Agent)
 	assert.Equal(t, "work", cap.records[0].Inbox)
+	assert.Empty(t, cap.records[0].Actor, "enqueue is agent-originated: no operator actor")
+}
+
+// C30/C16: an approve + send audits the deciding operator client (Actor) and, for
+// an ApproveAs, the send identity in the send-attempt Detail.
+func TestApproveSendAuditRecordsActorAndIdentity(t *testing.T) {
+	cap := &capturingAudit{}
+	q, err := sluice.New("bbolt", filepath.Join(t.TempDir(), "s.db"), cap)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = q.Close() })
+
+	m, err := q.Enqueue(sluice.Submission{Agent: "agent-a", Inbox: "work", Raw: []byte("Subject: x\r\n\r\nb")})
+	require.NoError(t, err)
+	_, err = q.Approve(m.ID, "manual", nil, "work", "ops-alice")
+	require.NoError(t, err)
+	_, err = q.RecordSendAttempt(m.ID, nil, false, "ops-alice", "work@example.test")
+	require.NoError(t, err)
+
+	byEvent := map[string]audit.Record{}
+	for _, r := range cap.records {
+		byEvent[r.Event] = r
+	}
+	require.Contains(t, byEvent, "approve")
+	assert.Equal(t, "ops-alice", byEvent["approve"].Actor)
+	require.Contains(t, byEvent, "send_attempt")
+	assert.Equal(t, "ops-alice", byEvent["send_attempt"].Actor)
+	assert.Equal(t, "sent as work@example.test", byEvent["send_attempt"].Detail)
+}
+
+// C28: a reject audits its permanence via the Retryable flag — set on reject rows,
+// nil on rows the flag does not describe.
+func TestRejectAuditRecordsRetryableFlag(t *testing.T) {
+	cap := &capturingAudit{}
+	q, err := sluice.New("bbolt", filepath.Join(t.TempDir(), "s.db"), cap)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = q.Close() })
+
+	m, err := q.Enqueue(sluice.Submission{Agent: "agent-a", Raw: []byte("Subject: x\r\n\r\nb")})
+	require.NoError(t, err)
+	_, err = q.Reject(m.ID, "manual", "exfiltration", false, "ops-bob")
+	require.NoError(t, err)
+
+	var reject *audit.Record
+	for i := range cap.records {
+		if cap.records[i].Event == "reject" {
+			reject = &cap.records[i]
+		}
+	}
+	require.NotNil(t, reject)
+	assert.Equal(t, "ops-bob", reject.Actor)
+	require.NotNil(t, reject.Retryable, "reject records the permanence flag")
+	assert.False(t, *reject.Retryable, "a permanent reject records retryable=false")
+	// The enqueue row is not a reject: the flag does not apply and stays nil.
+	assert.Nil(t, cap.records[0].Retryable)
 }

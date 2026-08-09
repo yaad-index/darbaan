@@ -3,12 +3,15 @@ package admin_test
 import (
 	"context"
 	"net"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/yaad-index/darbaan/internal/admin"
+	"github.com/yaad-index/darbaan/internal/admincfg"
+	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
 	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/inbound"
@@ -59,6 +62,43 @@ func TestAdminRoundtrip(t *testing.T) {
 
 	got, _ := q.Get(id)
 	assert.Equal(t, sluice.StatusSent, got.Status) // the chain ran in the server
+}
+
+// C30: a verdict made through a named scoped client (ADR 0029) audits that
+// client's name as the actor — the middleware carries it from the authenticated
+// request down to the store's verdict audit row, end to end.
+func TestVerdictAuditsActingClientName(t *testing.T) {
+	cap := &capturingAudit{}
+	q, err := sluice.New("bbolt", filepath.Join(t.TempDir(), "s.db"), cap)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = q.Close() })
+	m, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("orig")})
+	require.NoError(t, err)
+
+	svc := admin.NewService(q, newInbound(t), backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	srv, err := admin.NewServer("", "root-token", svc)
+	require.NoError(t, err)
+	srv.SetScopedClients([]admin.ScopedClient{{
+		Name:   "telegram-bot",
+		Token:  "scoped-tok",
+		Scopes: []string{admincfg.ScopeQueueRead, admincfg.ScopeQueueDecide},
+	}})
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	_, err = admin.NewClient(l.Addr().String(), "scoped-tok").Approve(context.Background(), m.ID)
+	require.NoError(t, err)
+
+	var approve *audit.Record
+	for i := range cap.records {
+		if cap.records[i].Event == "approve" {
+			approve = &cap.records[i]
+		}
+	}
+	require.NotNil(t, approve, "the approve verdict was audited")
+	assert.Equal(t, "telegram-bot", approve.Actor)
 }
 
 func TestAdminUnauthorized(t *testing.T) {

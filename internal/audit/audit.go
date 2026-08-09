@@ -18,13 +18,21 @@ import (
 
 // Record is the caller-supplied content of an audit entry. Agent + Inbox are the
 // acting principal and the inbox it acted as (ADR 0027): every row answers "which
-// agent did what, as which inbox".
+// agent did what, as which inbox". Actor names the operator client that made an
+// operator decision (ADR 0029 named clients), distinct from the message's own
+// agent — it is empty for agent-originated events (e.g. enqueue).
 type Record struct {
 	Event     string `json:"event"`
 	Agent     string `json:"agent"`
 	Inbox     string `json:"inbox,omitempty"` // the inbox the action was scoped to (ADR 0023/0027)
+	Actor     string `json:"actor,omitempty"` // the operator client that decided (ADR 0029); "" for agent-originated events
 	MessageID string `json:"message_id"`
 	Detail    string `json:"detail,omitempty"` // e.g. reject reason, send-attempt result
+	// Retryable records a reject's permanence (ADR 0006): a permanent (non-retryable)
+	// reject is an operator security signal. It is a pointer so it is meaningful only
+	// where it applies — nil (omitted) for every non-reject event, rather than a bare
+	// false that would read as "permanent" on rows the flag does not describe.
+	Retryable *bool `json:"retryable,omitempty"`
 }
 
 // Entry is a persisted, hash-chained audit entry. Hash binds PrevHash and the
@@ -43,12 +51,18 @@ type Entry struct {
 type AuditLog interface {
 	// Append records one entry. For the bbolt log it links into the hash chain.
 	Append(Record) error
-	// Verify reports the first integrity violation in the log, if any.
+	// Verify reports the first integrity violation in the log, if any. It proves
+	// the entries are intact AND that none were removed from the log: the
+	// prev_hash links, the per-entry hash, a gap-free Seq run keyed to the record,
+	// and — via the store's monotonic sequence counter, which survives deletes —
+	// that the tail was not truncated. A truncate-then-append resumes at a higher
+	// counter value, so it breaks the Seq run and is no longer undetectable
+	// (ADR 0011).
 	//
-	// Integrity is NOT completeness: Verify proves the prev_hash links between
-	// the entries that ARE present are intact, but it cannot detect entries that
-	// were never written (the best-effort gap, since audit is written after the
-	// message-store commit). Detecting such gaps would be a separate
+	// Integrity is NOT completeness across stores: Verify cannot detect an entry
+	// that was never written in the first place (the best-effort gap, since audit
+	// is written after the message-store commit — a missing entry never enters
+	// this log, so there is no counter to be short). Detecting that is a separate
 	// message-store-to-audit cross-reference, not Verify's job — see the seam in
 	// the bbolt implementation. An empty or disabled log verifies clean.
 	Verify() error

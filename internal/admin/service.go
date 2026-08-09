@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/yaad-index/darbaan/internal/approver"
+	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
 	"github.com/yaad-index/darbaan/internal/bounce"
 	"github.com/yaad-index/darbaan/internal/bounceguard"
@@ -43,6 +44,7 @@ type Service struct {
 	mailOwner  func(inbox string) string // synced-mail owner key per inbox (ADR 0027); nil until wired
 	guard      *bounceguard.Guard        // inbound bounce-spoof guard (ADR 0024; nil = off)
 	holdSpoof  bool                      // on_spoof=hold-for-human → spoofs join the held queue
+	audit      audit.AuditLog            // inbound-verdict audit sink (ADR 0011; nil = not wired, e.g. in tests)
 
 	// Reconcile controls (ADR 0026), wired by serve over its per-inbox syncers;
 	// nil when no inbox has an upstream (nothing to reconcile).
@@ -169,6 +171,12 @@ func (s *Service) senderFor(inbox string) (backend.Sender, bool) {
 	return snd, snd != nil
 }
 
+// SetAuditLog wires the tamper-evident audit sink for inbound hold verdicts
+// (ADR 0011): setHold records each expose/drop decision. serve supplies the same
+// log the message store writes to; without it (tests) inbound verdicts are not
+// audited, matching the store's own best-effort, non-fatal audit contract.
+func (s *Service) SetAuditLog(al audit.AuditLog) { s.audit = al }
+
 // SetInboundHolds wires the inbound hold-for-human queue (ADR 0021/0023): the
 // per-inbox filters that decide which synced messages are held, the per-inbox
 // mail-owner key their records live under (ADR 0027), and the bounce-spoof guard
@@ -288,23 +296,26 @@ func envelopeFromLocals(m inbound.Message) []string {
 }
 
 // ExposeHeld approves a held message for the agent to see (ADR 0021).
-func (s *Service) ExposeHeld(id string) (inbound.Message, error) {
-	return s.setHold(id, inbound.HoldApproved)
+func (s *Service) ExposeHeld(ctx context.Context, id string) (inbound.Message, error) {
+	return s.setHold(ctx, id, inbound.HoldApproved)
 }
 
 // DropHeld rejects a held message — it stays hidden from the agent (ADR 0021).
-func (s *Service) DropHeld(id string) (inbound.Message, error) {
-	return s.setHold(id, inbound.HoldRejected)
+func (s *Service) DropHeld(ctx context.Context, id string) (inbound.Message, error) {
+	return s.setHold(ctx, id, inbound.HoldRejected)
 }
 
 // setHold applies a hold decision to the message with this (store-wide unique) id,
 // resolving which inbox holds it (ADR 0023): the id is unique across the store, so
 // at most one inbox's (owner,inbox)-scoped record matches and the rest return
-// ErrNotFound. Returns ErrNotFound if no inbox holds it.
-func (s *Service) setHold(id, decision string) (inbound.Message, error) {
+// ErrNotFound. Returns ErrNotFound if no inbox holds it. On success it audits the
+// verdict (ADR 0011, C29): ADR 0011's "every verdict" covers inbound holds too, not
+// just outbound, attributed to the deciding operator client (C30).
+func (s *Service) setHold(ctx context.Context, id, decision string) (inbound.Message, error) {
 	for _, inbox := range s.inboxNames() {
 		m, err := s.inbox.SetHoldDecision(s.inboxOwner(inbox), inbox, id, decision)
 		if err == nil {
+			s.auditHold(ctx, m, decision)
 			return m, nil
 		}
 		if !errors.Is(err, inbound.ErrNotFound) {
@@ -312,6 +323,25 @@ func (s *Service) setHold(id, decision string) (inbound.Message, error) {
 		}
 	}
 	return inbound.Message{}, inbound.ErrNotFound
+}
+
+// auditHold records an inbound expose/drop verdict in the tamper-evident log
+// (ADR 0011). Best-effort and non-fatal, mirroring the message store's own audit
+// contract: the hold decision is already committed (the source of truth), so a
+// failed append is logged, never returned. A nil sink (unwired, e.g. in tests) is
+// a no-op.
+func (s *Service) auditHold(ctx context.Context, m inbound.Message, decision string) {
+	if s.audit == nil {
+		return
+	}
+	event := "drop"
+	if decision == inbound.HoldApproved {
+		event = "expose"
+	}
+	rec := audit.Record{Event: event, Inbox: m.Inbox, Actor: actorFrom(ctx), MessageID: m.ID}
+	if err := s.audit.Append(rec); err != nil {
+		slog.Warn("best-effort inbound-verdict audit append failed", "message_id", m.ID, "event", event, "err", err)
+	}
 }
 
 // Outcome is the result of an approve/reject action. Status is the committed
@@ -360,11 +390,12 @@ func (s *Service) decide(ctx context.Context, id string, human approver.Verdict,
 	if err != nil {
 		return sluice.Message{}, err
 	}
+	actor := actorFrom(ctx) // the operator client that decided (ADR 0029), audited for attribution (C30)
 	switch outcome.Disposition {
 	case approver.Approve:
-		return s.store.Approve(id, outcome.DecidedBy, outcome.Released, asInbox)
+		return s.store.Approve(id, outcome.DecidedBy, outcome.Released, asInbox, actor)
 	case approver.Reject:
-		return s.store.Reject(id, outcome.DecidedBy, outcome.Reason, outcome.Retryable)
+		return s.store.Reject(id, outcome.DecidedBy, outcome.Reason, outcome.Retryable, actor)
 	default:
 		return msg, nil // Hold — stays pending
 	}
@@ -440,7 +471,7 @@ func (s *Service) approve(ctx context.Context, id, asInbox string) (Outcome, err
 	}
 
 	sendErr := s.sendVia(ctx, sendInbox, sendMsg)
-	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr, false)
+	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr, false, actorFrom(ctx), identity)
 	if rerr != nil {
 		return Outcome{}, rerr
 	}
@@ -536,7 +567,7 @@ func (s *Service) ReSend(ctx context.Context, id string) (Outcome, error) {
 	slog.Info("resend", "message_id", m.ID, "inbox", inbound.NormInbox(sendInbox), "identity", identity)
 
 	sendErr := s.sendVia(ctx, sendInbox, sendMsg)
-	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr, true)
+	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr, true, actorFrom(ctx), identity)
 	if rerr != nil {
 		return Outcome{}, rerr
 	}

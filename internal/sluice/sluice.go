@@ -123,18 +123,24 @@ type MessageStore interface {
 	// Get returns the full message (including the raw body), or ErrNotFound.
 	Get(id string) (Message, error)
 	// Approve marks a pending message approved, recording the deciding approver,
-	// (when edited) the released body, and (when an ApproveAs chose one) the
-	// asInbox whose identity to send from — decision metadata only; the stored
-	// body is unchanged. It does not send. ErrNotPending if not pending.
-	Approve(id, decidedBy string, released []byte, asInbox string) (Message, error)
-	// Reject marks a pending message rejected with a reason and retryable flag.
-	Reject(id, decidedBy, reason string, retryable bool) (Message, error)
+	// (when edited) the released body, (when an ApproveAs chose one) the asInbox
+	// whose identity to send from — decision metadata only; the stored body is
+	// unchanged — and actor, the operator client that decided (ADR 0029),
+	// audited for attribution. It does not send. ErrNotPending if not pending.
+	Approve(id, decidedBy string, released []byte, asInbox, actor string) (Message, error)
+	// Reject marks a pending message rejected with a reason and retryable flag,
+	// auditing the deciding operator client (actor, ADR 0029) and the reject's
+	// permanence (a permanent reject is a security signal, ADR 0006).
+	Reject(id, decidedBy, reason string, retryable bool, actor string) (Message, error)
 	// RecordSendAttempt records the result of attempting to release an approved
 	// message to the upstream Sender. resend marks an operator-triggered re-send
-	// (a distinct audit event from the first delivery). It refuses any record
-	// against a non-approved message, and against an already-sent message admits
-	// only an idempotent success — never a failure stamp onto a sent record.
-	RecordSendAttempt(id string, sendErr error, resend bool) (Message, error)
+	// (a distinct audit event from the first delivery); actor is the deciding
+	// operator client and asIdentity the ApproveAs send identity ("" when sent
+	// as-stamped), both audited so the trail shows who sent as which identity. It
+	// refuses any record against a non-approved message, and against an
+	// already-sent message admits only an idempotent success — never a failure
+	// stamp onto a sent record.
+	RecordSendAttempt(id string, sendErr error, resend bool, actor, asIdentity string) (Message, error)
 	// Close releases the underlying resources.
 	Close() error
 }
