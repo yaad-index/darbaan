@@ -117,20 +117,20 @@ type ReconcileOptions struct {
 //  3. Candidate selection. A record is a retraction candidate only if it carries an
 //     upstream UID (UpstreamUID != 0 — locally-generated bounces are never
 //     reconciled), subject to three validity/horizon exclusions:
-//       - CURSOR HORIZON (C7): a current-validity record is judged against the
-//         upstream present-set (candidate iff its UID is absent) ONLY when its UID is
-//         at or below the sync cursor captured before the snapshot; a UID above the
-//         cursor may have been stored by a concurrent Sync after the snapshot, so it
-//         is too fresh to judge and is deferred to the next pass.
-//       - UNKNOWN VALIDITY: a record with UIDVALIDITY zero predates the persisted
-//         field (omitempty, no backfill), so zero is absence of information, not a
-//         superseded UID space — it is skipped, never retracted by inference.
-//       - SUPERSEDED VALIDITY (C8): a PENDING record under a superseded UIDVALIDITY
-//         is an orphan — headers-only, its UID meaningless in the current space, can
-//         never serve content — and reconcile reclaims it (forward sync only ever
-//         adds, never cleans). A PRESENT record under a superseded validity keeps a
-//         cached, served, readable body, so it is skipped — deleting it would be a
-//         hard loss, left for a deliberate reclaim decision (#255).
+//     - CURSOR HORIZON (C7): a current-validity record is judged against the
+//     upstream present-set (candidate iff its UID is absent) ONLY when its UID is
+//     at or below the sync cursor captured before the snapshot; a UID above the
+//     cursor may have been stored by a concurrent Sync after the snapshot, so it
+//     is too fresh to judge and is deferred to the next pass.
+//     - UNKNOWN VALIDITY: a record with UIDVALIDITY zero predates the persisted
+//     field (omitempty, no backfill), so zero is absence of information, not a
+//     superseded UID space — it is skipped, never retracted by inference.
+//     - SUPERSEDED VALIDITY (C8): a PENDING record under a superseded UIDVALIDITY
+//     is an orphan — headers-only, its UID meaningless in the current space, can
+//     never serve content — and reconcile reclaims it (forward sync only ever
+//     adds, never cleans). A PRESENT record under a superseded validity keeps a
+//     cached, served, readable body, so it is skipped — deleting it would be a
+//     hard loss, left for a deliberate reclaim decision (#255).
 //  4. Retract each candidate (RemoveSynced) and append a retract audit record.
 //     Per-message failures are collected and the pass continues (best-effort), so
 //     one stuck record never blocks the rest; the next cycle retries the failures.
