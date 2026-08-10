@@ -201,7 +201,21 @@ func TestResolveRecipient(t *testing.T) {
 
 	assert.Equal(t, riskscore.RecipientTo, ResolveRecipient("me@example.com", to, cc), "case-insensitive To match")
 	assert.Equal(t, riskscore.RecipientCc, ResolveRecipient("cc@example.com", to, cc))
-	assert.Equal(t, riskscore.RecipientBcc, ResolveRecipient("hidden@example.com", to, cc), "not in To/Cc → cautious Bcc")
-	assert.Equal(t, riskscore.RecipientBcc, ResolveRecipient("", to, cc), "empty self → cautious Bcc")
+	assert.Equal(t, riskscore.RecipientBcc, ResolveRecipient("hidden@example.com", to, cc), "known self not in To/Cc → cautious Bcc")
+	// C36: an empty self (identity-less deployment) is a config gap, not hidden
+	// delivery — it earns no adjustment (RecipientUnknown), not the Bcc penalty.
+	assert.Equal(t, riskscore.RecipientUnknown, ResolveRecipient("", to, cc), "empty self → no adjustment, not Bcc")
 	assert.Equal(t, riskscore.RecipientTo, ResolveRecipient(" me@example.com ", to, cc), "trimmed")
+}
+
+// C36: RecipientUnknown carries no configured adjustment (an unlisted position
+// adds nothing), so an identity-less deployment is not taxed the Bcc penalty on
+// every message.
+func TestResolveRecipientUnknownHasNoAdjustment(t *testing.T) {
+	s, err := riskscore.New(riskscore.DefaultConfig())
+	require.NoError(t, err)
+	unknown := s.CheapScore(provenance.TrustTrusted, riskscore.RecipientUnknown)
+	bcc := s.CheapScore(provenance.TrustTrusted, riskscore.RecipientBcc)
+	assert.Equal(t, 0, unknown.Recipient, "unknown position adds nothing")
+	assert.Equal(t, 10, bcc.Recipient, "Bcc still carries its +10")
 }

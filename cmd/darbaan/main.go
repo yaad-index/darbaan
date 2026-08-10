@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	"gopkg.in/yaml.v3"
 
 	"github.com/yaad-index/darbaan/internal/admin"
 	"github.com/yaad-index/darbaan/internal/admincfg"
@@ -202,6 +203,36 @@ func (c *CLI) configBytes() ([]byte, error) {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 	return data, nil
+}
+
+// assessmentConfig resolves the deterministic scorer's tunables (ADR 0032 §7)
+// from the optional top-level `assessment:` section of the config file, overlaid
+// onto the built-in defaults by riskscore.Parse (a partial section is valid; an
+// absent one yields the validated defaults). The `--assessment-enabled` flag is
+// the separate on/off toggle; this section only shapes the weights, bands, and
+// threshold once assessment runs.
+func (c *CLI) assessmentConfig() (riskscore.Config, error) {
+	data, err := c.configBytes()
+	if err != nil {
+		return riskscore.Config{}, err
+	}
+	if len(data) == 0 {
+		return riskscore.DefaultConfig(), nil
+	}
+	var wrapper struct {
+		Assessment yaml.Node `yaml:"assessment"`
+	}
+	if err := yaml.Unmarshal(data, &wrapper); err != nil {
+		return riskscore.Config{}, fmt.Errorf("parse assessment config: %w", err)
+	}
+	if wrapper.Assessment.IsZero() {
+		return riskscore.DefaultConfig(), nil
+	}
+	section, err := yaml.Marshal(&wrapper.Assessment)
+	if err != nil {
+		return riskscore.Config{}, fmt.Errorf("assessment config: %w", err)
+	}
+	return riskscore.Parse(section)
 }
 
 // resolveInboxes resolves the configured inboxes (ADR 0023), or a single implicit
@@ -1182,7 +1213,14 @@ func (*ServeCmd) Run(cli *CLI) error {
 	// startup instead of lurking behind the flag and surprising the operator on
 	// flip. The hook is only installed on the syncers when enabled; disabled leaves
 	// FetchContent byte-identical to before (no Screen call, no Assessment written).
-	assessHook, err := cli.buildAssessHook(inboxes, provResolver, riskscore.DefaultConfig())
+	// The scorer's weights/bands/threshold come from the operator's `assessment:`
+	// config section (ADR 0032 §7), overlaid on the defaults — a bad overlay fails
+	// startup here rather than silently scoring wrong.
+	assessCfg, err := cli.assessmentConfig()
+	if err != nil {
+		return fmt.Errorf("assessment config: %w", err)
+	}
+	assessHook, err := cli.buildAssessHook(inboxes, provResolver, assessCfg)
 	if err != nil {
 		return err
 	}
@@ -1270,8 +1308,15 @@ func (*ServeCmd) Run(cli *CLI) error {
 		Addr:          cli.IMAPAddr,
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
-		ServeStamp: func(inbox string, raw []byte) ([]byte, error) {
-			return provenance.Sanitize(raw, provResolver(inbox, provenance.From(raw)))
+		ServeStamp: func(inbox string, raw []byte, risk, riskFactors string) ([]byte, error) {
+			// Merge the caller-resolved advisory (ADR 0032 §6) into the same
+			// strip-then-stamp pass as the trust verdict, so the namespace strip
+			// clears any inbound X-Darbaan-Risk look-alike before the system value
+			// is stamped. Empty advisory strings leave the headers unset.
+			st := provResolver(inbox, provenance.From(raw))
+			st.Risk = risk
+			st.RiskFactors = riskFactors
+			return provenance.Sanitize(raw, st)
 		},
 	}, auth, inbox, imapContentFetch(syncers, inbox), imapKeywordWriter(syncers), filters, guard, holdSpoof, pw.mailOwner, syncNow)
 	if err != nil {

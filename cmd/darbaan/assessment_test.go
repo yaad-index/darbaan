@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -73,6 +75,58 @@ func TestAssessmentReasonRenders(t *testing.T) {
 	assert.Contains(t, sc, "instruction_to_reader")
 
 	assert.Empty(t, assessmentReason(nil))
+}
+
+// C17: with no config file, the tunables fall back to the validated defaults.
+func TestAssessmentConfigDefaultsWhenNoFile(t *testing.T) {
+	cli := &CLI{}
+	cfg, err := cli.assessmentConfig()
+	require.NoError(t, err)
+	assert.Equal(t, riskscore.DefaultConfig(), cfg)
+}
+
+// C17: a config file with no assessment: section also yields the defaults, so an
+// existing deployment's scoring is unchanged when the section is absent.
+func TestAssessmentConfigDefaultsWhenSectionAbsent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("agent_username: agent\n"), 0o600))
+	cli := &CLI{Config: path}
+	cfg, err := cli.assessmentConfig()
+	require.NoError(t, err)
+	assert.Equal(t, riskscore.DefaultConfig(), cfg)
+}
+
+// C17: an assessment: section overlays the operator's tunables onto the defaults
+// (a partial section is valid — unspecified keys keep their default).
+func TestAssessmentConfigOverlaysSection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yaml := "" +
+		"assessment:\n" +
+		"  threshold: 55\n" +
+		"  sender_baselines:\n" +
+		"    unknown: 20\n"
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+	cli := &CLI{Config: path}
+	cfg, err := cli.assessmentConfig()
+	require.NoError(t, err)
+	assert.Equal(t, 55, cfg.Threshold, "operator threshold overrides the default")
+	assert.Equal(t, 20, cfg.SenderBaselines[provenance.TrustUnknown], "operator baseline overlaid")
+	assert.Equal(t, riskscore.DefaultConfig().FactorPoints, cfg.FactorPoints, "unspecified keys keep their default")
+}
+
+// C17: an invalid assessment: section is a startup error, not silent mis-scoring.
+func TestAssessmentConfigRejectsInvalidSection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	// low_max must be less than medium_max; this inverts them.
+	yaml := "" +
+		"assessment:\n" +
+		"  bands:\n" +
+		"    low_max: 80\n" +
+		"    medium_max: 40\n"
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+	cli := &CLI{Config: path}
+	_, err := cli.assessmentConfig()
+	require.Error(t, err)
 }
 
 func TestBuildAssessHookDisabledIsCleanNoop(t *testing.T) {

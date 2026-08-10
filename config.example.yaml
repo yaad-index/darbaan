@@ -118,6 +118,43 @@ approval-light: [manual]
 assessment-enabled: false
 assessment-timeout: 5s
 
+# Once assessment is enabled, an OPTIONAL `assessment:` section tunes the
+# deterministic scorer's weights, bands, and human-surface threshold (ADR 0032
+# §7). Every key is overlaid onto the built-in defaults, so a partial section is
+# valid — unspecified keys keep their default — and omitting the section entirely
+# leaves the defaults unchanged. A composed score at or above `threshold` is held
+# for a human. An invalid section (e.g. band cutoffs out of order) fails startup
+# rather than scoring wrong. Below are the defaults, shown for reference:
+#
+# assessment:
+#   # Baseline points by the trust the gate stamped on the source (ADR 0030/0031),
+#   # never a re-read of From. The "unknown" floor is required.
+#   sender_baselines:
+#     trusted: 0
+#     untrusted: 40
+#     unknown: 30
+#   # Point adjustment by the mailbox's recipient position; an unlisted position
+#   # adds nothing. An identity-less inbox (no address to match) adds nothing.
+#   recipient_adjust:
+#     to: 0
+#     cc: 5
+#     bcc: 10
+#   # Per-factor contribution when a content factor is flagged; the table is
+#   # authoritative, so a flagged factor with no entry adds nothing.
+#   factor_points:
+#     instruction_to_reader: 40
+#     secrets_request: 40
+#     hidden_directives: 30
+#     attachment_directives: 30
+#   # Labeled-band cutoffs over the 0-100 score: below low_max is low, below
+#   # medium_max is medium, at or above medium_max is high.
+#   bands:
+#     low_max: 33
+#     medium_max: 66
+#   # Human-surface cutoff: a composed score >= threshold is held. Lower it for a
+#   # more conservative posture.
+#   threshold: 70
+
 # --- Multi-inbox + multi-agent (optional; ADR 0023 / ADR 0027) ---------------
 # The flat fields above define ONE inbox and ONE implicit agent. To front several
 # inboxes and/or several agent principals, add `inboxes:` and `agents:` lists.

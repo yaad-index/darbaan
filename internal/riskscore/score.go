@@ -47,6 +47,13 @@ const (
 	RecipientTo  Recipient = "to"
 	RecipientCc  Recipient = "cc"
 	RecipientBcc Recipient = "bcc"
+	// RecipientUnknown is the position for a message whose recipient cannot be
+	// resolved because the mailbox's own address is unknown (an identity-less
+	// deployment). It carries no configured adjustment — an unlisted position adds
+	// nothing (C36) — so a config gap does not tax every message the Bcc penalty.
+	// It is distinct from Bcc, which is the cautious position for a KNOWN self that
+	// is genuinely absent from To/Cc (real bulk/hidden delivery).
+	RecipientUnknown Recipient = ""
 )
 
 // Band is the labeled interval a score falls in (ADR 0032 §1). Bands are a

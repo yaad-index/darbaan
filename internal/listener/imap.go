@@ -39,13 +39,18 @@ type IMAPServerConfig struct {
 	// It closes the legacy gap — pre-ADR blobs serve with their real trust, and
 	// served trust stays fresh on a config change — and is idempotent, so it's a
 	// safe belt-and-suspenders on every fetch. nil disables it (serve as stored).
+	// The advisory (risk band/score + factors) is stamped in the same pass, so the
+	// namespace strip that precedes it makes the advisory headers spoof-proof too.
 	ServeStamp ServeStamp
 }
 
 // ServeStamp sanitizes+stamps a raw message for the given (serving) inbox,
 // returning the served bytes (ADR 0030). It reads only the inbox key it is
-// given, never the message.
-type ServeStamp func(inbox string, raw []byte) ([]byte, error)
+// given and the caller-resolved advisory strings, never the message. risk and
+// riskFactors carry the agent-facing assessment advisory (ADR 0032 §6): empty
+// strings stamp no advisory header, and any inbound look-alike is stripped by
+// the same sanitize pass before the system value is stamped.
+type ServeStamp func(inbox string, raw []byte, risk, riskFactors string) ([]byte, error)
 
 // ContentFetch resolves a message's full content (Raw) on demand: for a present
 // record from its blob, for a pending record by fetching the body from upstream
@@ -586,7 +591,12 @@ func (s *imapSession) rawResolver(m inbound.Message) rawFunc {
 				// un-sanitized — real stored blobs are sanitized at write, so this is
 				// a near-dead edge.
 				if s.serveStamp != nil {
-					if stamped, serr := s.serveStamp(s.selectedInbox, raw); serr == nil {
+					// The agent-facing advisory (ADR 0032 §6) is resolved from the freshly
+					// fetched record's persisted assessment and stamped in the same
+					// sanitize pass, so the namespace strip clears any inbound X-Darbaan-Risk
+					// look-alike before the system value lands.
+					risk, riskFactors := riskAdvisory(full.Assessment)
+					if stamped, serr := s.serveStamp(s.selectedInbox, raw, risk, riskFactors); serr == nil {
 						raw = stamped
 					} else {
 						raw = nil
@@ -604,6 +614,21 @@ func (s *imapSession) rawResolver(m inbound.Message) rawFunc {
 		}
 		return raw, err
 	}
+}
+
+// riskAdvisory renders the agent-facing injection-assessment advisory (ADR 0032
+// §6) for a served message from its persisted assessment: the composed band and
+// score, and the flagged factors. Every field is system-defined and carries no
+// message bytes. It returns empty strings — so no advisory header is stamped —
+// when there is no composed score to surface: an unassessed message, or a
+// fail-safe not-cleared hold that never earned a band.
+func riskAdvisory(a *inbound.Assessment) (risk, factors string) {
+	if a == nil || a.NotCleared || a.Band == "" {
+		return "", ""
+	}
+	risk = fmt.Sprintf("%s; score=%d", a.Band, a.Score)
+	factors = strings.Join(a.Factors, ", ")
+	return risk, factors
 }
 
 func (s *imapSession) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) error {
