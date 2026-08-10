@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 )
 
@@ -38,7 +39,7 @@ func RawGmailLabelStore(addr, username, password, mailbox string) LabelStoreFunc
 // newLabelStore is the dialer-injected core of RawGmailLabelStore (production
 // uses a TLS dialer; tests inject a plaintext one).
 func newLabelStore(dial func() (net.Conn, error), username, password, mailbox string) LabelStoreFunc {
-	return func(uid, _ uint32, add, remove []string) error {
+	return func(uid, uidValidity uint32, add, remove []string) error {
 		if len(add) == 0 && len(remove) == 0 {
 			return nil
 		}
@@ -58,8 +59,35 @@ func newLabelStore(dial func() (net.Conn, error), username, password, mailbox st
 		if !hasCap(caps, "X-GM-EXT-1") {
 			return ErrNotXGM
 		}
-		if err := rc.do("a3", fmt.Sprintf("SELECT %s", imapQuote(mailbox))); err != nil {
+		// Confirm the mailbox UID space is KNOWN and still matches the one the message
+		// was recorded under BEFORE issuing any UID STORE. A UIDVALIDITY change means the
+		// mailbox was reset and the stored UID now addresses a different message (or
+		// none), so a STORE against it would label the wrong mail. SELECT's UIDVALIDITY
+		// rides an untagged "* OK [UIDVALIDITY n]" response code, which rc.do discards —
+		// so collect the untagged lines and read it (selectUIDValidity).
+		//
+		// Refuse when the validity is UNKNOWN on EITHER side (0), not only on a mismatch:
+		// selectUIDValidity yields 0 for a missing/unparseable code, and a record
+		// predating the persisted UIDValidity field carries 0 (WriteKeywords passes it
+		// through with no zero check), so a bare "got != uidValidity" would read 0 != 0
+		// as a match and STORE against a UID space it never confirmed — the exact hole
+		// this guard exists to close. Unknown-on-either-side is therefore a refusal,
+		// matching the #253 reconcile skip for zero-validity records. A confirmed
+		// mismatch is the mailbox-reset refusal, mirroring the plain-keyword path's guard
+		// (WriteKeywords in imapsync.go) at the same point (post-SELECT, pre-STORE). (The
+		// plain-keyword path has the same both-zero shape; tracked as a follow-up.) Label
+		// writes are best-effort and retried (reconcileKeywords), so a refusal defers the
+		// write, it does not lose it.
+		selLines, err := rc.collect("a3", fmt.Sprintf("SELECT %s", imapQuote(mailbox)))
+		if err != nil {
 			return err
+		}
+		got := selectUIDValidity(selLines)
+		if got == 0 || uidValidity == 0 {
+			return fmt.Errorf("imapsync: xgm label write for uid %d: unconfirmed mailbox validity (server %d, record %d)", uid, got, uidValidity)
+		}
+		if got != uidValidity {
+			return fmt.Errorf("imapsync: xgm label write for uid %d: mailbox reset (uidvalidity %d != %d)", uid, got, uidValidity)
 		}
 		if len(add) > 0 {
 			if err := rc.do("a4", fmt.Sprintf("UID STORE %d +X-GM-LABELS (%s)", uid, labelList(add))); err != nil {
@@ -127,6 +155,35 @@ func (rc *rawConn) collect(tag, cmd string) ([]string, error) {
 		}
 		untagged = append(untagged, line)
 	}
+}
+
+// selectUIDValidity extracts the mailbox UIDVALIDITY from a SELECT response's
+// untagged lines. RFC 3501 requires an untagged "* OK [UIDVALIDITY n]" response
+// code on a successful SELECT; this scans for that code and parses n. It returns
+// 0 when no parseable code is present — 0 is never a valid UIDVALIDITY, so the
+// caller treats it as "unknown" and refuses rather than writing against an
+// unconfirmed UID space. The bracket match is case-insensitive (response codes
+// are), and ToUpper preserves ASCII byte offsets so the index into the original
+// line stays aligned.
+func selectUIDValidity(lines []string) uint32 {
+	const marker = "[UIDVALIDITY "
+	for _, l := range lines {
+		i := strings.Index(strings.ToUpper(l), marker)
+		if i < 0 {
+			continue
+		}
+		rest := l[i+len(marker):]
+		j := strings.IndexByte(rest, ']')
+		if j < 0 {
+			continue
+		}
+		n, err := strconv.ParseUint(strings.TrimSpace(rest[:j]), 10, 32)
+		if err != nil {
+			continue
+		}
+		return uint32(n)
+	}
+	return 0
 }
 
 func hasCap(lines []string, want string) bool {

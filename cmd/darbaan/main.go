@@ -725,6 +725,49 @@ func runSync(ctx context.Context, inbox string, s *imapsync.Syncer, health *sync
 // after the first call.
 const DefaultSyncOnStatusInterval = time.Minute
 
+// OnDemandSyncTimeout bounds one STATUS-triggered on-demand pull (ADR 0028). The
+// trigger runs synchronously on the agent's own session goroutine, so an upstream
+// that accepts the connection and then answers nothing would otherwise block that
+// agent's STATUS indefinitely — and, because the coordinator clears its
+// single-flight flag only when the pull returns, would wedge on-demand sync for the
+// inbox for the process lifetime (every later trigger then reads as an in-flight
+// debounce skip and reports success while doing nothing). A bounded context lets
+// Sync's cancellation close the client and unblock a hung command (see Syncer.Sync),
+// which clears the flag so the next STATUS recovers.
+//
+// The bound exists to turn "forever" into "eventually", NOT to enforce
+// responsiveness, so it is deliberately generous. Sync advances the cursor only on a
+// clean pull (pull's error path returns before state.Save), so a cancellation
+// mid-pull discards that attempt's progress; a first sync against a new or reset
+// mailbox is a full re-sync from zero, exactly when a STATUS pull is slowest, and too
+// tight a deadline would cancel it partway every time and restart from the same place
+// — a livelock that reads as a slow upstream. Five minutes is far above the default
+// poll interval and go-imap's ~30s dial, so a healthy pull never truncates; a
+// genuinely stalled upstream is surfaced by the background sync loop's health
+// tracking, not here.
+const OnDemandSyncTimeout = 5 * time.Minute
+
+// onDemandSyncNow runs one STATUS-triggered on-demand pull bounded by timeout. The
+// deadline is what gives Sync's cancellation hook something to fire on: the STATUS
+// handler runs this synchronously on the agent's session goroutine with no context
+// of its own, so without a bound a hung upstream would block that agent and wedge
+// the inbox's single-flight flag. A pull cut off by its own deadline is a normal
+// outcome here, not a fault — ctx.Err() is the authoritative signal (a command-phase
+// cancellation surfaces as the client's closed-connection error, NOT
+// context.DeadlineExceeded), so classify on it and swallow with a debug trace rather
+// than let the STATUS handler log a failure (which would read like the pre-field
+// deferral warning). A genuine pull error, deadline not reached, is returned.
+func onDemandSyncNow(od *imapsync.OnDemandSync, inbox string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_, _, terr := od.Trigger(ctx, inbox)
+	if terr != nil && ctx.Err() != nil {
+		slog.Debug("on-demand sync deferred: pull exceeded its budget", "inbox", inbox)
+		return nil
+	}
+	return terr
+}
+
 // newOnDemandSync builds the STATUS-triggered on-demand sync coordinator
 // (ADR 0028): it registers each inbox that opted in (sync_on_status) AND has an
 // upstream syncer, with its debounce window (sync_on_status_interval, or the
@@ -1246,8 +1289,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 	// background loop, on the connection's goroutine.
 	onDemand := newOnDemandSync(inboxes, syncers)
 	syncNow := func(inbox string) error {
-		_, _, terr := onDemand.Trigger(context.Background(), inbox)
-		return terr
+		return onDemandSyncNow(onDemand, inbox, OnDemandSyncTimeout)
 	}
 
 	// Wire the reconcile safety-cap controls onto the admin surface (ADR 0026):
