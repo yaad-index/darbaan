@@ -140,18 +140,30 @@ func (s *Syncer) Reconcile(ctx context.Context, opts ReconcileOptions) (int, err
 		return 0, ErrReconcileHeld
 	}
 
+	// Load the sync cursor BEFORE snapshotting the upstream (C7). Sync and reconcile
+	// overlap by design (both fire at startup; a STATUS-triggered sync adds more), so
+	// a message can arrive upstream and be stored by a concurrent Sync AFTER our
+	// present-set snapshot below but BEFORE we list the store. Such a message is
+	// absent from the snapshot yet present locally — and retracting it would be
+	// silent permanent loss, since the sync cursor has already advanced past its UID
+	// and it is never re-pulled. Capturing the cursor here, before the snapshot,
+	// bounds retraction to UIDs at or below it; anything above is too fresh to judge
+	// against this snapshot and is left for the next pass.
+	loaded, err := s.state.Load(s.stateKey())
+	if err != nil {
+		return 0, fmt.Errorf("imapsync: reconcile: load state: %w", err)
+	}
+	cursorUID := loaded.LastUID
+
 	// Guard 1: authoritative present-set (read-only). Failure ⇒ skip (fail-safe).
 	uidValidity, upUIDs, err := s.ListUpstreamUIDs()
 	if err != nil {
 		return 0, fmt.Errorf("imapsync: reconcile: %w", err)
 	}
 
-	loaded, err := s.state.Load(s.stateKey())
-	if err != nil {
-		return 0, fmt.Errorf("imapsync: reconcile: load state: %w", err)
-	}
-	// Guard 2: UIDVALIDITY-skip. A mismatch (mailbox reset, or no forward sync yet)
-	// means the UID space changed, not that everything was deleted.
+	// Guard 2: UIDVALIDITY-skip. A mismatch between the cursor's validity and the
+	// upstream's means the UID space changed (mailbox reset) or forward sync has not
+	// run yet — the current-validity set-diff below would be meaningless, so skip.
 	if loaded.UIDValidity != uidValidity {
 		return 0, nil
 	}
@@ -165,14 +177,31 @@ func (s *Syncer) Reconcile(ctx context.Context, opts ReconcileOptions) (int, err
 	if err != nil {
 		return 0, fmt.Errorf("imapsync: reconcile: list store: %w", err)
 	}
-	// Guard 3: synced-only set-diff. Skip locally-generated records (no upstream
-	// UID) and records under a superseded UIDVALIDITY; a candidate is a synced
-	// record whose UID is no longer present upstream.
+	// Guard 3: synced-only set-diff. A candidate is a synced record whose UID is no
+	// longer present upstream, with two exclusions and one addition:
+	//   - a locally-generated record (no upstream UID, e.g. a bounce) is never
+	//     retracted;
+	//   - C7: a record whose UID is ABOVE the pre-snapshot cursor may have been
+	//     stored by a Sync running concurrently with (after) our upstream snapshot,
+	//     so it is too fresh to judge — leave it for the next pass rather than risk
+	//     retracting a legitimate new message the snapshot merely predates;
+	//   - C8: a record under a SUPERSEDED UIDVALIDITY is orphaned — its UID is
+	//     meaningless in the current UID space and forward sync only ever adds, never
+	//     cleans — so reconcile owns its cleanup and treats it as a candidate,
+	//     counted under the same cap/latch as any other retraction.
 	var gone []inbound.Message
 	syncedCount := 0
 	for _, m := range msgs {
-		if m.UpstreamUID == 0 || m.UIDValidity != uidValidity {
+		if m.UpstreamUID == 0 {
+			continue // locally-generated — never retracted
+		}
+		if m.UIDValidity != uidValidity {
+			syncedCount++ // C8: superseded-validity orphan is a candidate
+			gone = append(gone, m)
 			continue
+		}
+		if m.UpstreamUID > cursorUID {
+			continue // C7: too fresh to judge against this snapshot
 		}
 		syncedCount++
 		if !present[m.UpstreamUID] {
