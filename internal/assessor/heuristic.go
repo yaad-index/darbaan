@@ -57,11 +57,15 @@ var instructionPatterns = compileAll(
 	`(?i)\boverride\s+(your|the|all)\s+(instructions?|rules?|settings?)\b`,
 )
 
-// secretsPatterns match requests for credentials or secrets.
+// secretsPatterns match a REQUEST for credentials or secrets: a request verb
+// within a short span of a secret noun (C39). Matching the noun alone fired on
+// mere mention — a receipt, a reset notice, a newsletter saying "password" — and,
+// with the unknown-sender baseline, held routine mail and trained the operator to
+// rubber-stamp. Requiring the verb keeps the true "send me your password" vector
+// while dropping bare-noun false positives. The bounded, no-newline gap keeps the
+// verb and noun in the same clause without matching across unrelated sentences.
 var secretsPatterns = compileAll(
-	`(?i)\b(password|passphrase|api[\s-]?keys?|secret\s+keys?|private\s+keys?|ssh\s+keys?|seed\s+phrase|recovery\s+phrase|credentials?)\b`,
-	`(?i)\b(2fa|mfa|otp|one[\s-]?time\s+(code|password)|verification\s+code|security\s+code)\b`,
-	`(?i)\b(send|share|provide|reveal|give|confirm|enter)\s+(me\s+)?(us\s+)?(your\s+)?(the\s+)?(password|passphrase|credentials?|api\s*keys?|secret|pin)\b`,
+	`(?i)\b(send|share|provide|reveal|give|confirm|enter|submit|verify|forward|paste|type|tell|email|text)\b[^.\r\n]{0,40}?\b(password|passphrase|api[\s-]?keys?|secret\s+keys?|private\s+keys?|ssh\s+keys?|seed\s+phrase|recovery\s+phrase|credentials?|otp|2fa|mfa|one[\s-]?time\s+(?:code|password)|verification\s+code|security\s+code)\b`,
 )
 
 // NewHeuristicDetector returns the v1 detector with the default ruleset.
@@ -82,11 +86,44 @@ func (d *HeuristicDetector) Detect(ctx context.Context, c mailtext.Content) ([]r
 	}
 	var out []riskscore.Factor
 	for _, r := range d.rules {
-		if matchesAny(textForScope(c, r.scope), r.patterns) {
+		// Strip zero-width / soft-hyphen code points before matching (C38): they can
+		// be interleaved into a keyword (a zero-width space splitting "pass"/"word") to
+		// defeat the \b-anchored patterns. mailtext keeps them in the served text on
+		// purpose (hiding text is itself a signal), so this stripping is match-only and
+		// never mutates the content the agent or operator sees.
+		// itself a signal), so this stripping is match-only and never mutates content.
+		if matchesAny(stripInvisible(textForScope(c, r.scope)), r.patterns) {
 			out = append(out, r.factor)
 		}
 	}
 	return out, nil
+}
+
+// invisibleForMatch are the zero-width and soft-hyphen code points stripped
+// before pattern matching (C38): word/keyword-splitting characters that carry no
+// visible glyph, so removing them for matching cannot merge two genuinely
+// separate words a reader would see apart.
+var invisibleForMatch = map[rune]bool{
+	'\u200b': true, // zero-width space
+	'\u200c': true, // zero-width non-joiner
+	'\u200d': true, // zero-width joiner
+	'\u2060': true, // word joiner
+	'\ufeff': true, // zero-width no-break space / BOM
+	'\u00ad': true, // soft hyphen
+}
+
+// stripInvisible removes the match-defeating invisible runes (invisibleForMatch)
+// from s, for detector matching only.
+func stripInvisible(s string) string {
+	if !strings.ContainsFunc(s, func(r rune) bool { return invisibleForMatch[r] }) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if invisibleForMatch[r] {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // Factors returns the distinct factors this detector can emit (sorted), so

@@ -172,14 +172,43 @@ func (st *walkState) walk(ent *gomessage.Entity, depth int) {
 		st.truncated = true
 		return
 	}
-	st.leaf(ent)
+	st.leaf(ent, depth)
 }
 
-func (st *walkState) leaf(ent *gomessage.Entity) {
+func (st *walkState) leaf(ent *gomessage.Entity, depth int) {
 	ct, ctParams, _ := ent.Header.ContentType()
 	ct = strings.ToLower(strings.TrimSpace(ct))
 	disp, dispParams, _ := ent.Header.ContentDisposition()
 	filename := attachmentFilename(dispParams, ctParams)
+
+	// A message/rfc822 part carries a whole nested message; a directive smuggled in
+	// an attached .eml must be scanned, not left opaque (C38). Record it as an
+	// attachment for visibility, then recurse into the embedded message so its body
+	// and attachments feed the same detectors. The depth cap bounds the recursion.
+	if ct == "message/rfc822" {
+		raw, capped, failed := st.readCapped(ent.Body)
+		if capped {
+			st.truncated = true
+		}
+		if failed {
+			st.undecodable = true
+		}
+		st.atts = append(st.atts, Attachment{
+			Filename:    attachmentDisplayName(filename),
+			ContentType: attachmentContentType(ct),
+			Size:        int64(len(raw)),
+		})
+		nested, nerr := gomessage.Read(strings.NewReader(raw))
+		if nested == nil {
+			st.undecodable = true // an embedded message we cannot parse hides its content
+			return
+		}
+		if nerr != nil {
+			st.undecodable = true // soft decode error on the embedded message
+		}
+		st.walk(nested, depth+1)
+		return
+	}
 
 	// A text/plain or text/html leaf with no attachment disposition and no
 	// filename is a body part; everything else (attached, named, or non-text) is
@@ -264,10 +293,10 @@ func (st *walkState) budgetText(text string) string {
 func (st *walkState) readCapped(r io.Reader) (text string, capped, failed bool) {
 	limit := st.lim.MaxPartText
 	b, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
-	if len(b) > limit {
-		return string(b[:limit]), true, false
-	}
-	return string(b), false, err != nil
+	// Report the cap hit and the read error independently: io.ReadAll can return
+	// limit+1 bytes AND a non-nil error in one call, so collapsing them on the cap
+	// path would drop a genuine decode failure that happened at the same read.
+	return string(b[:min(len(b), limit)]), len(b) > limit, err != nil
 }
 
 func attachmentFilename(dispParams, ctParams map[string]string) string {
