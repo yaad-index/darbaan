@@ -160,6 +160,52 @@ func TestReconcileSparesUnknownValidityRecords(t *testing.T) {
 	assert.Contains(t, uids, uint32(3))
 }
 
+// C8 (present orphan): a record under a SUPERSEDED UIDVALIDITY whose body is already
+// cached (Pending == false) is a fully readable message today — the read face serves
+// its own constant UIDVALIDITY and never filters on the upstream one, and content
+// resolution returns the cached body without consulting validity. Retracting it is a
+// hard delete of the record, dedup entry, and content blob. So cleanup must claim ONLY
+// a pending orphan (headers-only, can never serve content); a present orphan is left
+// untouched for a deliberate reclaim decision. This asserts selectivity in one pass: a
+// pending orphan is retracted while a present orphan under the same superseded validity
+// survives alongside the current-validity records.
+func TestReconcileSparesPresentSupersededValidityOrphan(t *testing.T) {
+	_, syncer, store, state := syncN(t, 3) // {1,2,3} @ current validity, all present upstream
+
+	loaded, err := state.Load("INBOX")
+	require.NoError(t, err)
+	staleValidity := loaded.UIDValidity + 1000
+
+	// A pending orphan under the superseded validity — headers-only, reclaimable.
+	_, _, err = store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Inbox: inbound.DefaultInbox, UpstreamUID: 88, UIDValidity: staleValidity,
+	})
+	require.NoError(t, err)
+
+	// A PRESENT orphan under the same superseded validity — its body is cached, so it is
+	// a readable message that must not be deleted by inference.
+	_, present, err := store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Inbox: inbound.DefaultInbox, UpstreamUID: 99, UIDValidity: staleValidity,
+	})
+	require.NoError(t, err)
+	filled, err := store.SetContent("agent", inbound.DefaultInbox, present.ID, []byte("From: x@example.test\r\n\r\ncached body\r\n"))
+	require.NoError(t, err)
+	require.False(t, filled.Pending, "the present orphan has a cached body")
+
+	removed, err := syncer.Reconcile(context.Background(), imapsync.ReconcileOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed, "only the pending orphan is retracted; the present one is spared")
+
+	msgs, err := store.List("agent", inbound.DefaultInbox)
+	require.NoError(t, err)
+	uids := uidSet(msgs)
+	assert.Contains(t, uids, uint32(99), "the present superseded-validity orphan survives (readable body)")
+	assert.NotContains(t, uids, uint32(88), "the pending superseded-validity orphan is reclaimed")
+	assert.Contains(t, uids, uint32(1))
+	assert.Contains(t, uids, uint32(2))
+	assert.Contains(t, uids, uint32(3))
+}
+
 func uidSet(msgs []inbound.Message) map[uint32]bool {
 	out := make(map[uint32]bool, len(msgs))
 	for _, m := range msgs {

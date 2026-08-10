@@ -114,11 +114,23 @@ type ReconcileOptions struct {
 //     forward-sync cursor's, the whole UID space changed (a mailbox reset, a full
 //     re-sync per ADR 0019) — NOT a signal that every message was deleted. Skip
 //     presence-deletion this cycle and let the forward sync own the re-sync.
-//  3. Synced-only set-diff: a record is a retraction candidate only if it carries
-//     an upstream UID (UpstreamUID != 0 — locally-generated bounces are never
-//     reconciled), matches the current UIDVALIDITY (records under a superseded
-//     validity are the forward re-sync's concern), and its UID is absent from the
-//     upstream present-set.
+//  3. Candidate selection. A record is a retraction candidate only if it carries an
+//     upstream UID (UpstreamUID != 0 — locally-generated bounces are never
+//     reconciled), subject to three validity/horizon exclusions:
+//       - CURSOR HORIZON (C7): a current-validity record is judged against the
+//         upstream present-set (candidate iff its UID is absent) ONLY when its UID is
+//         at or below the sync cursor captured before the snapshot; a UID above the
+//         cursor may have been stored by a concurrent Sync after the snapshot, so it
+//         is too fresh to judge and is deferred to the next pass.
+//       - UNKNOWN VALIDITY: a record with UIDVALIDITY zero predates the persisted
+//         field (omitempty, no backfill), so zero is absence of information, not a
+//         superseded UID space — it is skipped, never retracted by inference.
+//       - SUPERSEDED VALIDITY (C8): a PENDING record under a superseded UIDVALIDITY
+//         is an orphan — headers-only, its UID meaningless in the current space, can
+//         never serve content — and reconcile reclaims it (forward sync only ever
+//         adds, never cleans). A PRESENT record under a superseded validity keeps a
+//         cached, served, readable body, so it is skipped — deleting it would be a
+//         hard loss, left for a deliberate reclaim decision (#255).
 //  4. Retract each candidate (RemoveSynced) and append a retract audit record.
 //     Per-message failures are collected and the pass continues (best-effort), so
 //     one stuck record never blocks the rest; the next cycle retries the failures.
@@ -185,15 +197,16 @@ func (s *Syncer) Reconcile(ctx context.Context, opts ReconcileOptions) (int, err
 	//     stored by a Sync running concurrently with (after) our upstream snapshot,
 	//     so it is too fresh to judge — leave it for the next pass rather than risk
 	//     retracting a legitimate new message the snapshot merely predates;
-	//   - C8: a record under a SUPERSEDED UIDVALIDITY is orphaned — its UID is
+	//   - C8: a PENDING record under a SUPERSEDED UIDVALIDITY is orphaned — its UID is
 	//     meaningless in the current UID space and forward sync only ever adds, never
-	//     cleans — so reconcile owns its cleanup and treats it as a candidate,
-	//     counted under the same cap/latch as any other retraction. A record with an
-	//     UNKNOWN validity (zero) is NOT such an orphan: the persisted field is
-	//     omitempty with no backfill, so a record predating it deserializes to zero.
-	//     Zero is absence of information, not evidence of a superseded UID space, so
-	//     it is left untouched rather than retracted by inference (reclaiming those
-	//     records would need an explicit validity backfill, a separate decision).
+	//     cleans — so reconcile owns its cleanup and treats it as a candidate, counted
+	//     under the same cap/latch as any other retraction. A PRESENT record under a
+	//     superseded validity is NOT reclaimed: its body is already cached and served
+	//     as a readable message, so deleting it is a hard loss (left for #255). A
+	//     record with an UNKNOWN validity (zero) is likewise not an orphan: the
+	//     persisted field is omitempty with no backfill, so a record predating it
+	//     deserializes to zero — absence of information, not a superseded UID space —
+	//     and is left untouched rather than retracted by inference.
 	var gone []inbound.Message
 	syncedCount := 0
 	for _, m := range msgs {
@@ -204,7 +217,20 @@ func (s *Syncer) Reconcile(ctx context.Context, opts ReconcileOptions) (int, err
 			continue // unknown validity (predates the field) — never retract by inference
 		}
 		if m.UIDValidity != uidValidity {
-			syncedCount++ // C8: superseded-validity orphan is a candidate
+			// Superseded-validity orphan. Cleanup claims ONLY a pending (headers-only)
+			// record: its UID is meaningless in the current UID space, so a content fetch
+			// can only ever fail — retracting it loses nothing. A PRESENT record under a
+			// superseded validity already has a cached body and is served as a fully
+			// readable message today (the read face reports its own constant UIDVALIDITY
+			// and never fetches upstream), so deleting it is a hard loss of that blob —
+			// the exact silent loss this pass exists to prevent. Leave it untouched for a
+			// deliberate reclaim decision (#255), never delete by inference. A present
+			// orphan is also NOT set-diffed below: its UID lives in a different space, so
+			// comparing it to the current present-set would be meaningless.
+			if !m.Pending {
+				continue
+			}
+			syncedCount++ // C8: pending superseded-validity orphan is a candidate
 			gone = append(gone, m)
 			continue
 		}
