@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/yaad-index/darbaan/internal/mailtext"
 	"github.com/yaad-index/darbaan/internal/riskscore"
@@ -57,11 +58,15 @@ var instructionPatterns = compileAll(
 	`(?i)\boverride\s+(your|the|all)\s+(instructions?|rules?|settings?)\b`,
 )
 
-// secretsPatterns match requests for credentials or secrets.
+// secretsPatterns match a REQUEST for credentials or secrets: a request verb
+// within a short span of a secret noun (C39). Matching the noun alone fired on
+// mere mention — a receipt, a reset notice, a newsletter saying "password" — and,
+// with the unknown-sender baseline, held routine mail and trained the operator to
+// rubber-stamp. Requiring the verb keeps the true "send me your password" vector
+// while dropping bare-noun false positives. The bounded, no-newline gap keeps the
+// verb and noun in the same clause without matching across unrelated sentences.
 var secretsPatterns = compileAll(
-	`(?i)\b(password|passphrase|api[\s-]?keys?|secret\s+keys?|private\s+keys?|ssh\s+keys?|seed\s+phrase|recovery\s+phrase|credentials?)\b`,
-	`(?i)\b(2fa|mfa|otp|one[\s-]?time\s+(code|password)|verification\s+code|security\s+code)\b`,
-	`(?i)\b(send|share|provide|reveal|give|confirm|enter)\s+(me\s+)?(us\s+)?(your\s+)?(the\s+)?(password|passphrase|credentials?|api\s*keys?|secret|pin)\b`,
+	`(?i)\b(send|share|provide|reveal|give|confirm|enter|submit|verify|forward|paste|type|tell|email|text)\b[^.\r\n]{0,40}?\b(password|passphrase|api[\s-]?keys?|secret\s+keys?|private\s+keys?|ssh\s+keys?|seed\s+phrase|recovery\s+phrase|credentials?|otp|2fa|mfa|one[\s-]?time\s+(?:code|password)|verification\s+code|security\s+code)\b`,
 )
 
 // NewHeuristicDetector returns the v1 detector with the default ruleset.
@@ -82,11 +87,38 @@ func (d *HeuristicDetector) Detect(ctx context.Context, c mailtext.Content) ([]r
 	}
 	var out []riskscore.Factor
 	for _, r := range d.rules {
-		if matchesAny(textForScope(c, r.scope), r.patterns) {
+		// Strip Unicode format runes before matching (C38): zero-width spaces, the
+		// bidi controls, word/zero-width joiners, and the soft hyphen are all glyphless
+		// and can be interleaved into a keyword ("igno<LRM>re") to defeat the
+		// \b-anchored patterns. mailtext keeps them in the served text on purpose
+		// (hiding text is itself a signal), so this stripping is match-only and never
+		// mutates the content the agent or operator sees.
+		if matchesAny(stripFormatRunes(textForScope(c, r.scope)), r.patterns) {
 			out = append(out, r.factor)
 		}
 	}
 	return out, nil
+}
+
+// stripFormatRunes removes every Unicode format (Cf) code point from s, for
+// match-only use (detector matching and fence-marker neutralization). The bypass
+// class is the whole Cf category \u2014 zero-width space/joiners, BOM, word joiner,
+// the LRM/RLM/ALM bidi marks, the embedding/override/isolate controls, the
+// invisible math operators, and the soft hyphen \u2014 not any fixed list, so matching
+// the category covers present and future members. It is safe here precisely
+// because it never touches served/stored text; the marginal cost is a rare false
+// merge on a visible Arabic prepended-sign rune, which errs toward a hold \u2014 the
+// right direction for a security matcher.
+func stripFormatRunes(s string) string {
+	if !strings.ContainsFunc(s, func(r rune) bool { return unicode.Is(unicode.Cf, r) }) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // Factors returns the distinct factors this detector can emit (sorted), so

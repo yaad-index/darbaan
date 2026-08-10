@@ -1,6 +1,15 @@
 package assessor
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+// fenceMarker matches a fence begin/end marker in any case, so a mixed-case
+// spoof ("[End Untrusted email body]") is neutralized just like the exact-case
+// form (C44). ${1} is brace-delimited so the group ref is not read as the
+// identifier "1_UNTRUSTED".
+var fenceMarker = regexp.MustCompile(`(?i)\[(BEGIN|END) UNTRUSTED`)
 
 // Fence wraps untrusted text so it crosses the boundary to the privileged agent
 // as clearly-delimited, inert data — never as instructions (the ADR 0006
@@ -17,9 +26,17 @@ func Fence(label, text string) string {
 	label = sanitizeLabel(label)
 	begin := "[BEGIN UNTRUSTED " + label + "]"
 	end := "[END UNTRUSTED " + label + "]"
-	// Neutralize any spoofed markers so the payload cannot terminate the fence.
-	text = strings.ReplaceAll(text, "[BEGIN UNTRUSTED", "[BEGIN_UNTRUSTED")
-	text = strings.ReplaceAll(text, "[END UNTRUSTED", "[END_UNTRUSTED")
+	// Neutralize any spoofed markers so the payload cannot visually terminate the
+	// fence for a human (or an LLM summarizing the alert) reading it — in any case,
+	// and even when an invisible format rune is planted inside a marker to render as
+	// the real one while dodging consecutive-character matching (C44). If stripping
+	// the format runes reveals a marker the raw text hid, fence the stripped copy: a
+	// payload gaming the fence forfeits its invisible runes, which are display-
+	// harmless. stripFormatRunes is the same match-only Cf strip the detector uses.
+	if stripped := stripFormatRunes(text); stripped != text && fenceMarker.MatchString(stripped) {
+		text = stripped
+	}
+	text = fenceMarker.ReplaceAllString(text, "[${1}_UNTRUSTED")
 	return begin + "\n" + text + "\n" + end
 }
 
