@@ -95,6 +95,14 @@ func (s *Screener) Screen(ctx context.Context, raw []byte, trust string, recipie
 	if err != nil {
 		return Outcome{Result: riskscore.NotCleared(fmt.Sprintf("held: content could not be extracted for assessment: %v", err))}
 	}
+	if content.Undecodable {
+		// Extraction hard-failed on a part (unreadable/undecodable) or the MIME
+		// structure broke mid-stream (C19/C20): text the message carries never
+		// reached the assessor, so it cannot be cleared — fail-safe hold (ADR 0032
+		// Amendment 1). A benign cap (content.Truncated) is not a hard-fail and does
+		// not hold: the assessor saw real, bounded content.
+		return Outcome{Result: riskscore.NotCleared("held: message content could not be fully decoded for assessment (a part was unreadable or the MIME structure was malformed)")}
+	}
 	assessment, err := s.assessor.Assess(ctx, content)
 	if err != nil {
 		return Outcome{Result: riskscore.NotCleared(fmt.Sprintf("held: assessment did not complete: %v", err))}

@@ -23,6 +23,7 @@ package mailtext
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -43,8 +44,15 @@ type Content struct {
 	// their decoders are a follow-up.
 	Attachments []Attachment
 	// Truncated is true if any cap (per-part, total, part-count, or depth) was hit,
-	// so a caller knows the extraction is partial.
+	// so a caller knows the extraction is bounded — the content it holds is real,
+	// there is just more of it beyond the limits.
 	Truncated bool
+	// Undecodable is true if a part could not be decoded or read at all, or the MIME
+	// structure errored mid-stream, so text the message carries never reached the
+	// assessor (C19/C20). Unlike Truncated (a benign bound on readable content), this
+	// is an extraction hard-fail: the caller must not clear the message on it — the
+	// assessor cannot vouch for content it never saw (ADR 0032 fail-safe, Amendment 1).
+	Undecodable bool
 }
 
 // Attachment is one attachment part.
@@ -107,21 +115,30 @@ func Extract(raw []byte, lim Limits) (Content, error) {
 		return Content{}, fmt.Errorf("mailtext: unreadable message")
 	}
 	st := &walkState{lim: lim.withDefaults()}
+	if err != nil {
+		// go-message returns a usable entity alongside a non-nil error for a soft
+		// decode failure — an unknown charset or transfer-encoding — where the body
+		// is only available raw/undecoded (C20). The assessor's decoded view is then
+		// unreliable, so flag the extraction undecodable; the caller holds fail-safe.
+		st.undecodable = true
+	}
 	st.walk(ent, 0)
 	return Content{
 		Body:        strings.TrimSpace(st.body.String()),
 		Attachments: st.atts,
 		Truncated:   st.truncated,
+		Undecodable: st.undecodable,
 	}, nil
 }
 
 type walkState struct {
-	lim       Limits
-	parts     int
-	totalText int
-	truncated bool
-	body      strings.Builder
-	atts      []Attachment
+	lim         Limits
+	parts       int
+	totalText   int
+	truncated   bool
+	undecodable bool
+	body        strings.Builder
+	atts        []Attachment
 }
 
 func (st *walkState) walk(ent *gomessage.Entity, depth int) {
@@ -133,7 +150,18 @@ func (st *walkState) walk(ent *gomessage.Entity, depth int) {
 		for {
 			p, err := mr.NextPart()
 			if err != nil {
-				break
+				if errors.Is(err, io.EOF) {
+					break // normal end of the part stream
+				}
+				// Any other error is an extraction hard-fail, flagged either way
+				// (C19/C20): a structural break (p == nil) skips every remaining part
+				// unseen, so stop; a soft decode error (unknown charset/encoding) still
+				// yields a usable part, so keep processing it and the rest rather than
+				// abandoning readable siblings on one bad part.
+				st.undecodable = true
+				if p == nil {
+					break
+				}
 			}
 			st.walk(p, depth+1)
 		}
@@ -158,9 +186,12 @@ func (st *walkState) leaf(ent *gomessage.Entity) {
 	// an attachment.
 	isBodyType := ct == "text/plain" || ct == "text/html" || ct == ""
 	if isBodyType && disp != "attachment" && filename == "" {
-		raw, hit := st.readCapped(ent.Body)
-		if hit {
+		raw, capped, failed := st.readCapped(ent.Body)
+		if capped {
 			st.truncated = true
+		}
+		if failed {
+			st.undecodable = true // a body part that would not decode never reached the assessor (C20)
 		}
 		text := raw
 		if ct == "text/html" {
@@ -170,9 +201,12 @@ func (st *walkState) leaf(ent *gomessage.Entity) {
 		return
 	}
 
-	raw, hit := st.readCapped(ent.Body)
-	if hit {
+	raw, capped, failed := st.readCapped(ent.Body)
+	if capped {
 		st.truncated = true
+	}
+	if failed {
+		st.undecodable = true // an attachment that would not decode never reached the assessor (C20)
 	}
 	a := Attachment{
 		Filename:    attachmentDisplayName(filename),
@@ -220,18 +254,20 @@ func (st *walkState) budgetText(text string) string {
 	return text
 }
 
-// readCapped reads at most MaxPartText bytes from a part body, reporting whether
-// the result is incomplete — either because the cap was hit or because the read
-// errored mid-part. go-message has already decoded transfer-encoding and charset.
-// A read error surfaces as truncation so the caller flags the extraction partial
-// rather than trusting a silently-cut part.
-func (st *walkState) readCapped(r io.Reader) (string, bool) {
+// readCapped reads at most MaxPartText bytes from a part body, reporting the two
+// incompleteness modes separately: capped is a benign per-part cap hit (the bytes
+// it returns are real, there are just more), while failed is a genuine read/decode
+// error — go-message decodes transfer-encoding and charset here, so a bogus
+// charset= surfaces as failed with the text never seen (C20). The caller flags a
+// cap as Truncated but a failure as Undecodable, so a hard-fail can hold while a
+// bounded read does not.
+func (st *walkState) readCapped(r io.Reader) (text string, capped, failed bool) {
 	limit := st.lim.MaxPartText
 	b, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
 	if len(b) > limit {
-		return string(b[:limit]), true
+		return string(b[:limit]), true, false
 	}
-	return string(b), err != nil
+	return string(b), false, err != nil
 }
 
 func attachmentFilename(dispParams, ctParams map[string]string) string {
