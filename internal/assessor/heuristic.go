@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/yaad-index/darbaan/internal/mailtext"
 	"github.com/yaad-index/darbaan/internal/riskscore"
@@ -86,40 +87,34 @@ func (d *HeuristicDetector) Detect(ctx context.Context, c mailtext.Content) ([]r
 	}
 	var out []riskscore.Factor
 	for _, r := range d.rules {
-		// Strip zero-width / soft-hyphen code points before matching (C38): they can
-		// be interleaved into a keyword (a zero-width space splitting "pass"/"word") to
-		// defeat the \b-anchored patterns. mailtext keeps them in the served text on
-		// purpose (hiding text is itself a signal), so this stripping is match-only and
-		// never mutates the content the agent or operator sees.
-		// itself a signal), so this stripping is match-only and never mutates content.
-		if matchesAny(stripInvisible(textForScope(c, r.scope)), r.patterns) {
+		// Strip Unicode format runes before matching (C38): zero-width spaces, the
+		// bidi controls, word/zero-width joiners, and the soft hyphen are all glyphless
+		// and can be interleaved into a keyword ("igno<LRM>re") to defeat the
+		// \b-anchored patterns. mailtext keeps them in the served text on purpose
+		// (hiding text is itself a signal), so this stripping is match-only and never
+		// mutates the content the agent or operator sees.
+		if matchesAny(stripFormatRunes(textForScope(c, r.scope)), r.patterns) {
 			out = append(out, r.factor)
 		}
 	}
 	return out, nil
 }
 
-// invisibleForMatch are the zero-width and soft-hyphen code points stripped
-// before pattern matching (C38): word/keyword-splitting characters that carry no
-// visible glyph, so removing them for matching cannot merge two genuinely
-// separate words a reader would see apart.
-var invisibleForMatch = map[rune]bool{
-	'\u200b': true, // zero-width space
-	'\u200c': true, // zero-width non-joiner
-	'\u200d': true, // zero-width joiner
-	'\u2060': true, // word joiner
-	'\ufeff': true, // zero-width no-break space / BOM
-	'\u00ad': true, // soft hyphen
-}
-
-// stripInvisible removes the match-defeating invisible runes (invisibleForMatch)
-// from s, for detector matching only.
-func stripInvisible(s string) string {
-	if !strings.ContainsFunc(s, func(r rune) bool { return invisibleForMatch[r] }) {
+// stripFormatRunes removes every Unicode format (Cf) code point from s, for
+// match-only use (detector matching and fence-marker neutralization). The bypass
+// class is the whole Cf category \u2014 zero-width space/joiners, BOM, word joiner,
+// the LRM/RLM/ALM bidi marks, the embedding/override/isolate controls, the
+// invisible math operators, and the soft hyphen \u2014 not any fixed list, so matching
+// the category covers present and future members. It is safe here precisely
+// because it never touches served/stored text; the marginal cost is a rare false
+// merge on a visible Arabic prepended-sign rune, which errs toward a hold \u2014 the
+// right direction for a security matcher.
+func stripFormatRunes(s string) string {
+	if !strings.ContainsFunc(s, func(r rune) bool { return unicode.Is(unicode.Cf, r) }) {
 		return s
 	}
 	return strings.Map(func(r rune) rune {
-		if invisibleForMatch[r] {
+		if unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r

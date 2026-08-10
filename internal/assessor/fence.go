@@ -26,8 +26,16 @@ func Fence(label, text string) string {
 	label = sanitizeLabel(label)
 	begin := "[BEGIN UNTRUSTED " + label + "]"
 	end := "[END UNTRUSTED " + label + "]"
-	// Neutralize any spoofed markers — in any case — so the payload cannot visually
-	// terminate the fence for a human (or an LLM summarizing the alert) reading it.
+	// Neutralize any spoofed markers so the payload cannot visually terminate the
+	// fence for a human (or an LLM summarizing the alert) reading it — in any case,
+	// and even when an invisible format rune is planted inside a marker to render as
+	// the real one while dodging consecutive-character matching (C44). If stripping
+	// the format runes reveals a marker the raw text hid, fence the stripped copy: a
+	// payload gaming the fence forfeits its invisible runes, which are display-
+	// harmless. stripFormatRunes is the same match-only Cf strip the detector uses.
+	if stripped := stripFormatRunes(text); stripped != text && fenceMarker.MatchString(stripped) {
+		text = stripped
+	}
 	text = fenceMarker.ReplaceAllString(text, "[${1}_UNTRUSTED")
 	return begin + "\n" + text + "\n" + end
 }
