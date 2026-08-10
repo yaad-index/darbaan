@@ -127,6 +127,38 @@ func TestScreenExtractionErrorIsNotCleared(t *testing.T) {
 	assert.Empty(t, out.Summary)
 }
 
+// C20 / Amendment-1: content that extracts to a usable struct but is flagged
+// Undecodable (a part could not be decoded, or the structure broke mid-stream)
+// must be held fail-safe and must never reach the assessor — the assessor cannot
+// vouch for text it never saw, even on an otherwise-trusted sender.
+func TestScreenUndecodableIsNotCleared(t *testing.T) {
+	sc := mustScorer(t, nil)
+	det := &spyDetector{}
+	s := mustScreener(t, sc, det, WithExtractor(func([]byte, mailtext.Limits) (mailtext.Content, error) {
+		return mailtext.Content{Body: "readable part", Undecodable: true}, nil
+	}))
+
+	out := s.Screen(context.Background(), []byte("raw"), provenance.TrustTrusted, riskscore.RecipientTo)
+	assert.Equal(t, riskscore.DispositionHeld, out.Result.Disposition)
+	assert.True(t, out.Result.NotCleared)
+	assert.Equal(t, 0, det.calls, "an undecodable extraction never reaches the assessor")
+	assert.Empty(t, out.Summary)
+}
+
+// A benign cap (Truncated) is NOT a hard-fail: the assessor saw real, bounded
+// content, so screening proceeds normally rather than holding.
+func TestScreenTruncatedButDecodableProceeds(t *testing.T) {
+	sc := mustScorer(t, nil) // trusted baseline is low, no factors → agent-handled
+	det := &spyDetector{}
+	s := mustScreener(t, sc, det, WithExtractor(func([]byte, mailtext.Limits) (mailtext.Content, error) {
+		return mailtext.Content{Body: "bounded body", Truncated: true}, nil
+	}))
+
+	out := s.Screen(context.Background(), []byte("raw"), provenance.TrustTrusted, riskscore.RecipientTo)
+	assert.Equal(t, 1, det.calls, "a benign cap truncation still runs the assessor")
+	assert.False(t, out.Result.NotCleared, "a cap hit is not a fail-safe hold")
+}
+
 func TestScreenAssessorErrorIsNotCleared(t *testing.T) {
 	sc := mustScorer(t, nil)
 	det := &spyDetector{err: errors.New("detector down")}
