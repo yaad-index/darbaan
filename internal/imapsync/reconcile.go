@@ -188,12 +188,20 @@ func (s *Syncer) Reconcile(ctx context.Context, opts ReconcileOptions) (int, err
 	//   - C8: a record under a SUPERSEDED UIDVALIDITY is orphaned — its UID is
 	//     meaningless in the current UID space and forward sync only ever adds, never
 	//     cleans — so reconcile owns its cleanup and treats it as a candidate,
-	//     counted under the same cap/latch as any other retraction.
+	//     counted under the same cap/latch as any other retraction. A record with an
+	//     UNKNOWN validity (zero) is NOT such an orphan: the persisted field is
+	//     omitempty with no backfill, so a record predating it deserializes to zero.
+	//     Zero is absence of information, not evidence of a superseded UID space, so
+	//     it is left untouched rather than retracted by inference (reclaiming those
+	//     records would need an explicit validity backfill, a separate decision).
 	var gone []inbound.Message
 	syncedCount := 0
 	for _, m := range msgs {
 		if m.UpstreamUID == 0 {
 			continue // locally-generated — never retracted
+		}
+		if m.UIDValidity == 0 {
+			continue // unknown validity (predates the field) — never retract by inference
 		}
 		if m.UIDValidity != uidValidity {
 			syncedCount++ // C8: superseded-validity orphan is a candidate

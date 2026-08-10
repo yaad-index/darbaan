@@ -132,6 +132,34 @@ func TestReconcileOrphanCleanupIdempotent(t *testing.T) {
 	assert.Len(t, msgs, 2, "the current-validity records are untouched across retries")
 }
 
+// C8 (unknown validity): a record with UIDValidity == 0 is NOT a superseded-validity
+// orphan — the persisted field is omitempty with no backfill, so a record predating it
+// deserializes to zero. Zero is absence of information, not evidence of a reset UID
+// space, so reconcile must leave it untouched rather than retract it by inference
+// (which would be the exact silent permanent loss this pass exists to prevent).
+func TestReconcileSparesUnknownValidityRecords(t *testing.T) {
+	_, syncer, store, _ := syncN(t, 3) // {1,2,3} @ current validity, all present upstream
+
+	// A record from before UIDValidity was persisted: the field is absent on the wire
+	// and deserializes to zero.
+	_, _, err := store.AddSyncedPending(inbound.Delivery{
+		Owner: "agent", Inbox: inbound.DefaultInbox, UpstreamUID: 42, UIDValidity: 0,
+	})
+	require.NoError(t, err)
+
+	removed, err := syncer.Reconcile(context.Background(), imapsync.ReconcileOptions{})
+	require.NoError(t, err)
+	assert.Zero(t, removed, "a zero-validity record is never retracted by inference")
+
+	msgs, err := store.List("agent", inbound.DefaultInbox)
+	require.NoError(t, err)
+	uids := uidSet(msgs)
+	assert.Contains(t, uids, uint32(42), "the unknown-validity record survives the pass")
+	assert.Contains(t, uids, uint32(1))
+	assert.Contains(t, uids, uint32(2))
+	assert.Contains(t, uids, uint32(3))
+}
+
 func uidSet(msgs []inbound.Message) map[uint32]bool {
 	out := make(map[uint32]bool, len(msgs))
 	for _, m := range msgs {
