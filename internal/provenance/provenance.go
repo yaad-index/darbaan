@@ -90,6 +90,16 @@ const (
 	TrustUnknown   = "unknown"
 )
 
+// RiskHeader and RiskFactorsHeader carry the agent-facing injection-assessment
+// advisory (ADR 0032 §6): the composed risk band/score and the flagged factors
+// for a served message. Like the trust headers they are system-authored and live
+// in the reserved namespace, so the Layer-1 strip removes any inbound look-alike
+// before darbaan stamps its own — an attacker can never pre-forge them.
+const (
+	RiskHeader        = "X-Darbaan-Risk"
+	RiskFactorsHeader = "X-Darbaan-Risk-Factors"
+)
+
 var namespaceLower = strings.ToLower(Namespace)
 
 // Stamp is the provenance darbaan writes onto a message (ADR 0030): the trust
@@ -100,6 +110,14 @@ type Stamp struct {
 	Trust  string // one of the Trust* values; "" leaves X-Darbaan-Trust unset
 	Note   string // optional directive; "" leaves X-Darbaan-Note unset
 	Banner bool   // also emit a fenced top-of-body banner (top-level text/plain only)
+
+	// Risk and RiskFactors carry the agent-facing assessment advisory (ADR 0032
+	// §6), resolved by the caller from the message's persisted assessment (never
+	// from message content). An empty field leaves its header unset — so an
+	// unassessed message, or one whose assessment carries no composed score,
+	// gets no advisory header.
+	Risk        string // composed band/score, e.g. "low; score=12"; "" leaves X-Darbaan-Risk unset
+	RiskFactors string // flagged factor list; "" leaves X-Darbaan-Risk-Factors unset
 }
 
 // Strip removes every X-Darbaan-* header from a raw RFC 822 message without
@@ -147,6 +165,12 @@ func rewrite(raw []byte, s Stamp) ([]byte, error) {
 	}
 	if s.Note != "" {
 		hdr.Set(NoteHeader, headerSafe(s.Note))
+	}
+	if s.Risk != "" {
+		hdr.Set(RiskHeader, headerSafe(s.Risk))
+	}
+	if s.RiskFactors != "" {
+		hdr.Set(RiskFactorsHeader, headerSafe(s.RiskFactors))
 	}
 	body, err := io.ReadAll(br)
 	if err != nil {

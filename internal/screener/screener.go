@@ -114,19 +114,26 @@ func (s *Screener) Screen(ctx context.Context, raw []byte, trust string, recipie
 }
 
 // ResolveRecipient returns the position the mailbox self held on a message with
-// the given To and Cc recipient addresses. To wins over Cc. A mailbox found in
+// the given To and Cc recipient addresses. To wins over Cc. A KNOWN self found in
 // neither — delivered via Bcc, an alias, or a list — is treated as the most
 // cautious position, Bcc, since bulk/hidden delivery is a mild risk signal
 // (ADR 0032 §3) and an unresolved position should never earn the safest score.
+//
+// An EMPTY self (an identity-less deployment: the inbox has no configured send
+// identity to match against To/Cc) is a configuration gap, not a delivery signal.
+// Its position cannot be resolved, so it earns RecipientUnknown — no adjustment —
+// rather than the Bcc penalty, which would otherwise add +10 to every message the
+// deployment ever assesses (C36).
 func ResolveRecipient(self string, to, cc []string) riskscore.Recipient {
 	self = normalizeAddr(self)
-	if self != "" {
-		if containsAddr(to, self) {
-			return riskscore.RecipientTo
-		}
-		if containsAddr(cc, self) {
-			return riskscore.RecipientCc
-		}
+	if self == "" {
+		return riskscore.RecipientUnknown
+	}
+	if containsAddr(to, self) {
+		return riskscore.RecipientTo
+	}
+	if containsAddr(cc, self) {
+		return riskscore.RecipientCc
 	}
 	return riskscore.RecipientBcc
 }
