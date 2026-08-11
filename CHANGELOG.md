@@ -2,6 +2,11 @@
 
 ## [0.17.0](https://github.com/yaad-index/darbaan/compare/v0.16.1...v0.17.0) (2026-08-11)
 
+### Upgrade notes
+
+**Expect repeated label-write deferrals for messages stored before this series, and do not chase them as a fault.** The X-GM-LABELS writer now refuses a label write whenever the mailbox validity is unknown on either side. Messages recorded before the validity field existed therefore defer their label writes instead of replicating them, and because reconcile clears the dirty flag only on success, each one re-attempts and logs a deferral on every sync. That is the intended trade: writing into an unconfirmed UID space is the worse outcome. The deferrals stop once those records carry a validity; a backfill is tracked separately.
+
+**Assessment holds may differ slightly if you previously lowered `threshold`.** Recipient-skew scoring was corrected, so a deployment tuned around the old behaviour will hold marginally less than before. The `assessment:` settings are the supported way to re-tune.
 
 ### Features
 
