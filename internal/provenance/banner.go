@@ -238,12 +238,16 @@ const (
 // depth against a future replacement that could re-form one (#274: the old
 // "-----...(UNTRUSTED)-----" form ended with the delimiter it removed, so two same-kind
 // markers sharing a dash run manufactured a live one that a single pass never
-// re-scanned; cross-kind did not). The bound cannot be reached with a non-manufacturing
-// replacement — each productive round strictly reduces the marker count — so reaching
-// it proves that invariant was broken; it fails LOUD rather than return a body that may
-// still carry a live marker, since a silent cap is the guard-that-doesn't-act failure.
+// re-scanned; cross-kind did not — and the loop, not the bound, absorbs this: it
+// converges in a few rounds). The bound guards a DISTINCT class — a replacement that
+// regenerates a marker every round (one that itself contains or forms a marker, so each
+// round re-matches what the last wrote and the count never falls). Any convergent
+// replacement, #274's manufacture-then-absorb included, drives the count to zero in a
+// few rounds and never nears the bound; so reaching it proves the replacement is
+// non-convergent. It fails LOUD rather than return a body that may still carry a live
+// marker, since a silent cap is the guard-that-doesn't-act failure.
 func neutralizeBanners(body []byte) []byte {
-	maxRounds := len(body) + 2 // exceeds any real marker count; never approached with the bracketed replacement
+	maxRounds := 8 // convergence is one productive round (above), so this is several times any reasoned worst case; a body-sized bound would turn the panic into an effective hang on a large message before it ever fired
 	for round := 0; ; round++ {
 		next := bannerEndMarker.ReplaceAllLiteral(
 			bannerBeginMarker.ReplaceAllLiteral(body, []byte(bannerBeginDefanged)),
@@ -254,7 +258,7 @@ func neutralizeBanners(body []byte) []byte {
 		}
 		body = next
 		if round >= maxRounds {
-			panic("provenance: banner neutralization did not converge; the defanged replacement can form a marker (#274)")
+			panic("provenance: banner neutralization did not converge: the defanged replacement re-matches a marker every round — it must neither contain nor form one")
 		}
 	}
 }
