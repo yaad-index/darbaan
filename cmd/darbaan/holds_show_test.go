@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -179,4 +182,69 @@ func TestHoldsShowEndToEndAgainstRealServer(t *testing.T) {
 	assert.Contains(t, err.Error(), "no longer held")
 	assert.Contains(t, err.Error(), "take no action")
 	assert.NotContains(t, err.Error(), "no stored body")
+}
+
+// #261: --text prints the decoded body rather than the raw source. Both modes are
+// kept because they serve different jobs — the raw dump is byte-exact and redirects
+// to a .eml, --text is for actually reading the thing before deciding on it.
+func TestHoldsShowTextPrintsDecodedBody(t *testing.T) {
+	raw := "Delivered-To: agent@x.test\r\n" +
+		"ARC-Seal: i=1; a=rsa-sha256; b=" + strings.Repeat("Zq", 200) + "\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n\r\n" +
+		"the readable body\r\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(raw))
+	}))
+	defer srv.Close()
+	t.Setenv("DARBAAN_ADMIN_TOKEN", "t")
+	cli := &CLI{AdminAddr: strings.TrimPrefix(srv.URL, "http://")}
+
+	out := captureStdout(t, func() {
+		require.NoError(t, (&HoldsShowCmd{ID: "x", Text: true}).Run(cli))
+	})
+	assert.Contains(t, out, "the readable body")
+	assert.NotContains(t, out, "ARC-Seal", "--text does not print transport headers")
+
+	// Default stays the raw dump: removing that would take away the byte-exact
+	// output the .eml redirect depends on.
+	rawOut := captureStdout(t, func() {
+		require.NoError(t, (&HoldsShowCmd{ID: "x"}).Run(cli))
+	})
+	assert.Contains(t, rawOut, "ARC-Seal", "the default mode is still the raw source")
+}
+
+// A body that exists but yields no text fails loudly under --text, for the same
+// reason the no-stored-body case does: exiting 0 having printed nothing reads as
+// "the message is empty" on the surface where the body is the decision.
+func TestHoldsShowTextNoReadableTextIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("Content-Type: image/png\r\n\r\n\x89PNG binary"))
+	}))
+	defer srv.Close()
+	t.Setenv("DARBAAN_ADMIN_TOKEN", "t")
+	cli := &CLI{AdminAddr: strings.TrimPrefix(srv.URL, "http://")}
+
+	err := (&HoldsShowCmd{ID: "img", Text: true}).Run(cli)
+	require.Error(t, err, "no readable text must not exit 0 having printed nothing")
+	assert.Contains(t, err.Error(), "NOT empty")
+	assert.Contains(t, err.Error(), "without --text", "points at the raw dump rather than dead-ending")
+}
+
+// captureStdout swaps os.Stdout for a pipe, runs fn, and returns what was written.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+	fn()
+	require.NoError(t, w.Close())
+	os.Stdout = orig
+	return <-done
 }

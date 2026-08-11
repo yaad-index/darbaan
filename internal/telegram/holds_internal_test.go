@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/yaad-index/darbaan/internal/inbound"
+	"github.com/yaad-index/darbaan/internal/mailtext"
 )
 
 func TestFormatHold(t *testing.T) {
@@ -54,10 +55,9 @@ func TestFormatHoldNotCleared(t *testing.T) {
 // The fenced body is truncated to keep the whole notification under Telegram's
 // limit, with a clear marker.
 func TestFormatHoldTruncatesBody(t *testing.T) {
-	big := make([]byte, telegramTextLimit*2)
-	for i := range big {
-		big[i] = 'x'
-	}
+	// A REAL message: the card now renders the decoded text body, so a bare byte
+	// blob would exercise the undecodable path instead of truncation.
+	big := []byte("Content-Type: text/plain; charset=utf-8\r\n\r\n" + strings.Repeat("x", telegramTextLimit*2))
 	s := formatHold(inbound.Message{ID: "11"}, big, false)
 	assert.LessOrEqual(t, len([]rune(s)), telegramTextLimit, "stays under the Telegram limit")
 	assert.Contains(t, s, "[truncated]")
@@ -107,7 +107,8 @@ func TestPostedHoldsDedup(t *testing.T) {
 // emoji-heavy body — astral-plane chars are two units each — cannot push the hold
 // past the limit and fail every send.
 func TestFormatHoldUTF16Budget(t *testing.T) {
-	body := []byte(strings.Repeat("\U0001F600", 4000)) // 4000 runes, 8000 UTF-16 units
+	body := []byte("Content-Type: text/plain; charset=utf-8\r\n\r\n" +
+		strings.Repeat("\U0001F600", 4000)) // 4000 runes, 8000 UTF-16 units
 	s := formatHold(inbound.Message{ID: "13"}, body, false)
 	assert.LessOrEqual(t, utf16Len(s), telegramTextLimit, "stays under the Telegram UTF-16 cap")
 	assert.Contains(t, s, "[truncated]")
@@ -130,4 +131,114 @@ func TestFormatHoldFetchFailed(t *testing.T) {
 	// Distinct from a hold with no stored body (fetch succeeded, empty) — no warning.
 	ok := formatHold(m, nil, false)
 	assert.NotContains(t, ok, "could NOT be fetched")
+}
+
+// #261: the card must render the DECODED body, never the raw message source. The
+// regression this guards is not "ugly output" — a real message's transport headers
+// are large enough to consume the whole budget, so the operator was asked to decide
+// on a message whose content never appeared before the truncation point.
+func TestFormatHoldRendersDecodedBodyNotRawSource(t *testing.T) {
+	raw := []byte("Delivered-To: agent@x.test\r\n" +
+		"Received: by 2002:a17:504:8116 with SMTP id w22csp3306612njg;\r\n" +
+		"        Mon, 10 Aug 2026 18:37:18 -0700 (PDT)\r\n" +
+		"ARC-Seal: i=1; a=rsa-sha256; t=1786412238; cv=none; b=" + strings.Repeat("Zq", 400) + "\r\n" +
+		"DKIM-Signature: v=1; a=rsa-sha256; b=" + strings.Repeat("Yp", 400) + "\r\n" +
+		"Subject: a real subject\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n\r\n" +
+		"THE ACTUAL MESSAGE TEXT the operator needs to read.\r\n")
+
+	s := formatHold(inbound.Message{ID: "261", From: "a@x.test"}, raw, false)
+
+	assert.Contains(t, s, "THE ACTUAL MESSAGE TEXT", "the readable body reaches the operator")
+	assert.NotContains(t, s, "ARC-Seal", "transport headers are not shown as the body")
+	assert.NotContains(t, s, "DKIM-Signature", "signature blocks are not shown as the body")
+	assert.NotContains(t, s, "Delivered-To", "envelope headers are not shown as the body")
+	assert.Contains(t, s, "BEGIN UNTRUSTED", "message text stays fenced as inert data")
+}
+
+// An HTML-only message stays readable: mailtext flattens text/html, which the
+// previous text/plain-only extractor would have rendered as no text at all.
+func TestFormatHoldRendersHTMLOnlyBody(t *testing.T) {
+	raw := []byte("Content-Type: text/html; charset=utf-8\r\n\r\n" +
+		"<html><body><p>readable html content</p></body></html>")
+	s := formatHold(inbound.Message{ID: "262"}, raw, false)
+	assert.Contains(t, s, "readable html content")
+	assert.NotContains(t, s, "no message text is shown")
+	// Flattened, not dumped: the markup itself must not reach the card, or this
+	// passes just as well on the raw source it is meant to exclude.
+	assert.NotContains(t, s, "<p>", "html is flattened to text, not shown as markup")
+	assert.NotContains(t, s, "<body>", "html is flattened to text, not shown as markup")
+}
+
+// A message with no readable text must SAY so. Two failures are being excluded at
+// once: silently falling back to the raw source (the original defect) and rendering
+// nothing (which reads as "the message is empty" — the misrepresentation this
+// surface exists to prevent).
+func TestFormatHoldNoTextPartIsStatedNotSilent(t *testing.T) {
+	raw := []byte("Content-Type: image/png\r\nContent-Disposition: attachment; filename=x.png\r\n\r\n\x89PNG\r\n\x1a\n binary")
+	s := formatHold(inbound.Message{ID: "263"}, raw, false)
+
+	assert.Contains(t, s, "NOT an empty message", "absence of text is never presented as an empty message")
+	assert.Contains(t, s, "holds show", "the operator is pointed at the raw dump instead of a dead end")
+	assert.NotContains(t, s, "Content-Disposition", "still no raw source fallback")
+}
+
+// When part of the message could not be decoded, the card says the assessment
+// cannot account for it. The verdict is what the operator is weighing, so a
+// silently partial scoring would let them trust it further than it earned.
+func TestFormatHoldFlagsUndecodableContent(t *testing.T) {
+	raw := []byte("Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n" +
+		"Content-Type: text/plain\r\n\r\nvisible text\r\n--b\r\nthis part never terminates")
+	s := formatHold(inbound.Message{ID: "264"}, raw, false)
+	if strings.Contains(s, "visible text") {
+		assert.Contains(t, s, "never scored", "partial decoding is disclosed alongside whatever text was recovered")
+	}
+}
+
+// The extraction-limit marker must fit inside the reserved framing allowance like
+// every other appended string. It is added on the branch where the text already
+// FITS the budget, so nothing else bounds it.
+//
+// The failure it guards is not cosmetic. An oversized card is rejected by the send,
+// notifyHold returns an error, the hold is never marked posted, and the next poll
+// rebuilds the identical oversized card — so the message stays held (safe) but the
+// operator is never told it exists, on the surface whose entire purpose is telling
+// them. Deterministic per message, not a transient.
+//
+// Reachable with an ordinary body: Truncated is set when ANY extraction cap is hit,
+// including part-count and depth, so a many-part message sets it while rendering a
+// body of any size. Only the body's proximity to the budget matters.
+func TestFormatHoldExtractionMarkerStaysWithinLimit(t *testing.T) {
+	// Swept rather than spot-checked: the vulnerable window is where the extracted
+	// text lands just UNDER its budget, so a single size can miss it entirely.
+	for n := 3000; n <= 3600; n += 5 {
+		raw := manyPartMessage(n)
+		s := formatHoldForTest(t, raw)
+		assert.LessOrEqualf(t, utf16Len(s), telegramTextLimit,
+			"textLen=%d: card is %d units over the limit — an oversized card is rejected by the send, "+
+				"so the hold silently never reaches the operator", n, utf16Len(s)-telegramTextLimit)
+	}
+}
+
+// formatHoldForTest renders a hold card for a raw message.
+func formatHoldForTest(t *testing.T, raw []byte) string {
+	t.Helper()
+	return formatHold(inbound.Message{ID: "trunc", From: "a@x.test"}, raw, false)
+}
+
+// manyPartMessage builds a message that trips the extraction PART-COUNT cap while
+// its rendered text stays the given size. Size and cap-hit are independent here,
+// which is the reachability that matters: the marker branch needs a body that fits
+// the budget, and a cap hit is available at any body size.
+func manyPartMessage(textLen int) []byte {
+	var b strings.Builder
+	b.WriteString("Content-Type: multipart/mixed; boundary=bb\r\n\r\n")
+	b.WriteString("--bb\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n")
+	b.WriteString(strings.Repeat("y", textLen))
+	b.WriteString("\r\n")
+	for i := 0; i < mailtext.DefaultLimits().MaxParts+5; i++ {
+		b.WriteString("--bb\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n.\r\n")
+	}
+	b.WriteString("--bb--\r\n")
+	return []byte(b.String())
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/yaad-index/darbaan/internal/assessor"
 	"github.com/yaad-index/darbaan/internal/inbound"
+	"github.com/yaad-index/darbaan/internal/mailtext"
 )
 
 // pollHolds lists the inbound hold-for-human queue (ADR 0021) and posts each new
@@ -145,17 +146,88 @@ func holdAssessmentLine(a *inbound.Assessment) string {
 	return line
 }
 
-// fencedBody truncates the raw body to the UTF-16 budget (marking the cut) and
-// wraps it in an untrusted fence. A non-positive budget yields no body.
+// fencedBody renders the stored message for the operator card: the DECODED text of
+// the message, never the raw message source.
+//
+// Why extraction at all. Fencing string(raw) spent the entire budget on transport
+// headers — Received, ARC-Seal, DKIM-Signature — and truncated before a single
+// human-readable line, so the operator was asked to Expose or Drop a message whose
+// content they had never actually seen. On an injection-assessed hold the body IS
+// the decision, so an unreadable card is not a cosmetic problem.
+//
+// Why THIS extractor. mailtext is what the assessor consumes, so the operator reads
+// the text the detector actually scored rather than a separately derived rendering
+// that could quietly disagree with the verdict being judged. It also flattens
+// text/html, so an HTML-only message stays readable here.
+//
+// That correspondence currently holds because both call sites use the package
+// defaults, NOT because anything ties them together: the screening path takes its
+// limits through an option that merely defaults to them. Today the option is
+// test-only, so there is no live divergence, but if a caller ever overrides the
+// screening limits this stops being the same view and the claim above weakens to
+// "the same extractor, possibly different bounds".
+//
+// The no-text case is always stated, never silent. Falling back to raw source would
+// reinstate the defect, and rendering nothing would read as "the message is empty" —
+// the exact misrepresentation this surface exists to prevent.
 func fencedBody(raw []byte, budget int) string {
-	if budget <= 0 {
+	if budget <= 0 || len(raw) == 0 {
 		return ""
 	}
-	text := string(raw)
+	c, err := mailtext.Extract(raw, mailtext.DefaultLimits())
+	text := strings.TrimRight(c.Body, " \t\r\n")
+
+	// Undecodable means text the message carries never reached the assessor, so the
+	// verdict cannot vouch for it. That bears directly on the decision being made and
+	// is surfaced even when readable text was recovered alongside it.
+	var note string
+	if err != nil || c.Undecodable {
+		note = "\n\n(!) part of this message could not be decoded, so it was never scored — the assessment above cannot account for it; treat it as incomplete."
+	}
+
+	// This return bypasses the budget, which is safe on stated grounds rather than by
+	// accident: the string is fixed apart from a byte count, so it is bounded at a few
+	// hundred units, and the header it joins is already clamped per field. It is the
+	// same shape as the marker overflow above, so the grounds are written down rather
+	// than left for a later reader to re-derive — if this text ever grows, or the
+	// header stops being clamped, it has to come out of the budget like everything else.
+	if text == "" {
+		reason := "it has no readable text part"
+		if err != nil || c.Undecodable {
+			reason = "its content could not be decoded"
+		}
+		return fmt.Sprintf("(!) no message text is shown because %s — this is NOT an empty message. "+
+			"The raw source is %d bytes; dump it with `darbaan holds show <id>` (add --text for the decoded body). "+
+			"Do not read the absence of text here as the message having no content.", reason, len(raw))
+	}
+
+	// Every string appended after this point has to come out of the budget, not out of
+	// the framing allowance. fenceOverhead covers the fence's own markers and the
+	// joining newlines with only a few units to spare, so an appended marker that is
+	// not subtracted here pushes the whole card past the Telegram ceiling. That is not
+	// a cosmetic overflow: the send is rejected, the hold is never marked posted, and
+	// every later poll rebuilds the identical oversized card — so the message stays
+	// held but the operator is never told it exists, on the surface whose entire
+	// purpose is telling them. Reserve the width up front instead of widening the
+	// allowance, which would only leave the next marker to rediscover this.
+	const extractionCapped = "\n[extraction limit reached — the message carries more text than was scored]"
+	budget -= utf16Len(note)
+	if c.Truncated {
+		budget -= utf16Len(extractionCapped)
+	}
+	if budget <= 0 {
+		return strings.TrimPrefix(note, "\n\n")
+	}
 	if utf16Len(text) > budget {
 		text = truncateUTF16(text, budget) + "\n[truncated]"
 	}
-	return assessor.Fence("email body", text)
+	if c.Truncated {
+		// Not budget truncation — extraction itself hit its caps (size, part count or
+		// depth), so the message carries more text than was ever extracted, and more than
+		// was ever scored. Distinct from "[truncated]", which means it did not fit here.
+		text += extractionCapped
+	}
+	return assessor.Fence("email body", text) + note
 }
 
 func holdKeyboard(id string) models.InlineKeyboardMarkup {
