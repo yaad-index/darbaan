@@ -453,14 +453,18 @@ func (s *Syncer) FetchContent(owner, inbox, id string) (inbound.Message, error) 
 			s.logger.Error("could not drop stale mapping", "id", id, "upstream_uid", m.UpstreamUID, "err", derr)
 		} else if s.audit != nil {
 			// Best-effort audit, consistent with the reconcile retraction record; a
-			// failed append must not fail the already-committed drop (ADR 0011).
-			_ = s.audit.Append(audit.Record{
+			// failed append must not fail the already-committed drop (ADR 0011). Log
+			// the failure rather than discarding it — a silently broken audit sink
+			// would otherwise leave a retraction with no trail and no signal.
+			if aerr := s.audit.Append(audit.Record{
 				Event:     "retract",
 				Agent:     owner,
 				Inbox:     inbound.NormInbox(inbox),
 				MessageID: id,
 				Detail:    fmt.Sprintf("inbox=%s upstream_uid=%d content fetch found upstream uid gone", inbound.NormInbox(inbox), m.UpstreamUID),
-			})
+			}); aerr != nil {
+				s.logger.Warn("could not audit stale-mapping retraction", "id", id, "upstream_uid", m.UpstreamUID, "err", aerr)
+			}
 		}
 		return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: upstream uid %d not found: %w", id, m.UpstreamUID, inbound.ErrContentUnavailable)
 	}

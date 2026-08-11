@@ -541,17 +541,28 @@ func parseMaxAge(s string) (time.Duration, error) {
 		'w': 7 * 24 * time.Hour,
 		'y': 365 * 24 * time.Hour,
 	}
+	var d time.Duration
 	if mult, ok := units[s[len(s)-1]]; ok {
 		val, err := strconv.ParseFloat(s[:len(s)-1], 64)
 		if err != nil {
 			return 0, fmt.Errorf("invalid duration %q: %w", s, err)
 		}
-		if val < 0 {
-			return 0, fmt.Errorf("invalid duration %q: must not be negative", s)
+		d = time.Duration(val * float64(mult))
+	} else {
+		parsed, err := time.ParseDuration(s)
+		if err != nil {
+			return 0, err
 		}
-		return time.Duration(val * float64(mult)), nil
+		d = parsed
 	}
-	return time.ParseDuration(s)
+	// One negativity gate over BOTH parse paths. A negative cutoff is meaningless (it
+	// selects mail "newer than a moment in the future"). The gate spans both paths
+	// deliberately: time.ParseDuration accepts "-24h" without error, so guarding only
+	// the suffix path would leave the standard-unit path open.
+	if d < 0 {
+		return 0, fmt.Errorf("invalid duration %q: must not be negative", s)
+	}
+	return d, nil
 }
 
 // buildAssessHook constructs the injection-assessment pipeline (scorer, heuristic
@@ -672,12 +683,46 @@ func imapKeywordWriter(syncers map[string]*imapsync.Syncer) listener.KeywordWrit
 	}
 }
 
+// defaultInboundPollInterval mirrors the inbound-imap-poll-interval flag default;
+// resolvePollInterval falls back to it when a non-positive interval is configured.
+const defaultInboundPollInterval = 60 * time.Second
+
+// resolvePollInterval clamps a non-positive configured poll interval to the default
+// so time.NewTicker — which panics on a duration <= 0 — cannot crash serve on a
+// mis-set flag. ok is false when a clamp was applied, so the caller can warn. This
+// mirrors the telegram poll loop's floor (telegram.New).
+func resolvePollInterval(d time.Duration) (interval time.Duration, ok bool) {
+	if d <= 0 {
+		return defaultInboundPollInterval, false
+	}
+	return d, true
+}
+
+// adminAddrIsExposed reports whether addr binds the admin API to a routable
+// address — not loopback, and not the unspecified address (0.0.0.0/::), which is
+// the documented container pattern where the host narrows exposure. Used only to
+// warn at startup; a parse failure or a hostname (no literal IP) returns false, so
+// it never raises a false alarm.
+func adminAddrIsExposed(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && !ip.IsLoopback() && !ip.IsUnspecified()
+}
+
 // runSyncLoop polls one inbox's upstream on the configured interval until ctx is
 // cancelled. Sync errors are logged, never fatal — a flaky or unreachable
 // upstream must not take down serve.
 func (cli *CLI) runSyncLoop(ctx context.Context, inbox string, syncer *imapsync.Syncer, health *syncHealth) {
-	slog.Info("inbound sync loop started", "inbox", inbox, "interval", cli.InboundIMAPPollInterval.String())
-	t := time.NewTicker(cli.InboundIMAPPollInterval)
+	interval, ok := resolvePollInterval(cli.InboundIMAPPollInterval)
+	if !ok {
+		slog.Warn("inbound-imap-poll-interval must be positive; using default",
+			"configured", cli.InboundIMAPPollInterval.String(), "using", interval.String())
+	}
+	slog.Info("inbound sync loop started", "inbox", inbox, "interval", interval.String())
+	t := time.NewTicker(interval)
 	defer t.Stop()
 	runSync(ctx, inbox, syncer, health) // initial pull at startup
 	for {
@@ -1164,6 +1209,10 @@ func (*ServeCmd) Run(cli *CLI) error {
 	// Inbound hold verdicts (expose/drop) audit to the same shared log the message
 	// store writes outbound verdicts to (ADR 0011, C29).
 	svc.SetAuditLog(al)
+	if adminAddrIsExposed(cli.AdminAddr) {
+		slog.Warn("admin-addr is bound to a non-loopback address; the admin API is token-gated but is intended to be reachable only from loopback or the container-internal network (ADR 0029)",
+			"admin_addr", cli.AdminAddr)
+	}
 	adminSrv, err := admin.NewServer(cli.AdminAddr, os.Getenv("DARBAAN_ADMIN_TOKEN"), svc)
 	if err != nil {
 		return err
