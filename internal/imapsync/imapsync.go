@@ -125,10 +125,19 @@ func Dialer(addr, username, password string) DialFunc {
 // re-syncs from scratch. The upstream is read-only (no flag/delete write-back,
 // v1). Returns the count stored this run.
 func (s *Syncer) Sync(ctx context.Context) (int, error) {
-	c, err := s.dial()
+	c, err := s.dialContext(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("imapsync: connect: %w", err)
+		return 0, err
 	}
+	// go-imap bounds only the CONNECT phase (its dialer's fixed timeout), not the
+	// post-connect commands: a server that accepts the socket and then never answers
+	// a SELECT/FETCH would block .Wait() indefinitely. Bind the command phase to ctx
+	// by closing the client on cancellation — closing the connection makes any
+	// in-flight .Wait() return, a genuine unblock of the blocked call rather than a
+	// pre-entry ctx check the hung call never reaches. stop() cancels the hook if
+	// Sync returns first (the common, uncancelled path).
+	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+	defer stop()
 	defer func() { _ = c.Logout().Wait(); _ = c.Close() }()
 
 	sel, err := c.Select(s.mailbox, nil).Wait()
@@ -167,6 +176,43 @@ func (s *Syncer) Sync(ctx context.Context) (int, error) {
 	// watermark (the cursor), and the current UIDVALIDITY.
 	s.logger.Info("inbound sync cycle", "stored", stored, "watermark_uid", highest, "uidvalidity", sel.UIDValidity)
 	return stored, nil
+}
+
+// dialContext runs the injected dial and honors ctx during the CONNECT phase. The
+// DialFunc is a blocking network round-trip with no ctx of its own (go-imap bounds
+// it only by the dialer's fixed timeout), so a cancellation mid-connect would
+// otherwise wait out that whole timeout. dialContext returns promptly on
+// cancellation instead; if the dial then completes anyway, its client is closed so
+// the connection does not leak. It preserves the "imapsync: connect" error wrap of
+// the original inline dial.
+func (s *Syncer) dialContext(ctx context.Context) (*imapclient.Client, error) {
+	type result struct {
+		c   *imapclient.Client
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		c, err := s.dial()
+		ch <- result{c: c, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		// Drain the in-flight dial so its client (if it lands after cancellation) is
+		// closed rather than leaked. This drain goroutine outlives the call until the
+		// dial returns; it is bounded by the DialFunc's own connect timeout (go-imap's
+		// dialer defaults to ~30s), the weakest of the bounds here but a real one.
+		go func() {
+			if r := <-ch; r.c != nil {
+				_ = r.c.Close()
+			}
+		}()
+		return nil, fmt.Errorf("imapsync: connect: %w", ctx.Err())
+	case r := <-ch:
+		if r.err != nil {
+			return nil, fmt.Errorf("imapsync: connect: %w", r.err)
+		}
+		return r.c, nil
+	}
 }
 
 // pull fetches new messages and stores them, returning the count stored and the
