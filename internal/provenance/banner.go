@@ -203,24 +203,62 @@ var (
 	bannerEndMarker   = regexp.MustCompile(`(?i)` + cfTolerant(bannerEnd))
 )
 
-// The defanged forms neutralizeBanners writes over a forged marker: bannerBegin /
-// bannerEnd with " (UNTRUSTED)" before the closing dashes. They no longer match the
-// markers above (the closing dashes no longer follow "BANNER"), so a second pass
-// rewrites nothing — neutralization is idempotent.
+// The defanged forms neutralizeBanners writes over a forged marker. Three properties,
+// each load-bearing:
+//  1. bracket-delimited, carrying no five-hyphen run — a banner marker is framed by
+//     two five-hyphen runs, and a form that begins and ends with a bracket and holds
+//     only a lone space-surrounded hyphen can neither supply a marker's delimiter nor
+//     complete one across a boundary, so no rewrite can combine with surrounding text
+//     to re-form a live marker (#274: the previous "-----...(UNTRUSTED)-----" form
+//     ENDED with the delimiter it removed, so two same-kind markers sharing a dash run
+//     manufactured a live one that a single pass never re-scanned).
+//  2. ASCII-only — this insertion path re-encodes 7bit/8bit/us-ascii bodies as
+//     identity, so a non-ASCII byte would land in a body that declares it has none.
+//  3. not banner-SHAPED — it reads as an annotation ABOUT content, not as content,
+//     since the threat model is a reader trusting banner-shaped text.
+//
+// Neither form matches the markers, so neutralization stays idempotent.
 const (
-	bannerBeginDefanged = "-----BEGIN DARBAAN TRUST BANNER (UNTRUSTED)-----"
-	bannerEndDefanged   = "-----END DARBAAN TRUST BANNER (UNTRUSTED)-----"
+	bannerBeginDefanged = "[DARBAAN TRUST BANNER BEGIN - FORGED, NEUTRALIZED]"
+	bannerEndDefanged   = "[DARBAAN TRUST BANNER END - FORGED, NEUTRALIZED]"
 )
 
 // neutralizeBanners defangs every darbaan banner marker left in body — a forgery an
 // attacker planted, the genuine leading banner having already been removed by
 // stripBanner. It REWRITES each marker in place, never deletes: no bytes outside the
-// matched marker span are removed, so a quoted banner in a forwarded message keeps its
-// surrounding content, no deletion can splice two fragments into a fresh marker, and
-// format runes elsewhere in the body (emoji ZWJ, RTL bidi controls) are preserved.
-// Matching is case-insensitive and tolerant of Cf runes interleaved into a marker.
+// matched span are removed, so a forwarded message's quoted banner keeps its
+// surrounding content and format runes elsewhere (emoji ZWJ, RTL bidi controls) are
+// preserved. Matching is case-insensitive and tolerant of Cf runes interleaved into a
+// marker.
+//
+// It rewrites to a FIXPOINT: a round that changes nothing means neither pattern
+// matched, which is exactly the post-condition (no live marker survives). The
+// bracket-delimited replacement (see the consts), carrying no five-hyphen run, cannot itself form a
+// marker, so this converges in a single productive round — the loop is defense in
+// depth against a future replacement that could re-form one (#274: the old
+// "-----...(UNTRUSTED)-----" form ended with the delimiter it removed, so two same-kind
+// markers sharing a dash run manufactured a live one that a single pass never
+// re-scanned; cross-kind did not — and the loop, not the bound, absorbs this: it
+// converges in a few rounds). The bound guards a DISTINCT class — a replacement that
+// regenerates a marker every round (one that itself contains or forms a marker, so each
+// round re-matches what the last wrote and the count never falls). Any convergent
+// replacement, #274's manufacture-then-absorb included, drives the count to zero in a
+// few rounds and never nears the bound; so reaching it proves the replacement is
+// non-convergent. It fails LOUD rather than return a body that may still carry a live
+// marker, since a silent cap is the guard-that-doesn't-act failure.
 func neutralizeBanners(body []byte) []byte {
-	body = bannerBeginMarker.ReplaceAllLiteral(body, []byte(bannerBeginDefanged))
-	body = bannerEndMarker.ReplaceAllLiteral(body, []byte(bannerEndDefanged))
-	return body
+	maxRounds := 8 // convergence is one productive round (above), so this is several times any reasoned worst case; a body-sized bound would turn the panic into an effective hang on a large message before it ever fired
+	for round := 0; ; round++ {
+		next := bannerEndMarker.ReplaceAllLiteral(
+			bannerBeginMarker.ReplaceAllLiteral(body, []byte(bannerBeginDefanged)),
+			[]byte(bannerEndDefanged),
+		)
+		if bytes.Equal(next, body) {
+			return next // fixpoint reached: neither pattern matched this round
+		}
+		body = next
+		if round >= maxRounds {
+			panic("provenance: banner neutralization did not converge: the defanged replacement re-matches a marker every round — it must neither contain nor form one")
+		}
+	}
 }
