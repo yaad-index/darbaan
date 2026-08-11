@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/yaad-index/darbaan/internal/inbound"
+	"github.com/yaad-index/darbaan/internal/mailtext"
 )
 
 func TestFormatHold(t *testing.T) {
@@ -192,4 +193,52 @@ func TestFormatHoldFlagsUndecodableContent(t *testing.T) {
 	if strings.Contains(s, "visible text") {
 		assert.Contains(t, s, "never scored", "partial decoding is disclosed alongside whatever text was recovered")
 	}
+}
+
+// The extraction-limit marker must fit inside the reserved framing allowance like
+// every other appended string. It is added on the branch where the text already
+// FITS the budget, so nothing else bounds it.
+//
+// The failure it guards is not cosmetic. An oversized card is rejected by the send,
+// notifyHold returns an error, the hold is never marked posted, and the next poll
+// rebuilds the identical oversized card — so the message stays held (safe) but the
+// operator is never told it exists, on the surface whose entire purpose is telling
+// them. Deterministic per message, not a transient.
+//
+// Reachable with an ordinary body: Truncated is set when ANY extraction cap is hit,
+// including part-count and depth, so a many-part message sets it while rendering a
+// body of any size. Only the body's proximity to the budget matters.
+func TestFormatHoldExtractionMarkerStaysWithinLimit(t *testing.T) {
+	// Swept rather than spot-checked: the vulnerable window is where the extracted
+	// text lands just UNDER its budget, so a single size can miss it entirely.
+	for n := 3000; n <= 3600; n += 5 {
+		raw := manyPartMessage(n)
+		s := formatHoldForTest(t, raw)
+		assert.LessOrEqualf(t, utf16Len(s), telegramTextLimit,
+			"textLen=%d: card is %d units over the limit — an oversized card is rejected by the send, "+
+				"so the hold silently never reaches the operator", n, utf16Len(s)-telegramTextLimit)
+	}
+}
+
+// formatHoldForTest renders a hold card for a raw message.
+func formatHoldForTest(t *testing.T, raw []byte) string {
+	t.Helper()
+	return formatHold(inbound.Message{ID: "trunc", From: "a@x.test"}, raw, false)
+}
+
+// manyPartMessage builds a message that trips the extraction PART-COUNT cap while
+// its rendered text stays the given size. Size and cap-hit are independent here,
+// which is the reachability that matters: the marker branch needs a body that fits
+// the budget, and a cap hit is available at any body size.
+func manyPartMessage(textLen int) []byte {
+	var b strings.Builder
+	b.WriteString("Content-Type: multipart/mixed; boundary=bb\r\n\r\n")
+	b.WriteString("--bb\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n")
+	b.WriteString(strings.Repeat("y", textLen))
+	b.WriteString("\r\n")
+	for i := 0; i < mailtext.DefaultLimits().MaxParts+5; i++ {
+		b.WriteString("--bb\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n.\r\n")
+	}
+	b.WriteString("--bb--\r\n")
+	return []byte(b.String())
 }

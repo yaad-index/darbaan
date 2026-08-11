@@ -155,10 +155,17 @@ func holdAssessmentLine(a *inbound.Assessment) string {
 // content they had never actually seen. On an injection-assessed hold the body IS
 // the decision, so an unreadable card is not a cosmetic problem.
 //
-// Why THIS extractor. mailtext is the same one the assessor consumes, so the
-// operator reads the text the detector actually scored — rather than a separately
-// derived rendering that could quietly disagree with the verdict being judged. It
-// also flattens text/html, so an HTML-only message stays readable here.
+// Why THIS extractor. mailtext is what the assessor consumes, so the operator reads
+// the text the detector actually scored rather than a separately derived rendering
+// that could quietly disagree with the verdict being judged. It also flattens
+// text/html, so an HTML-only message stays readable here.
+//
+// That correspondence currently holds because both call sites use the package
+// defaults, NOT because anything ties them together: the screening path takes its
+// limits through an option that merely defaults to them. Today the option is
+// test-only, so there is no live divergence, but if a caller ever overrides the
+// screening limits this stops being the same view and the claim above weakens to
+// "the same extractor, possibly different bounds".
 //
 // The no-text case is always stated, never silent. Falling back to raw source would
 // reinstate the defect, and rendering nothing would read as "the message is empty" —
@@ -178,6 +185,12 @@ func fencedBody(raw []byte, budget int) string {
 		note = "\n\n(!) part of this message could not be decoded, so it was never scored — the assessment above cannot account for it; treat it as incomplete."
 	}
 
+	// This return bypasses the budget, which is safe on stated grounds rather than by
+	// accident: the string is fixed apart from a byte count, so it is bounded at a few
+	// hundred units, and the header it joins is already clamped per field. It is the
+	// same shape as the marker overflow above, so the grounds are written down rather
+	// than left for a later reader to re-derive — if this text ever grows, or the
+	// header stops being clamped, it has to come out of the budget like everything else.
 	if text == "" {
 		reason := "it has no readable text part"
 		if err != nil || c.Undecodable {
@@ -188,16 +201,31 @@ func fencedBody(raw []byte, budget int) string {
 			"Do not read the absence of text here as the message having no content.", reason, len(raw))
 	}
 
+	// Every string appended after this point has to come out of the budget, not out of
+	// the framing allowance. fenceOverhead covers the fence's own markers and the
+	// joining newlines with only a few units to spare, so an appended marker that is
+	// not subtracted here pushes the whole card past the Telegram ceiling. That is not
+	// a cosmetic overflow: the send is rejected, the hold is never marked posted, and
+	// every later poll rebuilds the identical oversized card — so the message stays
+	// held but the operator is never told it exists, on the surface whose entire
+	// purpose is telling them. Reserve the width up front instead of widening the
+	// allowance, which would only leave the next marker to rediscover this.
+	const extractionCapped = "\n[extraction limit reached — the message carries more text than was scored]"
 	budget -= utf16Len(note)
+	if c.Truncated {
+		budget -= utf16Len(extractionCapped)
+	}
 	if budget <= 0 {
 		return strings.TrimPrefix(note, "\n\n")
 	}
 	if utf16Len(text) > budget {
 		text = truncateUTF16(text, budget) + "\n[truncated]"
-	} else if c.Truncated {
-		// Not budget truncation — extraction itself hit its caps, so the message carries
-		// more text than was ever extracted. Say which kind of "there is more" this is.
-		text += "\n[extraction limit reached — the message carries more text than was scored]"
+	}
+	if c.Truncated {
+		// Not budget truncation — extraction itself hit its caps (size, part count or
+		// depth), so the message carries more text than was ever extracted, and more than
+		// was ever scored. Distinct from "[truncated]", which means it did not fit here.
+		text += extractionCapped
 	}
 	return assessor.Fence("email body", text) + note
 }
