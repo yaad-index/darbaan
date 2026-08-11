@@ -31,23 +31,37 @@ func TestResolvePollInterval(t *testing.T) {
 	}
 }
 
-// adminAddrIsExposed warns only for a routable literal IP — not loopback, and not
-// the unspecified address (0.0.0.0/::, the documented container pattern where the
-// host narrows exposure). A hostname or unparseable addr never raises a false alarm.
+// adminAddrIsExposed warns on any literal IP that is not loopback — routable, the
+// every-interface binds (unspecified 0.0.0.0/:: and the empty host of a bare
+// ":port"), and a zone-carrying literal (link-local OR global). A literal loopback
+// IP (incl. zoned and 4-in-6 forms), a hostname (not resolved here), and a
+// malformed/unparseable addr stay silent. Routable examples use documentation ranges
+// (RFC 5737 / 3849), not real infrastructure addresses.
 func TestAdminAddrIsExposed(t *testing.T) {
-	exposed := []string{"192.168.1.5:1144", "10.0.0.2:1144", "[2001:db8::1]:1144"}
+	exposed := []string{
+		"192.0.2.10:1144",         // TEST-NET-1 routable v4
+		"198.51.100.5:1144",       // TEST-NET-2 routable v4
+		"[2001:db8::1]:1144",      // documentation range v6
+		"0.0.0.0:1144",            // unspecified v4 — every interface
+		"[::]:1144",               // unspecified v6 — every interface
+		":1144",                   // bare port, empty host — every interface
+		"[fe80::1%eth0]:1144",     // zoned link-local literal — binds an interface
+		"[2001:db8::1%eth0]:1144", // zoned GLOBAL literal — reachable, still a literal bind
+	}
 	for _, a := range exposed {
-		assert.Truef(t, adminAddrIsExposed(a), "%s is routable and should warn", a)
+		assert.Truef(t, adminAddrIsExposed(a), "%q binds beyond loopback and should warn", a)
 	}
 	safe := []string{
-		"127.0.0.1:1144",      // loopback v4
-		"[::1]:1144",          // loopback v6
-		"0.0.0.0:1144",        // unspecified — container pattern, host narrows exposure
-		"[::]:1144",           // unspecified v6
-		"localhost:1144",      // hostname, not a literal IP
-		"admin.internal:1144", // hostname
-		"garbage",             // no host:port
-		"",
+		"127.0.0.1:1144",          // loopback v4
+		"127.0.0.5:1144",          // 127.0.0.0/8 is all loopback, not just .1
+		"[::1]:1144",              // loopback v6
+		"[::1%lo0]:1144",          // zoned loopback — the zone is stripped/parsed, loopback preserved
+		"[::ffff:127.0.0.1]:1144", // 4-in-6 loopback — IsLoopback handles it with no Unmap
+		"localhost:1144",          // hostname, not a literal IP — most common safe config
+		"admin.internal:1144",     // hostname
+		"[%eth0]:1144",            // malformed zone (no address) — unparseable, must NOT read as every-interface
+		"garbage",                 // no host:port
+		"",                        // unparseable
 	}
 	for _, a := range safe {
 		assert.Falsef(t, adminAddrIsExposed(a), "%q must not warn", a)

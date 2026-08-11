@@ -20,11 +20,17 @@ import (
 // single path segment rather than altering the route or spilling into a query or
 // fragment. This exercises the whole family of endpoints (both prefixes, both the
 // id and inbox parameters) — not one — because the escape must be applied to every
-// sibling, not most of them: an id like "msg 42?a=b&c=d#frag" round-trips to the
+// sibling, not most of them: an id like "msg/42?a=b&c=d#frag" round-trips to the
 // server's decoded PathValue only if it was escaped on the way out.
+//
+// The sample includes "/" deliberately: it is the one character whose mishandling
+// changes routing rather than a parameter value (an unescaped slash splits into an
+// extra path segment and lands on a different route or none). Escaped to %2F it
+// stays within one wildcard segment and the mux decodes it back, so the round-trip
+// demonstrates the strongest case rather than asserting it.
 func TestClientEscapesPathSegments(t *testing.T) {
-	const weirdID = "msg 42?a=b&c=d#frag"
-	const weirdInbox = "team inbox+x?y"
+	const weirdID = "msg/42?a=b&c=d#frag"
+	const weirdInbox = "team/inbox+x?y"
 
 	var gotID, gotInbox string
 	mux := http.NewServeMux()

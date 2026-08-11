@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -698,18 +699,43 @@ func resolvePollInterval(d time.Duration) (interval time.Duration, ok bool) {
 	return d, true
 }
 
-// adminAddrIsExposed reports whether addr binds the admin API to a routable
-// address — not loopback, and not the unspecified address (0.0.0.0/::), which is
-// the documented container pattern where the host narrows exposure. Used only to
-// warn at startup; a parse failure or a hostname (no literal IP) returns false, so
-// it never raises a false alarm.
+// adminAddrIsExposed reports whether addr binds the admin API beyond loopback, for
+// a startup advisory. Outcomes, kept distinct so the signal tracks the thing it
+// claims to:
+//   - a literal loopback IP (127.0.0.0/8, ::1, and their zoned / 4-in-6 forms) → not
+//     exposed (the safe default).
+//   - any other literal IP, including the unspecified address (0.0.0.0/::) and a
+//     zone-carrying literal (link-local OR global, e.g. fe80::1%eth0) → exposed
+//     (each binds an interface, or every one).
+//   - the empty host of a bare ":port" → exposed (binds every interface).
+//   - a hostname (e.g. localhost) or a malformed/unparseable addr → not exposed:
+//     names are not resolved here (a startup log line must not become a DNS
+//     dependency), and localhost is the most common safe config, so warning on it
+//     would train the operator to ignore the line.
+//
+// The empty host of a bare ":port" is caught ahead of the parse: it binds every
+// interface and must warn, but a parser reads "" as a non-address, the same as a
+// hostname. netip.ParseAddr (not net.ParseIP) does the literal parse because it
+// represents a zone-carrying literal natively — so a zoned bind is judged on its
+// address rather than routed into the hostname branch (net.ParseIP rejects zones).
+// Parsing the literal whole, with no zone string-stripping, also means there is no
+// way to manufacture an empty host from malformed input like "%eth0" and misread it
+// as the every-interface bind — that stays unparseable and silent. A zone selects an
+// interface; it does not change whether the address is loopback, and IsLoopback
+// already handles the 4-in-6 loopback (::ffff:127.0.0.1) with no Unmap.
 func adminAddrIsExposed(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return false
+		return false // unparseable — never a false alarm
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && !ip.IsLoopback() && !ip.IsUnspecified()
+	if host == "" {
+		return true // bare ":port" binds every interface
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false // a hostname or malformed literal — not resolved here; never a false alarm
+	}
+	return !ip.IsLoopback() // literal IP (incl. zoned / 4-in-6): routable, unspecified, and zoned all warn; loopback does not
 }
 
 // runSyncLoop polls one inbox's upstream on the configured interval until ctx is
@@ -1210,7 +1236,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 	// store writes outbound verdicts to (ADR 0011, C29).
 	svc.SetAuditLog(al)
 	if adminAddrIsExposed(cli.AdminAddr) {
-		slog.Warn("admin-addr is bound to a non-loopback address; the admin API is token-gated but is intended to be reachable only from loopback or the container-internal network (ADR 0029)",
+		slog.Warn("admin-addr binds the admin API beyond loopback (a routable address, or every interface via 0.0.0.0/:: or a bare :port). It is token-gated but is intended to be reachable only from loopback or a container-internal network (ADR 0029). If this is a container that publishes the port as 127.0.0.1:PORT on the host, this is expected — confirm the host narrows it; otherwise bind a loopback address.",
 			"admin_addr", cli.AdminAddr)
 	}
 	adminSrv, err := admin.NewServer(cli.AdminAddr, os.Getenv("DARBAAN_ADMIN_TOKEN"), svc)
