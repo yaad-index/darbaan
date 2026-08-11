@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.1](https://github.com/yaad-index/darbaan/compare/v0.17.0...v0.17.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* compare agent credentials in constant time over fixed-width hashes ([#238](https://github.com/yaad-index/darbaan/issues/238) C31) ([#264](https://github.com/yaad-index/darbaan/issues/264)) ([42877e2](https://github.com/yaad-index/darbaan/commit/42877e2ecc057e9e1926e17e1016958681412c33))
+* render the decoded body in the hold surfaces, not the raw message source ([#265](https://github.com/yaad-index/darbaan/issues/265)) ([5c1bac7](https://github.com/yaad-index/darbaan/commit/5c1bac722c5ed3e24a53bf9984102beea9218488))
+
 ## [0.17.0](https://github.com/yaad-index/darbaan/compare/v0.16.1...v0.17.0) (2026-08-11)
 
 ### Upgrade notes
