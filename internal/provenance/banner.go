@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime"
 	"mime/quotedprintable"
+	"regexp"
 	"strings"
 
 	"github.com/emersion/go-message/textproto"
@@ -122,7 +123,12 @@ func stripASCIISpace(b []byte) string {
 // a fresh one — so re-running on an already-bannered body replaces rather than
 // stacks (idempotent).
 func applyBanner(body []byte, s Stamp) []byte {
+	// Order matters: strip our own leading banner first (an exact-case match that keeps
+	// applying idempotent), THEN neutralize any forged marker left in the body. Running
+	// the neutralizer first would defang our genuine leading banner too, and the
+	// exact-case strip would then find nothing to remove.
 	body = stripBanner(body)
+	body = neutralizeBanners(body)
 	block := bannerBlock(s)
 	out := make([]byte, 0, len(block)+len(body))
 	out = append(out, block...)
@@ -149,9 +155,15 @@ func bannerBlock(s Stamp) []byte {
 
 // stripBanner removes a darbaan banner block from the very top of body, consuming
 // exactly the block and the single blank-line separator bannerBlock writes — so
-// stripping is the exact inverse of applying and a re-run is a byte-level no-op.
-// A body that doesn't begin with the banner, or whose marker is unterminated, is
-// returned unchanged (never cut real content).
+// stripping our own banner is the exact inverse of applying it and a re-run is a
+// byte-level no-op. Only the LEADING block is removed, by an exact-case prefix match.
+// A forged banner deeper in the body is deliberately NOT deleted here: deleting an
+// interior block would splice its neighbours into a fresh marker (worse than doing
+// nothing — the attacker needs a banner accepted at offset 0 and the delete would
+// build it), and would excise a legitimately quoted banner such as a forwarded
+// darbaan message. Interior forgeries are defanged by neutralizeBanners instead. A
+// body that doesn't begin with the banner, or whose marker is unterminated, is
+// returned unchanged.
 func stripBanner(body []byte) []byte {
 	if !bytes.HasPrefix(body, []byte(bannerBegin)) {
 		return body
@@ -162,4 +174,53 @@ func stripBanner(body []byte) []byte {
 	}
 	rest := body[i+len(bannerEnd):]
 	return bytes.TrimPrefix(rest, []byte("\r\n\r\n"))
+}
+
+// cfTolerant returns a regexp source matching lit with any run of Unicode format (Cf)
+// runes permitted between each of its characters — so a marker an attacker splits with
+// invisible runes (a zero-width space inside "BANNER") still matches in the RAW body.
+// Each literal character is regexp-quoted.
+func cfTolerant(lit string) string {
+	var b strings.Builder
+	for i, r := range lit {
+		if i > 0 {
+			b.WriteString(`\p{Cf}*`)
+		}
+		b.WriteString(regexp.QuoteMeta(string(r)))
+	}
+	return b.String()
+}
+
+// bannerBeginMarker / bannerEndMarker match a darbaan banner begin/end marker in any
+// case, tolerant of Cf runes interleaved between characters. The tolerance is in the
+// MATCHING, not the body: unlike assessor.Fence — which strips Cf from a match-only
+// copy it then discards — this text IS the delivered message, so nothing may be
+// deleted from it. neutralizeBanners rewrites only the matched marker span (any Cf
+// runes inside the marker go with it); Cf runes elsewhere in the body (a joined-emoji
+// ZWJ, the bidi controls that order RTL text) are left untouched.
+var (
+	bannerBeginMarker = regexp.MustCompile(`(?i)` + cfTolerant(bannerBegin))
+	bannerEndMarker   = regexp.MustCompile(`(?i)` + cfTolerant(bannerEnd))
+)
+
+// The defanged forms neutralizeBanners writes over a forged marker: bannerBegin /
+// bannerEnd with " (UNTRUSTED)" before the closing dashes. They no longer match the
+// markers above (the closing dashes no longer follow "BANNER"), so a second pass
+// rewrites nothing — neutralization is idempotent.
+const (
+	bannerBeginDefanged = "-----BEGIN DARBAAN TRUST BANNER (UNTRUSTED)-----"
+	bannerEndDefanged   = "-----END DARBAAN TRUST BANNER (UNTRUSTED)-----"
+)
+
+// neutralizeBanners defangs every darbaan banner marker left in body — a forgery an
+// attacker planted, the genuine leading banner having already been removed by
+// stripBanner. It REWRITES each marker in place, never deletes: no bytes outside the
+// matched marker span are removed, so a quoted banner in a forwarded message keeps its
+// surrounding content, no deletion can splice two fragments into a fresh marker, and
+// format runes elsewhere in the body (emoji ZWJ, RTL bidi controls) are preserved.
+// Matching is case-insensitive and tolerant of Cf runes interleaved into a marker.
+func neutralizeBanners(body []byte) []byte {
+	body = bannerBeginMarker.ReplaceAllLiteral(body, []byte(bannerBeginDefanged))
+	body = bannerEndMarker.ReplaceAllLiteral(body, []byte(bannerEndDefanged))
+	return body
 }
