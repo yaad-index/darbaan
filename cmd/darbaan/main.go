@@ -1588,8 +1588,45 @@ func printOutcome(out admin.Outcome) error {
 // mirror of `queue`.
 type HoldsCmd struct {
 	Ls     HoldsLsCmd     `cmd:"" help:"List inbound messages held for a decision."`
+	Show   HoldsShowCmd   `cmd:"" help:"Dump a held inbound message's stored raw body."`
 	Expose HoldsExposeCmd `cmd:"" help:"Expose a held message to the agent (approve)."`
 	Drop   HoldsDropCmd   `cmd:"" help:"Keep a held message hidden from the agent (reject)."`
+}
+
+// HoldsShowCmd dumps a held inbound message's stored raw body — the inbound mirror
+// of `queue show`, and the retry the Telegram hold alert points an operator at when
+// the body could not be fetched (C46). Its outcomes stay distinct so the operator's
+// decision is honest: an empty body prints nothing (a transient glitch, or there is
+// genuinely no stored body); a server error means the body could not be read — decide
+// from metadata knowing you have not seen it; a connection error carries the "is
+// `darbaan serve` running?" hint (the tool, not the message — reconnect and look
+// again). A failed read never implies the body is absent.
+type HoldsShowCmd struct {
+	ID string `arg:"" help:"Message id."`
+}
+
+func (c *HoldsShowCmd) Run(cli *CLI) error {
+	client, err := cli.adminClient()
+	if err != nil {
+		return err
+	}
+	raw, err := client.HeldContent(context.Background(), c.ID)
+	if err != nil {
+		return err
+	}
+	if len(raw) == 0 {
+		// HeldContent serves an empty 200 (not an error) for two distinct states the
+		// transport conflates: the id is no longer held (decided, gone, or unknown), or
+		// it is held with no stored body. Writing zero bytes and exiting 0 would read as
+		// "the message is empty" — the exact misrepresentation this surface exists to
+		// prevent, on the class of message where the body is the decision. Fail loudly,
+		// naming both states, so the absence is never taken as the message's content.
+		// (queue show needs no such guard: its store Get errors on an unknown id; only
+		// this inbound path is silent.)
+		return fmt.Errorf("no body returned for %s: it is either no longer held (decided, gone, or an unknown id) or held with no stored body — nothing is shown; do not treat this as an empty message", c.ID)
+	}
+	_, err = os.Stdout.Write(raw)
+	return err
 }
 
 type HoldsLsCmd struct{}

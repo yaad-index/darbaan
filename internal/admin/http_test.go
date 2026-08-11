@@ -158,3 +158,25 @@ func TestHoldsRoundtrip(t *testing.T) {
 	_, err = c.Expose(ctx, "999") // unknown id -> error
 	assert.Error(t, err)
 }
+
+// TestHeldContentErrorsDistinguishUnreachableFromUnreadable pins the premise the
+// Telegram fetch-failure guidance (C14/C46) rests on: the operator is told to tell
+// "could not reach darbaan" (the tool — reconnect and look again) apart from "could
+// not read the message" (the body is unavailable — decide from metadata). That only
+// works if the two failure classes are distinguishable in the client's errors.
+func TestHeldContentErrorsDistinguishUnreachableFromUnreadable(t *testing.T) {
+	// Unreachable: nothing is listening, so the transport fails and the error names
+	// the connection.
+	_, err := admin.NewClient("127.0.0.1:1", "t").HeldContent(context.Background(), "x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "darbaan serve", "an unreachable daemon points at the connection")
+
+	// Reachable but the request is rejected (wrong token): a server error, not a
+	// transport one, so it must NOT carry the connect hint — else the operator can't
+	// tell the tool failing from the message being unreadable.
+	svc, _, _ := newSvc(t)
+	addr := startServer(t, svc, "right-token")
+	_, err = admin.NewClient(addr, "wrong-token").HeldContent(context.Background(), "x")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "darbaan serve", "a reached-but-rejected request is not a connection failure")
+}
