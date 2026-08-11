@@ -280,14 +280,18 @@ func (s *Syncer) Reconcile(ctx context.Context, opts ReconcileOptions) (int, err
 		removed++
 		if opts.Audit != nil {
 			// Best-effort audit (the message store is the source of truth; a failed
-			// append must not fail an already-committed retraction — ADR 0011).
-			_ = opts.Audit.Append(audit.Record{
+			// append must not fail an already-committed retraction — ADR 0011). Log
+			// the failure rather than discarding it — a silently broken audit sink
+			// would otherwise leave a retraction with no trail and no signal.
+			if aerr := opts.Audit.Append(audit.Record{
 				Event:     "retract",
 				Agent:     s.owner,
 				Inbox:     inbound.NormInbox(s.inbox),
 				MessageID: m.ID,
 				Detail:    fmt.Sprintf("inbox=%s upstream_uid=%d left source", inbound.NormInbox(s.inbox), m.UpstreamUID),
-			})
+			}); aerr != nil {
+				s.logger.Warn("could not audit retraction", "id", m.ID, "upstream_uid", m.UpstreamUID, "err", aerr)
+			}
 		}
 	}
 	if len(errs) > 0 {

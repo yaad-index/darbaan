@@ -28,7 +28,11 @@ func TestParseMaxAge(t *testing.T) {
 		assert.Equal(t, c.want, got, c.in)
 	}
 
-	for _, bad := range []string{"abc", "1x", "yy", "-1y"} {
+	// Negatives must be rejected on BOTH parse paths. "-1y"/"-2d" exercise the d/w/y
+	// suffix path; "-24h"/"-1h30m"/"-30m"/"-500ms" exercise the time.ParseDuration
+	// path, which accepts negative durations without error — the gap a single
+	// post-parse sign gate closes (a negative cutoff selects "newer than the future").
+	for _, bad := range []string{"abc", "1x", "yy", "-1y", "-2d", "-24h", "-1h30m", "-30m", "-500ms"} {
 		_, err := parseMaxAge(bad)
 		assert.Error(t, err, bad)
 	}

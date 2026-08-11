@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/sluice"
@@ -72,8 +73,15 @@ func (c *Client) List(ctx context.Context) ([]sluice.Meta, error) {
 }
 
 // Show returns the raw RFC 822 of a held message.
+//
+// Message ids and inbox names are caller-supplied and can carry "/", "?", "#", or
+// spaces; every one interpolated into a request path is url.PathEscape'd (here and
+// in every sibling below) so it stays a single, correctly-delimited path segment
+// rather than altering the route or spilling into a query/fragment. The server
+// matches on wildcard path segments and reads them decoded (r.PathValue), so the
+// escape round-trips.
 func (c *Client) Show(ctx context.Context, id string) ([]byte, error) {
-	resp, err := c.request(ctx, http.MethodGet, "/queue/"+id, nil)
+	resp, err := c.request(ctx, http.MethodGet, "/queue/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -92,19 +100,19 @@ func (c *Client) Show(ctx context.Context, id string) ([]byte, error) {
 
 // Approve approves a held message.
 func (c *Client) Approve(ctx context.Context, id string) (Outcome, error) {
-	return c.action(ctx, "/queue/"+id+"/approve", nil)
+	return c.action(ctx, "/queue/"+url.PathEscape(id)+"/approve", nil)
 }
 
 // ApproveAs approves a held message and sends it from the given inbox's identity
 // (ADR 0023 slice 5).
 func (c *Client) ApproveAs(ctx context.Context, id, inbox string) (Outcome, error) {
-	return c.action(ctx, "/queue/"+id+"/approve-as/"+inbox, nil)
+	return c.action(ctx, "/queue/"+url.PathEscape(id)+"/approve-as/"+url.PathEscape(inbox), nil)
 }
 
 // ReSend retries the upstream delivery of an approved message whose previous send
 // failed (C4). Only valid for a message stranded in `approved` with a send error.
 func (c *Client) ReSend(ctx context.Context, id string) (Outcome, error) {
-	return c.action(ctx, "/queue/"+id+"/resend", nil)
+	return c.action(ctx, "/queue/"+url.PathEscape(id)+"/resend", nil)
 }
 
 // Inboxes lists the configured inbox identities for the Change-sender picker
@@ -128,7 +136,7 @@ func (c *Client) Inboxes(ctx context.Context) ([]InboxIdentity, error) {
 // Reject rejects a held message with a reason.
 func (c *Client) Reject(ctx context.Context, id, reason string, retryable bool) (Outcome, error) {
 	body, _ := json.Marshal(map[string]any{"reason": reason, "retryable": retryable})
-	return c.action(ctx, "/queue/"+id+"/reject", bytes.NewReader(body))
+	return c.action(ctx, "/queue/"+url.PathEscape(id)+"/reject", bytes.NewReader(body))
 }
 
 // HeldList returns the inbound messages held for a human decision (ADR 0021).
@@ -155,7 +163,7 @@ func (c *Client) HeldList(ctx context.Context) ([]inbound.Message, error) {
 // whose body has not been fetched yet returns empty bytes and no error; a transport
 // or read fault returns a classified error (never a silent empty body).
 func (c *Client) HeldContent(ctx context.Context, id string) ([]byte, error) {
-	resp, err := c.request(ctx, http.MethodGet, "/holds/"+id+"/content", nil)
+	resp, err := c.request(ctx, http.MethodGet, "/holds/"+url.PathEscape(id)+"/content", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -192,12 +200,12 @@ func (c *Client) HeldContent(ctx context.Context, id string) ([]byte, error) {
 
 // Expose approves a held message for the agent to see (ADR 0021).
 func (c *Client) Expose(ctx context.Context, id string) (inbound.Message, error) {
-	return c.hold(ctx, "/holds/"+id+"/expose")
+	return c.hold(ctx, "/holds/"+url.PathEscape(id)+"/expose")
 }
 
 // Drop rejects a held message — it stays hidden from the agent (ADR 0021).
 func (c *Client) Drop(ctx context.Context, id string) (inbound.Message, error) {
-	return c.hold(ctx, "/holds/"+id+"/drop")
+	return c.hold(ctx, "/holds/"+url.PathEscape(id)+"/drop")
 }
 
 func (c *Client) hold(ctx context.Context, path string) (inbound.Message, error) {
@@ -269,7 +277,7 @@ func (c *Client) SyncStatus(ctx context.Context) ([]SyncStatus, error) {
 // ReleaseReconcile releases a latched inbox — confirm the large retraction and
 // resume reconciliation (ADR 0026).
 func (c *Client) ReleaseReconcile(ctx context.Context, inbox string) (ReconcileReleaseResult, error) {
-	resp, err := c.request(ctx, http.MethodPost, "/reconcile/"+inbox+"/release", nil)
+	resp, err := c.request(ctx, http.MethodPost, "/reconcile/"+url.PathEscape(inbox)+"/release", nil)
 	if err != nil {
 		return ReconcileReleaseResult{}, err
 	}
