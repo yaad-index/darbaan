@@ -268,10 +268,22 @@ func (s *Server) handleHeldList(w http.ResponseWriter, _ *http.Request) {
 
 // handleHeldContent serves a held message's stored raw body for the operator's
 // hold surface (ADR 0032 change A). Persisted-blob only, restricted to
-// currently-held ids; a not-held / no-body id serves an empty 200 rather than an
-// error, so the caller renders "no body available" without special-casing.
+// currently-held ids. The no-body states are kept distinct on the wire: not-currently-
+// held is a 404 carrying the codeNotHeld marker (so a client maps it to not-held only
+// on THIS service's positive signal, never on a bare status a foreign peer could
+// return); an unconfigured holds subsystem is a 503 (a tool state, not a message
+// state); a held message whose body has not been fetched yet is an empty 200. The
+// caller depends on that split — the states call for opposite operator actions.
 func (s *Server) handleHeldContent(w http.ResponseWriter, r *http.Request) {
 	raw, err := s.svc.HeldContent(r.PathValue("id"))
+	if errors.Is(err, ErrNotHeld) {
+		writeErrWithCode(w, http.StatusNotFound, err, codeNotHeld)
+		return
+	}
+	if errors.Is(err, ErrHoldsUnavailable) {
+		writeErr(w, http.StatusServiceUnavailable, err)
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -387,4 +399,11 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, map[string]string{"error": err.Error()})
+}
+
+// writeErrWithCode is writeErr plus a machine-readable code, so a client can
+// positively identify THIS service's typed signal rather than infer a message-state
+// meaning from a bare status a foreign peer or a route-less daemon could also return.
+func writeErrWithCode(w http.ResponseWriter, code int, err error, errCode string) {
+	writeJSON(w, code, map[string]string{"error": err.Error(), "code": errCode})
 }

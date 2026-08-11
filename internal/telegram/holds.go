@@ -86,15 +86,17 @@ func formatHold(m inbound.Message, raw []byte, fetchFailed bool) string {
 	// C46: the stored body could not be read (HeldContent failed). Say so explicitly
 	// rather than degrading silently to a metadata-only card the operator can't
 	// distinguish from "no body yet" — and on this surface the body is often the whole
-	// decision (a hold placed by injection assessment). Offer a retry, but condition
-	// the guidance on HOW it fails: the CLI path is strictly longer than this call, so
-	// a connection failure can leave the body intact. A failed read only proves "could
-	// not read it", never "it is not there" — so never talk the operator into deciding
-	// blind.
+	// decision (a hold placed by injection assessment). Offer a retry and map its
+	// outcomes: the body is treated as unavailable only on the retry's positive
+	// "held with no stored body" signal; every other failure routes to the safe branch
+	// (fix the tool and look again), never to deciding blind. A failed read only proves
+	// "could not read it", never "it is not there".
 	if fetchFailed {
-		b.WriteString("\n\n(!) body could NOT be fetched. Retry with `darbaan holds show " + m.ID +
-			"` — it may have been transient. If it reports it cannot read or find the message, the body is unavailable: decide from the metadata above knowing you have not seen it. " +
-			"If it cannot connect to darbaan, that is the tool, not the message — restore the connection and look again before deciding.")
+		b.WriteString("\n\n(!) body could NOT be fetched — this is not an empty message. Retry with `darbaan holds show " + m.ID +
+			"`: if it shows the body, the failure was transient — proceed on what it shows. " +
+			"If it reports the message is no longer held, the decision has already been made — take no action. " +
+			"If it reports the message is held with no stored body, the body is genuinely unavailable — decide from the metadata above knowing you have not seen it. " +
+			"If it fails any other way (cannot connect, permission denied, a server error), that is the tool or its configuration, not the message — fix it and look again before deciding; do NOT approve unseen.")
 		return b.String()
 	}
 	// Fence the stored body so attacker text crosses to the operator as inert,

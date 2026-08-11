@@ -310,9 +310,18 @@ func (c *Client) notify(ctx context.Context, m sluice.Meta) error {
 // triggers).
 const maxUpload = 50 * 1024 * 1024
 
+// uploadable reports whether an attachment will be sent as a document
+// (sendAttachments uploads it). The metadata line uses the same predicate to order
+// the never-uploaded parts first, so tail-truncation of that line only ever hides
+// parts the operator can still open as a file — keeping the "open the uploaded
+// files" marker true for everything it conceals.
+func uploadable(a attachment) bool {
+	return a.size <= maxUpload && len(a.data) > 0
+}
+
 func (c *Client) sendAttachments(ctx context.Context, queueID string, anchorID int, atts []attachment) {
 	for _, a := range atts {
-		if a.size > maxUpload || len(a.data) == 0 {
+		if !uploadable(a) {
 			continue // too large / empty — the metadata line covers it
 		}
 		params := &bot.SendDocumentParams{
@@ -502,15 +511,16 @@ func formatNotification(n notification) (text string, bodyOffloaded bool) {
 	// C14: the body/attachments could not be read (admin.Show failed). Say so
 	// explicitly — a card that renders "(no text body)" / "attachments: none" here
 	// would let the operator approve believing they saw an empty message. Offer a
-	// retry, but condition the guidance on HOW that retry fails, not merely that it
-	// does: the CLI path is strictly longer than this call (it must find the socket
-	// and reach a running daemon), so a connection failure can leave the body
-	// perfectly intact. A failed read only ever proves "could not read it", never
-	// "it is not there" — so never talk the operator into deciding blind.
+	// retry and map its outcomes, because a failed read only ever proves "could not
+	// read it", never "it is not there": positive evidence is required before the
+	// body is treated as unavailable, and any state the retry can't establish routes
+	// to the safe branch (fix the tool and look again), never to deciding blind.
 	if n.fetchFailed {
-		return header + "\n\n(!) body and attachments could NOT be fetched. Retry with `darbaan queue show " + n.id +
-			"` — it may have been transient. If that command reports it cannot read or find the message, the body is unavailable: decide from the metadata above knowing you have not seen it. " +
-			"If it cannot connect to darbaan, that is the tool, not the message — restore the connection and look again before deciding.", false
+		return header + "\n\n(!) body and attachments could NOT be fetched — this is not an empty message. Retry with `darbaan queue show " + n.id +
+			"`: if it shows the body, the failure was transient — proceed on what it shows. " +
+			"If it reports the message has no stored body, it is a genuinely empty submission — that IS its full content, decide on that (approving sends an empty message). " +
+			"If it reports the message is not found or no longer pending, the decision has already been made — take no action. " +
+			"If it fails any other way (cannot connect, permission denied, a server error), that is the tool or its configuration, not the message — fix it and look again before deciding; do NOT approve unseen.", false
 	}
 	// The attachment line is security-critical (the exfil vector), so it is reserved
 	// in the cap budget and rendered after the body: the BODY truncates first, the
@@ -538,8 +548,24 @@ func attachmentsLine(atts []attachment) string {
 	if len(atts) == 0 {
 		return "attachments: none"
 	}
-	parts := make([]string, len(atts))
-	for i, a := range atts {
+	// Order the parts the operator cannot open as an uploaded document FIRST (over-cap
+	// or no decoded bytes — sendAttachments skips exactly these). The line is truncated
+	// from the tail under the cap and its marker tells the operator to open the uploaded
+	// files; keeping the never-uploaded entries ahead of the truncation point means
+	// every entry the marker hides is in fact an uploaded file, so its advice holds.
+	ordered := make([]attachment, 0, len(atts))
+	for _, a := range atts {
+		if !uploadable(a) {
+			ordered = append(ordered, a)
+		}
+	}
+	for _, a := range atts {
+		if uploadable(a) {
+			ordered = append(ordered, a)
+		}
+	}
+	parts := make([]string, len(ordered))
+	for i, a := range ordered {
 		if a.size > maxUpload {
 			parts[i] = fmt.Sprintf("%s (%s, %s, too large to preview)", a.filename, a.contentType, humanSize(a.size))
 		} else {

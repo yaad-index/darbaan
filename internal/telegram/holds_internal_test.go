@@ -121,8 +121,11 @@ func TestFormatHoldFetchFailed(t *testing.T) {
 	s := formatHold(m, nil, true)
 	assert.Contains(t, s, "could NOT be fetched")
 	assert.Contains(t, s, "darbaan holds show 14")
-	assert.Contains(t, s, "cannot connect to darbaan")
-	assert.Contains(t, s, "from: a@x.test") // metadata still shown
+	assert.Contains(t, s, "no longer held")           // decision already made → take no action
+	assert.Contains(t, s, "held with no stored body") // the only positive-evidence unavailable case
+	assert.Contains(t, s, "cannot connect")           // any other failure routes to the tool
+	assert.Contains(t, s, "do NOT approve unseen")    // the safe branch — never decide blind
+	assert.Contains(t, s, "from: a@x.test")           // metadata still shown
 
 	// Distinct from a hold with no stored body (fetch succeeded, empty) — no warning.
 	ok := formatHold(m, nil, false)

@@ -81,7 +81,13 @@ func (c *Client) Show(ctx context.Context, id string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, errorFrom(resp)
 	}
-	return io.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		// A truncated read is a transport/read fault, not an empty message; classify
+		// it so the caller never mistakes a short read for "the body is empty".
+		return nil, fmt.Errorf("admin: read %s: %w", id, err)
+	}
+	return b, nil
 }
 
 // Approve approves a held message.
@@ -143,18 +149,45 @@ func (c *Client) HeldList(ctx context.Context) ([]inbound.Message, error) {
 }
 
 // HeldContent returns a held message's stored raw body for the operator hold
-// surface (ADR 0032 change A). An empty body (not-held / not-yet-fetched) comes
-// back as empty bytes, not an error.
+// surface (ADR 0032 change A). Its three outcomes are kept distinct so the caller
+// never conflates opposite-action states: an id that is not currently held returns
+// ErrNotHeld (errors.Is-able — the server signals it as a 404); a held message
+// whose body has not been fetched yet returns empty bytes and no error; a transport
+// or read fault returns a classified error (never a silent empty body).
 func (c *Client) HeldContent(ctx context.Context, id string) ([]byte, error) {
 	resp, err := c.request(ctx, http.MethodGet, "/holds/"+id+"/content", nil)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		// Map a 404 to the typed sentinel ONLY on positive evidence that THIS service
+		// produced it — the codeNotHeld marker in the body. A bare 404 from a route-less
+		// daemon (version skew) or a mis-pointed peer carries no such code; it falls
+		// through to the generic error the guidance routes to the tool branch, rather
+		// than silently reporting every id as already-decided. The default mux 404 body
+		// does not decode to a non-empty error field, so it lands here correctly.
+		var e struct {
+			Error string `json:"error"`
+			Code  string `json:"code"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&e)
+		if e.Code == codeNotHeld {
+			return nil, ErrNotHeld
+		}
+		if e.Error == "" {
+			e.Error = resp.Status
+		}
+		return nil, fmt.Errorf("admin: %s", e.Error)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, errorFrom(resp)
 	}
-	return io.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("admin: read %s: %w", id, err)
+	}
+	return b, nil
 }
 
 // Expose approves a held message for the agent to see (ADR 0021).

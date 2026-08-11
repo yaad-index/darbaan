@@ -1501,7 +1501,15 @@ func sanitizeField(s string) string {
 	}, s)
 }
 
-// QueueShowCmd dumps a held message's raw RFC 822.
+// QueueShowCmd dumps a held outbound message's raw RFC 822 — and, like `holds show`,
+// the retry the fetch-failure notification points an operator at. Its outcomes are
+// enumerated so none prints nothing on success: the body (written), an unknown id (the
+// store Get errors), any other failure (propagated — the tool), and a present message
+// with an empty stored body. That last one is reachable — nothing on the outbound
+// write path requires a non-empty body, so an empty submission is trapped and stored
+// empty. Unlike the inbound hold there is no not-yet-fetched state here (the body is
+// materialized at enqueue), so empty means genuinely empty, and it is stated
+// explicitly rather than printed as zero bytes the retry would read as a silent glitch.
 type QueueShowCmd struct {
 	ID string `arg:"" help:"Message id."`
 }
@@ -1514,6 +1522,9 @@ func (c *QueueShowCmd) Run(cli *CLI) error {
 	raw, err := client.Show(context.Background(), c.ID)
 	if err != nil {
 		return err
+	}
+	if len(raw) == 0 {
+		return fmt.Errorf("message %s has no stored body — it is a genuinely empty message (an empty submission); that is its full content, not a fetch failure", c.ID)
 	}
 	_, err = os.Stdout.Write(raw)
 	return err
@@ -1595,12 +1606,16 @@ type HoldsCmd struct {
 
 // HoldsShowCmd dumps a held inbound message's stored raw body — the inbound mirror
 // of `queue show`, and the retry the Telegram hold alert points an operator at when
-// the body could not be fetched (C46). Its outcomes stay distinct so the operator's
-// decision is honest: an empty body prints nothing (a transient glitch, or there is
-// genuinely no stored body); a server error means the body could not be read — decide
-// from metadata knowing you have not seen it; a connection error carries the "is
-// `darbaan serve` running?" hint (the tool, not the message — reconnect and look
-// again). A failed read never implies the body is absent.
+// the body could not be fetched (C46). Its three outcomes stay distinct so the
+// operator's decision is honest, because they call for opposite actions: not-held
+// (ErrNotHeld — decided, gone, or an unknown id) means the decision is already made,
+// so take no action; a held message with no stored body means the body is genuinely
+// unavailable, so decide from the metadata knowing you have not seen it; any other
+// error is the tool (could not connect, permission denied, a server fault) — fix it
+// and look again, never approve unseen. A failed read never implies the body is
+// absent. (The outbound `queue show` sibling enumerates its own parallel outcomes,
+// including a present-but-empty body — empty means something different there, a
+// genuinely empty submission rather than a body not yet fetched.)
 type HoldsShowCmd struct {
 	ID string `arg:"" help:"Message id."`
 }
@@ -1611,19 +1626,18 @@ func (c *HoldsShowCmd) Run(cli *CLI) error {
 		return err
 	}
 	raw, err := client.HeldContent(context.Background(), c.ID)
+	if errors.Is(err, admin.ErrNotHeld) {
+		return fmt.Errorf("message %s is no longer held (decided, gone, or an unknown id) — the decision is already made; take no action here", c.ID)
+	}
 	if err != nil {
-		return err
+		return err // the tool, not the message: could not connect / read / a server fault — surfaced verbatim
 	}
 	if len(raw) == 0 {
-		// HeldContent serves an empty 200 (not an error) for two distinct states the
-		// transport conflates: the id is no longer held (decided, gone, or unknown), or
-		// it is held with no stored body. Writing zero bytes and exiting 0 would read as
-		// "the message is empty" — the exact misrepresentation this surface exists to
-		// prevent, on the class of message where the body is the decision. Fail loudly,
-		// naming both states, so the absence is never taken as the message's content.
-		// (queue show needs no such guard: its store Get errors on an unknown id; only
-		// this inbound path is silent.)
-		return fmt.Errorf("no body returned for %s: it is either no longer held (decided, gone, or an unknown id) or held with no stored body — nothing is shown; do not treat this as an empty message", c.ID)
+		// Held, but with no stored body yet. Writing zero bytes and exiting 0 would read
+		// as "the message is empty" — the exact misrepresentation this surface exists to
+		// prevent, on the class of message where the body is the decision. Fail loudly so
+		// the absence is never taken as the message's content.
+		return fmt.Errorf("message %s is held with no stored body — nothing is shown; decide from the metadata knowing you have not seen the body, do not treat this as an empty message", c.ID)
 	}
 	_, err = os.Stdout.Write(raw)
 	return err

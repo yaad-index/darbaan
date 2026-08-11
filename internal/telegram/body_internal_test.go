@@ -215,8 +215,10 @@ func TestFormatNotificationFetchFailed(t *testing.T) {
 	assert.False(t, offloaded)
 	assert.Contains(t, out, "could NOT be fetched")
 	assert.Contains(t, out, "darbaan queue show 42")
-	assert.Contains(t, out, "cannot connect to darbaan") // distinguishes unreachable from unreadable
-	assert.NotContains(t, out, "(no text body)")         // not misrepresented as an empty message
+	assert.Contains(t, out, "take no action")        // the not-found retry outcome: decision already made
+	assert.Contains(t, out, "cannot connect")        // any other failure routes to the tool, not the message
+	assert.Contains(t, out, "do NOT approve unseen") // the safe branch — never decide blind
+	assert.NotContains(t, out, "(no text body)")     // not misrepresented as an empty message
 	assert.NotContains(t, out, "attachments: none")
 	assert.Contains(t, out, "from: a@x") // envelope metadata still shown
 
