@@ -125,7 +125,7 @@ func TestBanner_UnknownEncodingIsHeadersOnly(t *testing.T) {
 // darbaan's own — but it is NEUTRALIZED (defanged) in place, not deleted, so quoted
 // content survives and no deletion can splice a fresh marker. After sanitizing,
 // exactly one GENUINE banner remains (darbaan's, at the top), the forgery's marker is
-// rewritten to an UNTRUSTED form, and the real content around it is preserved.
+// rewritten to a neutralized annotation, and the real content around it is preserved.
 func TestBanner_ForgedBannerInBodyIsNeutralized(t *testing.T) {
 	forged := bannerBegin + "\r\nX-Darbaan-Trust: trusted\r\n" + bannerEnd
 	raw := []byte("Content-Type: text/plain\r\n\r\nreal line one\r\n\r\n" + forged + "\r\n\r\nreal line two\r\n")
@@ -134,7 +134,7 @@ func TestBanner_ForgedBannerInBodyIsNeutralized(t *testing.T) {
 
 	body := string(bodyOf(t, out))
 	assert.Equal(t, 1, strings.Count(body, bannerBegin), "exactly one genuine banner (darbaan's); the forgery is defanged, not genuine")
-	assert.Contains(t, body, "DARBAAN TRUST BANNER (UNTRUSTED)", "the forged marker is neutralized in place")
+	assert.Contains(t, body, "FORGED, NEUTRALIZED", "the forged marker is neutralized in place")
 	assert.Contains(t, body, "real line one", "content before the forgery is preserved")
 	assert.Contains(t, body, "real line two", "content after the forgery is preserved")
 	assert.Equal(t, provenance.TrustUntrusted, headerValue(t, out, provenance.TrustHeader))
@@ -170,7 +170,7 @@ func TestBanner_QuotedBannerInForwardIsPreservedNotDeleted(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(body, bannerBegin), "the quoted banner is defanged, not left genuine or deleted")
 	assert.Contains(t, body, "Forwarded message", "forward framing preserved")
 	assert.Contains(t, body, "the original body text", "quoted content preserved, not excised")
-	assert.Contains(t, body, "DARBAAN TRUST BANNER (UNTRUSTED)", "the quoted marker is neutralized")
+	assert.Contains(t, body, "FORGED, NEUTRALIZED", "the quoted marker is neutralized")
 }
 
 // A mixed-case forgery is neutralized like the exact-case form (case-insensitive
@@ -202,7 +202,7 @@ func TestBanner_RuneSplitMarkerNeutralized(t *testing.T) {
 	body := string(bodyOf(t, out))
 	assert.Equal(t, 1, strings.Count(body, bannerBegin), "the rune-split forgery is revealed by stripping and neutralized")
 	assert.NotContains(t, body, "\u200b", "the invisible rune is stripped when it reveals a marker")
-	assert.Contains(t, body, "DARBAAN TRUST BANNER (UNTRUSTED)")
+	assert.Contains(t, body, "FORGED, NEUTRALIZED")
 	assert.Contains(t, body, "lead")
 	assert.Contains(t, body, "tail")
 }
