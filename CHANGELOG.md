@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.17.0](https://github.com/yaad-index/darbaan/compare/v0.16.1...v0.17.0) (2026-08-11)
+
+### Upgrade notes
+
+**Expect repeated label-write deferrals for messages stored before this series, and do not chase them as a fault.** The X-GM-LABELS writer now refuses a label write whenever the mailbox validity is unknown on either side. Messages recorded before the validity field existed therefore defer their label writes instead of replicating them, and because reconcile clears the dirty flag only on success, each one re-attempts and logs a deferral on every sync. That is the intended trade: writing into an unconfirmed UID space is the worse outcome. The deferrals stop once those records carry a validity; a backfill is tracked separately.
+
+**Assessment holds may differ slightly if you previously lowered `threshold`.** Recipient-skew scoring was corrected, so a deployment tuned around the old behaviour will hold marginally less than before. The `assessment:` settings are the supported way to re-tune.
+
+### Features
+
+* wire assessment tunables, agent advisory, identity-less scoring ([#233](https://github.com/yaad-index/darbaan/issues/233) part 3) ([#252](https://github.com/yaad-index/darbaan/issues/252)) ([9ac2b75](https://github.com/yaad-index/darbaan/commit/9ac2b75bb88258a2ec5c340b74af97386bd7b244))
+
+
+### Bug Fixes
+
+* add outbound re-send verb, surface send failures, guard send-attempt state ([#243](https://github.com/yaad-index/darbaan/issues/243)) ([6568faa](https://github.com/yaad-index/darbaan/commit/6568faab77748a7e655cdffbbb669c0646853f80))
+* audit tail-truncation detection, inbound verdicts + attribution ([#236](https://github.com/yaad-index/darbaan/issues/236)) ([#246](https://github.com/yaad-index/darbaan/issues/246)) ([35bcccb](https://github.com/yaad-index/darbaan/commit/35bcccbd4792d74b11d382d51bf71eaa284f1e82))
+* bound X-GM-LABELS writes to mailbox validity and honor ctx in sync ([#235](https://github.com/yaad-index/darbaan/issues/235) part 2) ([#256](https://github.com/yaad-index/darbaan/issues/256)) ([672cc3d](https://github.com/yaad-index/darbaan/commit/672cc3d67607fa7c5bc2abb086d80f3936fe755d))
+* harden injection detector against evasion ([#233](https://github.com/yaad-index/darbaan/issues/233) part 2) ([#250](https://github.com/yaad-index/darbaan/issues/250)) ([5f71624](https://github.com/yaad-index/darbaan/commit/5f71624f9d095413aba687c6d07c183a4967d697))
+* harden outbound approve/queue path — pre-commit ApproveAs, transient enqueue, sanitize operator tables ([#241](https://github.com/yaad-index/darbaan/issues/241)) ([b7f33f6](https://github.com/yaad-index/darbaan/commit/b7f33f671f5bed916ab335aad78f13e866612789))
+* harden the Telegram operator surface against oversized and unfetchable messages ([#234](https://github.com/yaad-index/darbaan/issues/234)) ([#259](https://github.com/yaad-index/darbaan/issues/259)) ([20830bf](https://github.com/yaad-index/darbaan/commit/20830bfe77a378888ac378019b7272b480a87ff9))
+* hold messages whose content cannot be decoded for assessment ([#233](https://github.com/yaad-index/darbaan/issues/233) part 1) ([#249](https://github.com/yaad-index/darbaan/issues/249)) ([bd01b62](https://github.com/yaad-index/darbaan/commit/bd01b62e5d5012e9f02b70d810924c19f7f241bb))
+* reconcile no longer retracts a concurrently-synced message + cleans superseded-validity orphans ([#235](https://github.com/yaad-index/darbaan/issues/235) part 1) ([#253](https://github.com/yaad-index/darbaan/issues/253)) ([e2e57aa](https://github.com/yaad-index/darbaan/commit/e2e57aa50cd76c196093df5bb2e6d90e4b944851))
+* refuse send on removed inbox sender, reject header/envelope From mismatch ([#244](https://github.com/yaad-index/darbaan/issues/244)) ([0fcdc57](https://github.com/yaad-index/darbaan/commit/0fcdc57dca3611334224c1a35b85379b028e80e8))
+
 ## [0.16.1](https://github.com/yaad-index/darbaan/compare/v0.16.0...v0.16.1) (2026-08-08)
 
 
