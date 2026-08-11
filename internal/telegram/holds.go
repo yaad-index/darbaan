@@ -10,6 +10,7 @@ import (
 
 	"github.com/yaad-index/darbaan/internal/assessor"
 	"github.com/yaad-index/darbaan/internal/inbound"
+	"github.com/yaad-index/darbaan/internal/mailtext"
 )
 
 // pollHolds lists the inbound hold-for-human queue (ADR 0021) and posts each new
@@ -145,17 +146,60 @@ func holdAssessmentLine(a *inbound.Assessment) string {
 	return line
 }
 
-// fencedBody truncates the raw body to the UTF-16 budget (marking the cut) and
-// wraps it in an untrusted fence. A non-positive budget yields no body.
+// fencedBody renders the stored message for the operator card: the DECODED text of
+// the message, never the raw message source.
+//
+// Why extraction at all. Fencing string(raw) spent the entire budget on transport
+// headers — Received, ARC-Seal, DKIM-Signature — and truncated before a single
+// human-readable line, so the operator was asked to Expose or Drop a message whose
+// content they had never actually seen. On an injection-assessed hold the body IS
+// the decision, so an unreadable card is not a cosmetic problem.
+//
+// Why THIS extractor. mailtext is the same one the assessor consumes, so the
+// operator reads the text the detector actually scored — rather than a separately
+// derived rendering that could quietly disagree with the verdict being judged. It
+// also flattens text/html, so an HTML-only message stays readable here.
+//
+// The no-text case is always stated, never silent. Falling back to raw source would
+// reinstate the defect, and rendering nothing would read as "the message is empty" —
+// the exact misrepresentation this surface exists to prevent.
 func fencedBody(raw []byte, budget int) string {
-	if budget <= 0 {
+	if budget <= 0 || len(raw) == 0 {
 		return ""
 	}
-	text := string(raw)
+	c, err := mailtext.Extract(raw, mailtext.DefaultLimits())
+	text := strings.TrimRight(c.Body, " \t\r\n")
+
+	// Undecodable means text the message carries never reached the assessor, so the
+	// verdict cannot vouch for it. That bears directly on the decision being made and
+	// is surfaced even when readable text was recovered alongside it.
+	var note string
+	if err != nil || c.Undecodable {
+		note = "\n\n(!) part of this message could not be decoded, so it was never scored — the assessment above cannot account for it; treat it as incomplete."
+	}
+
+	if text == "" {
+		reason := "it has no readable text part"
+		if err != nil || c.Undecodable {
+			reason = "its content could not be decoded"
+		}
+		return fmt.Sprintf("(!) no message text is shown because %s — this is NOT an empty message. "+
+			"The raw source is %d bytes; dump it with `darbaan holds show <id>` (add --text for the decoded body). "+
+			"Do not read the absence of text here as the message having no content.", reason, len(raw))
+	}
+
+	budget -= utf16Len(note)
+	if budget <= 0 {
+		return strings.TrimPrefix(note, "\n\n")
+	}
 	if utf16Len(text) > budget {
 		text = truncateUTF16(text, budget) + "\n[truncated]"
+	} else if c.Truncated {
+		// Not budget truncation — extraction itself hit its caps, so the message carries
+		// more text than was ever extracted. Say which kind of "there is more" this is.
+		text += "\n[extraction limit reached — the message carries more text than was scored]"
 	}
-	return assessor.Fence("email body", text)
+	return assessor.Fence("email body", text) + note
 }
 
 func holdKeyboard(id string) models.InlineKeyboardMarkup {

@@ -42,6 +42,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/inboxcfg"
 	"github.com/yaad-index/darbaan/internal/listener"
+	"github.com/yaad-index/darbaan/internal/mailtext"
 	"github.com/yaad-index/darbaan/internal/policy"
 	"github.com/yaad-index/darbaan/internal/provenance"
 	"github.com/yaad-index/darbaan/internal/riskscore"
@@ -1616,8 +1617,14 @@ type HoldsCmd struct {
 // absent. (The outbound `queue show` sibling enumerates its own parallel outcomes,
 // including a present-but-empty body — empty means something different there, a
 // genuinely empty submission rather than a body not yet fetched.)
+// The default output is the raw message source, deliberately: it is byte-exact and
+// redirects cleanly to a .eml, which is what the outbound `queue show` sibling does
+// too. --text is for the other job, reading it: it prints the decoded body via the
+// same extractor the assessor consumes, so an operator judging an injection hold
+// reads the text the detector actually scored instead of a header wall.
 type HoldsShowCmd struct {
-	ID string `arg:"" help:"Message id."`
+	ID   string `arg:"" help:"Message id."`
+	Text bool   `help:"Print the decoded text body instead of the raw message source."`
 }
 
 func (c *HoldsShowCmd) Run(cli *CLI) error {
@@ -1638,6 +1645,25 @@ func (c *HoldsShowCmd) Run(cli *CLI) error {
 		// prevent, on the class of message where the body is the decision. Fail loudly so
 		// the absence is never taken as the message's content.
 		return fmt.Errorf("message %s is held with no stored body — nothing is shown; decide from the metadata knowing you have not seen the body, do not treat this as an empty message", c.ID)
+	}
+	if c.Text {
+		content, exErr := mailtext.Extract(raw, mailtext.DefaultLimits())
+		body := strings.TrimRight(content.Body, " \t\r\n")
+		if body == "" {
+			// The body exists but yielded no text. Fail loudly for the same reason the
+			// no-stored-body case does: printing nothing and exiting 0 would read as "the
+			// message is empty" when it is not, and this is the surface where the body is
+			// the decision. Point at the raw dump rather than leaving a dead end.
+			return fmt.Errorf("message %s has %d bytes of source but no readable text part — it is NOT empty; run without --text to dump the raw source", c.ID, len(raw))
+		}
+		if exErr != nil || content.Undecodable {
+			fmt.Fprintf(os.Stderr, "warning: part of message %s could not be decoded and was never scored — the assessment cannot account for it; the raw source (without --text) is the complete record\n", c.ID)
+		}
+		if content.Truncated {
+			fmt.Fprintf(os.Stderr, "warning: extraction hit its size limits — the message carries more text than is shown here\n")
+		}
+		_, err = fmt.Println(body)
+		return err
 	}
 	_, err = os.Stdout.Write(raw)
 	return err
