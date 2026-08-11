@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -246,6 +247,7 @@ func (c *Client) notify(ctx context.Context, m sluice.Meta) error {
 	// review what they're approving. De-dupe means one fetch per message; a
 	// fetch failure still notifies, falling back to the envelope values.
 	raw, err := c.admin.Show(ctx, m.ID)
+	fetchFailed := err != nil
 	if err != nil {
 		c.logger.Warn("telegram fetch body failed", "id", m.ID, "err", err)
 	}
@@ -264,6 +266,7 @@ func (c *Client) notify(ctx context.Context, m sluice.Meta) error {
 		size:        m.Size,
 		body:        bodyText(raw),
 		attachments: attachments(raw),
+		fetchFailed: fetchFailed,
 	}
 	// Surface recipients that deliver but aren't visible in the headers (Bcc),
 	// but only when we could actually read the headers.
@@ -307,9 +310,18 @@ func (c *Client) notify(ctx context.Context, m sluice.Meta) error {
 // triggers).
 const maxUpload = 50 * 1024 * 1024
 
+// uploadable reports whether an attachment will be sent as a document
+// (sendAttachments uploads it). The metadata line uses the same predicate to order
+// the never-uploaded parts first, so tail-truncation of that line only ever hides
+// parts the operator can still open as a file — keeping the "open the uploaded
+// files" marker true for everything it conceals.
+func uploadable(a attachment) bool {
+	return a.size <= maxUpload && len(a.data) > 0
+}
+
 func (c *Client) sendAttachments(ctx context.Context, queueID string, anchorID int, atts []attachment) {
 	for _, a := range atts {
-		if a.size > maxUpload || len(a.data) == 0 {
+		if !uploadable(a) {
 			continue // too large / empty — the metadata line covers it
 		}
 		params := &bot.SendDocumentParams{
@@ -416,6 +428,7 @@ type notification struct {
 	hidden      []string // envelope recipients not in the headers (Bcc)
 	body        string
 	attachments []attachment // attachment parts (filename/type/size — the exfil vector)
+	fetchFailed bool         // admin.Show errored — body/attachments unread, not empty (C14)
 }
 
 func displaySubject(s string) string {
@@ -425,40 +438,105 @@ func displaySubject(s string) string {
 	return s
 }
 
-// maxNotificationRunes keeps the notification within Telegram's 4096-char cap
-// with headroom for the keyboard and the truncation marker.
-const maxNotificationRunes = 3900
+// maxNotificationUnits keeps the notification within Telegram's 4096-unit cap
+// with headroom for the keyboard and the truncation marker. Telegram measures a
+// message's length in UTF-16 code units, not runes or bytes (C13).
+const maxNotificationUnits = 3900
 
-// formatNotification renders the headers (human address forms, plus a flag for
-// any hidden recipient) followed by the message body so the operator reviews
-// the content before deciding. When the whole notification would exceed the cap
-// the body is truncated (rune-safe) with a marker that names the attached full
-// body (ADR 0025); the returned bool reports that offload so the caller uploads
-// the full text as a .txt. Plain text — no parse mode, so addresses and subjects
-// never need markdown escaping.
+// utf16Len returns the length of s in UTF-16 code units — the unit Telegram
+// measures a message against its 4096 cap. Budgeting in runes undercounts:
+// astral-plane characters (many emoji) are one rune but two UTF-16 units, so a
+// rune-budgeted body can be nearly twice its measured size and blow the cap,
+// failing every SendMessage and keeping the held message off the approval surface
+// forever (C13/C45).
+func utf16Len(s string) int { return len(utf16.Encode([]rune(s))) }
+
+// truncateUTF16 returns the longest prefix of s whose UTF-16 length is at most
+// limit. It cuts on a rune boundary — a two-unit character that would cross the
+// limit is dropped whole rather than half-encoded.
+func truncateUTF16(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if utf16Len(s) <= limit {
+		return s
+	}
+	units := 0
+	for i, r := range s {
+		w := 1
+		if r > 0xFFFF {
+			w = 2
+		}
+		if units+w > limit {
+			return s[:i]
+		}
+		units += w
+	}
+	return s
+}
+
+// maxAttachmentsLineUnits bounds the (agent-influenced) attachment line in UTF-16
+// units so a message with very many parts can't push the notification past the cap
+// and fail the send. The parts are still uploaded as documents regardless; the line
+// only describes them, and a truncation marker keeps the exfil-vector count visible.
+const maxAttachmentsLineUnits = 800
+
+func clampAttachmentsLine(atts []attachment) string {
+	line := attachmentsLine(atts)
+	if utf16Len(line) <= maxAttachmentsLineUnits {
+		return line
+	}
+	return truncateUTF16(line, maxAttachmentsLineUnits) + fmt.Sprintf(" …(list truncated; %d attachments — open the uploaded files)", len(atts))
+}
+
+// formatNotification renders the headers (human address forms, plus a flag for any
+// hidden recipient) followed by the message body so the operator reviews the content
+// before deciding. Agent-controlled fields (from/to/subject/hidden) are clamped and
+// the attachment line is bounded, so a pathological header or attachment set can
+// never push the notification past Telegram's cap and fail the send (C13). When the
+// whole notification would still exceed the cap the body is truncated (UTF-16-safe)
+// with a marker naming the attached full body (ADR 0025); the returned bool reports
+// that offload so the caller uploads the full text as a .txt. When the body could not
+// be fetched at all, that is stated explicitly rather than rendered as an empty
+// message (C14). Plain text — no parse mode, so addresses and subjects never need
+// markdown escaping.
 func formatNotification(n notification) (text string, bodyOffloaded bool) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Held outbound message\nid: %s\nfrom: %s\nto: %s\nsubject: %s\nsize: %d bytes",
-		n.id, n.from, n.to, n.subject, n.size)
+		n.id, clampField(n.from), clampField(n.to), clampField(n.subject), n.size)
 	if len(n.hidden) > 0 {
-		fmt.Fprintf(&b, "\n(!) also delivering to (not in headers): %s", strings.Join(n.hidden, ", "))
+		fmt.Fprintf(&b, "\n(!) also delivering to (not in headers): %s", clampField(strings.Join(n.hidden, ", ")))
 	}
 	header := b.String()
-	// The attachment line is security-critical (the exfil vector), so it is
-	// reserved in the cap budget and rendered after the body: the BODY truncates
-	// first, the attachment list always survives.
-	suffix := "\n\n" + attachmentsLine(n.attachments)
+	// C14: the body/attachments could not be read (admin.Show failed). Say so
+	// explicitly — a card that renders "(no text body)" / "attachments: none" here
+	// would let the operator approve believing they saw an empty message. Offer a
+	// retry and map its outcomes, because a failed read only ever proves "could not
+	// read it", never "it is not there": positive evidence is required before the
+	// body is treated as unavailable, and any state the retry can't establish routes
+	// to the safe branch (fix the tool and look again), never to deciding blind.
+	if n.fetchFailed {
+		return header + "\n\n(!) body and attachments could NOT be fetched — this is not an empty message. Retry with `darbaan queue show " + n.id +
+			"`: if it shows the body, the failure was transient — proceed on what it shows. " +
+			"If it reports the message has no stored body, it is a genuinely empty submission — that IS its full content, decide on that (approving sends an empty message). " +
+			"If it reports the message is not found or no longer pending, the decision has already been made — take no action. " +
+			"If it fails any other way (cannot connect, permission denied, a server error), that is the tool or its configuration, not the message — fix it and look again before deciding; do NOT approve unseen.", false
+	}
+	// The attachment line is security-critical (the exfil vector), so it is reserved
+	// in the cap budget and rendered after the body: the BODY truncates first, the
+	// attachment list always survives (bounded, C13).
+	suffix := "\n\n" + clampAttachmentsLine(n.attachments)
 	if n.body == "" {
 		return header + "\n\n(no text body)" + suffix, false
 	}
 	prefix := header + "\n\n--- body ---\n"
 	marker := "\n...[truncated — full body attached as " + fullBodyFilename + "]"
-	avail := maxNotificationRunes - len([]rune(prefix)) - len([]rune(suffix)) - len([]rune(marker))
+	avail := maxNotificationUnits - utf16Len(prefix) - utf16Len(suffix) - utf16Len(marker)
 	if avail < 0 {
 		avail = 0
 	}
-	if br := []rune(n.body); len(br) > avail {
-		return prefix + string(br[:avail]) + marker + suffix, true
+	if utf16Len(n.body) > avail {
+		return prefix + truncateUTF16(n.body, avail) + marker + suffix, true
 	}
 	return prefix + n.body + suffix, false
 }
@@ -470,8 +548,24 @@ func attachmentsLine(atts []attachment) string {
 	if len(atts) == 0 {
 		return "attachments: none"
 	}
-	parts := make([]string, len(atts))
-	for i, a := range atts {
+	// Order the parts the operator cannot open as an uploaded document FIRST (over-cap
+	// or no decoded bytes — sendAttachments skips exactly these). The line is truncated
+	// from the tail under the cap and its marker tells the operator to open the uploaded
+	// files; keeping the never-uploaded entries ahead of the truncation point means
+	// every entry the marker hides is in fact an uploaded file, so its advice holds.
+	ordered := make([]attachment, 0, len(atts))
+	for _, a := range atts {
+		if !uploadable(a) {
+			ordered = append(ordered, a)
+		}
+	}
+	for _, a := range atts {
+		if uploadable(a) {
+			ordered = append(ordered, a)
+		}
+	}
+	parts := make([]string, len(ordered))
+	for i, a := range ordered {
 		if a.size > maxUpload {
 			parts[i] = fmt.Sprintf("%s (%s, %s, too large to preview)", a.filename, a.contentType, humanSize(a.size))
 		} else {

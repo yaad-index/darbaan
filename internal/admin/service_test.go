@@ -346,15 +346,13 @@ func TestHeldContentRestrictedToHeld(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(raw), "body-bytes", "held id returns its stored body")
 
-	raw, err = svc.HeldContent(plain.ID)
-	require.NoError(t, err)
-	assert.Empty(t, raw, "a non-held id returns no content")
+	_, err = svc.HeldContent(plain.ID)
+	require.ErrorIs(t, err, admin.ErrNotHeld, "a non-held id is ErrNotHeld, distinct from an empty body")
 
 	_, err = svc.ExposeHeld(context.Background(), held.ID)
 	require.NoError(t, err)
-	raw, err = svc.HeldContent(held.ID)
-	require.NoError(t, err)
-	assert.Empty(t, raw, "a decided message is no longer held → no content")
+	_, err = svc.HeldContent(held.ID)
+	require.ErrorIs(t, err, admin.ErrNotHeld, "a decided message is no longer held → ErrNotHeld")
 }
 
 // An assessment-held message (ADR 0032) surfaces in the held queue with its

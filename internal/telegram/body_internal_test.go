@@ -52,7 +52,7 @@ func TestFormatNotificationBody(t *testing.T) {
 func TestFormatNotificationTruncates(t *testing.T) {
 	out, offloaded := formatNotification(notification{id: "7", subject: "s", body: strings.Repeat("x", 8000)})
 	assert.True(t, offloaded) // long body offloaded to a .txt attachment
-	assert.LessOrEqual(t, len([]rune(out)), maxNotificationRunes)
+	assert.LessOrEqual(t, utf16Len(out), maxNotificationUnits)
 	assert.Contains(t, out, "full body attached as full-message-body.txt")
 }
 
@@ -149,7 +149,7 @@ func TestFormatNotificationAttachmentsSurviveTruncation(t *testing.T) {
 	}
 	out, offloaded := formatNotification(n)
 	assert.True(t, offloaded)
-	assert.LessOrEqual(t, len([]rune(out)), maxNotificationRunes)
+	assert.LessOrEqual(t, utf16Len(out), maxNotificationUnits)
 	assert.Contains(t, out, "secret.pdf")        // attachment list survives a long-body truncation
 	assert.Contains(t, out, "[truncated — full") // ...because the body offloaded instead
 }
@@ -180,4 +180,50 @@ func TestPrunePendingTTL(t *testing.T) {
 	_, hasFresh := c.pending[2]
 	assert.False(t, hasStale)
 	assert.True(t, hasFresh)
+}
+
+// C13: budgeting the body in runes undercounts an emoji-heavy body, whose
+// astral-plane characters are two UTF-16 units each — the unit Telegram measures.
+// A rune-budgeted body of these encodes to ~2x the cap and fails every send,
+// keeping the held message off the approval surface; the UTF-16 budget keeps the
+// rendered notification within the cap.
+func TestFormatNotificationUTF16Budget(t *testing.T) {
+	body := strings.Repeat("\U0001F600", 6000) // 6000 runes, 12000 UTF-16 units
+	out, offloaded := formatNotification(notification{id: "7", subject: "s", body: body})
+	assert.True(t, offloaded)
+	assert.LessOrEqual(t, utf16Len(out), maxNotificationUnits, "rendered within Telegram's UTF-16 cap")
+}
+
+// C13: a pathological attachment set can't push the notification past the cap — the
+// line is bounded (the files are still uploaded), so the send never fails.
+func TestFormatNotificationBoundsAttachmentsLine(t *testing.T) {
+	atts := make([]attachment, 500)
+	for i := range atts {
+		atts[i] = attachment{filename: strings.Repeat("f", 40), contentType: "application/pdf", size: 1024}
+	}
+	out, _ := formatNotification(notification{id: "7", subject: "s", body: "x", attachments: atts})
+	assert.LessOrEqual(t, utf16Len(out), maxNotificationUnits)
+	assert.Contains(t, out, "list truncated")
+}
+
+// C14: when the body/attachments couldn't be fetched (admin.Show failed), the card
+// says so explicitly and points at a retry conditioned on HOW it fails — it must NOT
+// render as an empty message with no attachments, which the operator could approve
+// believing they saw everything.
+func TestFormatNotificationFetchFailed(t *testing.T) {
+	out, offloaded := formatNotification(notification{id: "42", from: "a@x", to: "b@y", fetchFailed: true})
+	assert.False(t, offloaded)
+	assert.Contains(t, out, "could NOT be fetched")
+	assert.Contains(t, out, "darbaan queue show 42")
+	assert.Contains(t, out, "take no action")        // the not-found retry outcome: decision already made
+	assert.Contains(t, out, "cannot connect")        // any other failure routes to the tool, not the message
+	assert.Contains(t, out, "do NOT approve unseen") // the safe branch — never decide blind
+	assert.NotContains(t, out, "(no text body)")     // not misrepresented as an empty message
+	assert.NotContains(t, out, "attachments: none")
+	assert.Contains(t, out, "from: a@x") // envelope metadata still shown
+
+	// Distinct from a genuinely-empty (successfully-fetched) message.
+	empty, _ := formatNotification(notification{id: "42", body: ""})
+	assert.Contains(t, empty, "(no text body)")
+	assert.NotContains(t, empty, "could NOT be fetched")
 }

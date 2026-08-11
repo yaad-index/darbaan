@@ -82,6 +82,31 @@ type ReconcileReleaseResult struct {
 	Purged int    `json:"purged"`
 }
 
+// ErrNotHeld is returned by HeldContent when the id is not currently held —
+// decided, gone, or never a real id. It is distinct from a held message whose
+// stored body is empty (which returns empty bytes, no error): the two states call
+// for OPPOSITE operator actions — "the decision is already made, take no action"
+// versus "the body is genuinely unavailable, decide from the metadata". Conflating
+// them behind an empty 200 is what let the fetch-failure retry steer an operator to
+// act on an already-resolved hold, so the service names not-held explicitly at
+// look-time (it already knows, walking the held list — no second, racy observation).
+var ErrNotHeld = errors.New("admin: message is not currently held")
+
+// ErrHoldsUnavailable is returned by HeldContent when the service has no inbound
+// store wired — the holds subsystem is not configured. That is a tool/config state,
+// NOT a fact about any message, so it must never surface as ErrNotHeld: an
+// unconfigured daemon reporting "the decision is already made" about an id it knows
+// nothing about is exactly the false-positive-evidence failure this round guards
+// against. It routes to the tool branch (a 503), not the take-no-action branch.
+var ErrHoldsUnavailable = errors.New("admin: inbound holds are not configured on this service")
+
+// codeNotHeld is the machine-readable marker the not-held response carries in its
+// body, so a client can map a 404 to ErrNotHeld ONLY on positive evidence that THIS
+// service produced it. A bare 404 from a route-less daemon (version skew) or a
+// mis-pointed peer carries no such code and must fall through to the tool branch,
+// never become "not held" for every id.
+const codeNotHeld = "not_held"
+
 // ErrReconcileUnavailable is returned by the reconcile controls when no inbox has
 // an upstream syncer, so there is nothing to reconcile or release.
 var ErrReconcileUnavailable = errors.New("admin: reconcile control not available (no upstream inbox configured)")
@@ -229,11 +254,17 @@ func (s *Service) HeldList() ([]inbound.Message, error) {
 // surface (ADR 0032 change A — the operator reads it, fenced, to judge
 // Expose/Drop). It reads the persisted blob only, never an on-demand upstream
 // fetch, and only for a currently-held id (it resolves the id through HeldList),
-// so it can't dump arbitrary inbox content. A held message whose body has not
-// been retrieved yet (a pending non-assessment hold) returns empty, not a pull.
+// so it can't dump arbitrary inbox content. Two returns are deliberately distinct:
+// an id that is not currently held yields ErrNotHeld, while a held message whose
+// body has not been retrieved yet (a pending non-assessment hold) yields empty
+// bytes and no error. The caller must not collapse them — they call for opposite
+// operator actions.
 func (s *Service) HeldContent(id string) ([]byte, error) {
 	if s.inbox == nil {
-		return nil, nil
+		// No inbound store wired — the holds subsystem is unconfigured. That is a tool
+		// state, not a fact about this id; returning ErrNotHeld here would have an
+		// unconfigured daemon assert "already decided" about a message it cannot see.
+		return nil, ErrHoldsUnavailable
 	}
 	held, err := s.HeldList()
 	if err != nil {
@@ -247,9 +278,9 @@ func (s *Service) HeldContent(id string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		return got.Raw, nil
+		return got.Raw, nil // held; body may be empty (not yet fetched) — that is not ErrNotHeld
 	}
-	return nil, nil // not currently held (decided, gone, or unknown): no content
+	return nil, ErrNotHeld // not currently held (decided, gone, or unknown): no content
 }
 
 // inboxNames returns the configured inbox names in stable order (the held queue is
