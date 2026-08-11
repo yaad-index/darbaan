@@ -1,6 +1,7 @@
 package listener_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -50,4 +51,30 @@ func TestAuthEmpty(t *testing.T) {
 	a := listener.NewAuth(nil)
 	_, ok := a.Verify("agent", "pw")
 	assert.False(t, ok)
+}
+
+// C31: the credential compare is over fixed-width keyed MACs, so the presented
+// password's length is not a branch — a right or wrong password of any length is
+// accepted/rejected on its content alone. This is a length-agnostic CORRECTNESS check,
+// not a regression guard: a raw byte compare would agree with the MAC compare on every
+// non-colliding input, so reverting the fix leaves these assertions green. The timing
+// property is not unit-assertable and is verified by review (see Verify).
+func TestAuthFixedWidthCompareIsLengthAgnostic(t *testing.T) {
+	stored := "pw" // deliberately short, so wrong passwords are both shorter and much longer
+	a := listener.NewAuth([]listener.Principal{{Name: "agent", Password: stored}})
+
+	for _, wrong := range []string{"", "x", "pw ", "PW", strings.Repeat("p", 5000)} {
+		_, ok := a.Verify("agent", wrong)
+		assert.Falsef(t, ok, "wrong password %q (len %d) must be rejected", wrong, len(wrong))
+	}
+	// The correct password authenticates regardless.
+	p, ok := a.Verify("agent", stored)
+	assert.True(t, ok)
+	assert.Equal(t, "agent", p.Name)
+
+	// Unknown username with a pathological-length password is a clean miss (no panic,
+	// same (nil,false) outcome as a wrong password).
+	np, ok := a.Verify("nobody", strings.Repeat("z", 5000))
+	assert.False(t, ok)
+	assert.Nil(t, np)
 }
