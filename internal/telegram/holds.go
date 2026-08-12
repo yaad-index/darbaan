@@ -137,24 +137,33 @@ func holdAssessmentLine(a *inbound.Assessment) string {
 		}
 		return "could not be assessed (held fail-safe)"
 	}
-	// Band + score in operator terms; the factor identifiers ("secrets_request")
-	// named the rule that fired without saying what it means, so they are replaced by
-	// a fixed gloss (glossFactors). The rest of the stored summary is dropped — it only
-	// restated those same identifiers — EXCEPT its truncation caveat, which is not a
-	// restatement but a statement of how far the score can be trusted (it was computed
-	// on partial content). That caveat is preserved here rather than left to the
-	// fenced-body section, because the degraded cards (fetch-failed, no readable body)
-	// return before that section, so this line is the only place it survives on those
-	// paths — which are exactly the cards where the operator cannot read the body to
-	// judge for themselves (#262, review). Recognised by the assessor's exported
-	// constant, not by matching the prose, so a reword of the note is a compile-time
-	// change here rather than a silent loss.
+	// Band + score in operator terms, then the trust caveat (if any), then the factor
+	// glosses. Two things drive the content and the order:
+	//   - The factor identifiers ("secrets_request") named the rule that fired without
+	//     saying what it means, so they are replaced by a fixed gloss (glossFactors); the
+	//     rest of the stored summary is dropped, it only restated those identifiers.
+	//   - EXCEPT the summary's truncation caveat, which is not a restatement but a
+	//     statement of how far the score can be trusted (it was computed on partial
+	//     content). It is kept here rather than left to the fenced-body section, because
+	//     the degraded cards (fetch-failed, no readable body) return before that section,
+	//     so this line is the only place it survives on those paths — exactly the cards
+	//     where the operator cannot read the body to judge for themselves (#262, review).
+	// The caveat goes AHEAD of the gloss clauses so that if this line is ever clamped
+	// (clampField, 300 runes) the enumerable factor detail is truncated first and the
+	// trust qualifier stays anchored: a shortened factor list is degraded information, a
+	// dropped "scored on partial content" is misleading — the precise failure this change
+	// exists to fix, which must not be re-armed by later prose growth (review).
+	//
+	// The caveat is recognised by the assessor's exported constant, which makes a reword
+	// of the note a compile-time change for THIS renderer. It does NOT protect records
+	// already on disk: those keep the old wording and would silently stop matching after
+	// a reword — the residue a structured flag removes (#280).
 	line := fmt.Sprintf("%s risk (%d)", a.Band, a.Score)
-	if reason := glossFactors(a.Factors); reason != "" {
-		line += " — " + reason
-	}
 	if strings.Contains(a.Summary, assessor.TruncationNote) {
 		line += " — scored on partial content (message was truncated during extraction)"
+	}
+	if reason := glossFactors(a.Factors); reason != "" {
+		line += " — " + reason
 	}
 	return line
 }

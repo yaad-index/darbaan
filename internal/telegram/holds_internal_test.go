@@ -91,6 +91,14 @@ func TestFormatHoldPreservesTruncationCaveat(t *testing.T) {
 	assert.Contains(t, s, "asks the reader to send or confirm a credential", "the gloss is still rendered")
 	assert.NotContains(t, s, "Detected injection-risk factors", "the identifier restatement is still dropped")
 
+	// The caveat is anchored AHEAD of the gloss clauses, so a clamp (clampField, 300
+	// runes) or later prose growth truncates the enumerable factor detail first and never
+	// the trust qualifier (review). Pinning the order keeps that precedence from being
+	// silently reversed back to "caveat last", which would re-arm the very failure this
+	// fix removes.
+	assert.Less(t, strings.Index(s, "partial content"), strings.Index(s, "asks the reader"),
+		"the truncation caveat must precede the factor glosses so a clamp sacrifices the list, not the caveat")
+
 	// A non-truncated assessment carries no caveat.
 	m2 := inbound.Message{ID: "22", Assessment: &inbound.Assessment{
 		Disposition: inbound.AssessmentHeld, Score: 70, Band: "high",
