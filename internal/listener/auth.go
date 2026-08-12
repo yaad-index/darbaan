@@ -12,7 +12,11 @@ import (
 // inboxes it may read / send as. A principal with nil Reads/Sends is unrestricted
 // — the single-agent / back-compat case, where the one agent sees every inbox.
 type Principal struct {
-	Name         string
+	Name string
+	// Password is input-only: NewAuth/SingleAuth read it to compute the stored
+	// credential MAC and it is never populated on a Principal returned by Verify (#266).
+	// A verified principal's Password is always empty — empty by design, not a
+	// misconfiguration.
 	Password     string
 	DefaultInbox string
 	Reads        map[string]bool
@@ -41,12 +45,14 @@ type Auth struct {
 }
 
 // storedPrincipal is the internal record NewAuth keeps for each agent: the non-secret
-// grants plus the fixed-width MAC of the credential (pwMAC). The plaintext password is
-// hashed at construction and never retained, so Verify has no plaintext in scope to
-// compare against — a regression to a raw byte compare would have to visibly re-add
-// plaintext credential storage, which is reviewable, rather than being invisible to
-// every behavioural test (#266, C31 follow-up). A side benefit is that agent passwords
-// are not held in memory past startup.
+// grants plus the fixed-width MAC of the credential (pwMAC). It holds no plaintext
+// password, so Verify has none in scope to compare against — a regression to a raw byte
+// compare would have to visibly re-add plaintext credential storage, which is reviewable
+// rather than invisible to every behavioural test (#266, C31 follow-up). This narrows
+// where the plaintext lives; it does not remove it — the caller's Principal slice still
+// carries the password (and it arrives via the environment, which the process retains
+// for its lifetime regardless), so this is a smaller-surface claim, not "the password is
+// gone from memory".
 type storedPrincipal struct {
 	name         string
 	defaultInbox string
