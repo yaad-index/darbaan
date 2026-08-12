@@ -91,28 +91,34 @@ func TestHeuristicFactorsAlignWithDefaultTable(t *testing.T) {
 	assert.NoError(t, ValidateAlignment(det, riskscore.DefaultConfig()))
 }
 
-// TestHeuristicFactorScopeIsOneToOne pins that each factor the v1 detector emits
-// maps to exactly ONE match scope. The operator hold card (#262) glosses a factor
-// into plain language and lets the scope distinction that matters — "in an
-// attachment" vs inline — ride on the factor's identity, which is only truthful
-// while the factor→scope map is 1:1. The day a factor is reused across two scopes,
-// that gloss would silently start lying; this guard fails loudly at that point, at
-// which time the honest fix is a real per-match scope carried through the
-// assessment rather than derived from the factor. Nothing else enforces the
-// mapping, so it is pinned here.
-func TestHeuristicFactorScopeIsOneToOne(t *testing.T) {
-	scopes := map[riskscore.Factor]map[matchScope]struct{}{}
+// TestHeuristicFactorScopeMapping pins the EXACT factor→scope pairing the v1 detector
+// uses, not merely that the mapping is 1:1. The operator hold card (#262) glosses each
+// factor into plain language and lets the scope distinction that matters — "in an
+// attachment" vs inline — ride on the factor identity: attachment_directives renders as
+// "an attachment carries instructions". That wording is truthful only while the factor
+// keeps that specific scope. A RETARGET — say attachment_directives moved to the
+// all-content scope — leaves the map 1:1, so a cardinality-only guard stays green, while
+// making the card describe an inline match as "in an attachment". Pinning the pairs
+// catches a retarget and a second scope alike, and is the invariant the #262 derivation
+// actually rests on (escalation path: #277). Nothing else enforces it.
+func TestHeuristicFactorScopeMapping(t *testing.T) {
+	want := map[riskscore.Factor]matchScope{
+		riskscore.FactorInstruction:          scopeBody,
+		riskscore.FactorSecretsRequest:       scopeAll,
+		riskscore.FactorAttachmentDirectives: scopeAttachments,
+	}
+	got := map[riskscore.Factor]matchScope{}
 	for _, r := range NewHeuristicDetector().rules {
-		if scopes[r.factor] == nil {
-			scopes[r.factor] = map[matchScope]struct{}{}
+		if prev, dup := got[r.factor]; dup {
+			assert.Failf(t, "factor matched in two scopes",
+				"factor %q maps to both scope %d and scope %d — the card derives one scope from the "+
+					"factor identity, which requires exactly one scope per factor", r.factor, prev, r.scope)
 		}
-		scopes[r.factor][r.scope] = struct{}{}
+		got[r.factor] = r.scope
 	}
-	for f, s := range scopes {
-		assert.Lenf(t, s, 1, "factor %q is matched in %d distinct scopes — the operator card derives "+
-			"scope from the factor identity and that only holds for a 1:1 map; carry a real per-match "+
-			"scope instead of letting the gloss guess", f, len(s))
-	}
+	assert.Equal(t, want, got, "factor→scope pairing changed: the hold-card gloss encodes the "+
+		"specific scope per factor, so a retarget silently makes the card lie. Update the gloss "+
+		"wording (and #277) deliberately if this mapping is meant to change.")
 }
 
 func TestHeuristicContextCancelled(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/yaad-index/darbaan/internal/assessor"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/mailtext"
 )
@@ -59,6 +60,43 @@ func TestFormatHoldFactorGloss(t *testing.T) {
 	assert.Contains(t, s, "an attachment carries instructions directed at the reader", "scope rides on the factor's gloss")
 	assert.Contains(t, s, "some_custom_factor", "an unglossed factor falls back to its raw name, never silently dropped")
 	assert.NotContains(t, s, "secrets_request", "known factor identifiers are replaced by their gloss")
+}
+
+// #262: every factor the detector can emit must have a gloss. factorGloss is keyed by
+// string to keep the scorer's constants out of the renderer, so a renamed factor would
+// miss silently and the card would revert to raw identifiers — the exact thing #262
+// removes, via the (otherwise correct) raw-name fallback. Pin the coverage.
+func TestFactorGlossCoversEveryEmittableFactor(t *testing.T) {
+	for _, f := range assessor.NewHeuristicDetector().Factors() {
+		_, ok := factorGloss[string(f)]
+		assert.Truef(t, ok, "factor %q can be emitted but has no gloss — the card would fall back "+
+			"to the raw identifier the gloss exists to replace", f)
+	}
+}
+
+// #262 (review): the truncation caveat — the one part of the stored summary that is not
+// an identifier restatement — is kept on the assessment line, and survives on the
+// DEGRADED cards. The fetch-failed path returns before any fenced-body section, so if
+// the caveat rode only on that section it would vanish exactly where the operator cannot
+// read the body themselves. Recognised via the assessor's exported constant.
+func TestFormatHoldPreservesTruncationCaveat(t *testing.T) {
+	m := inbound.Message{ID: "21", Assessment: &inbound.Assessment{
+		Disposition: inbound.AssessmentHeld, Score: 70, Band: "high",
+		Factors: []string{"secrets_request"},
+		Summary: "Detected injection-risk factors: secrets_request. Note: " + assessor.TruncationNote + ".",
+	}}
+	// fetchFailed=true, raw=nil: returns before any body section.
+	s := formatHold(m, nil, true)
+	assert.Contains(t, s, "partial content", "the truncation caveat survives on the fetch-failed card")
+	assert.Contains(t, s, "asks the reader to send or confirm a credential", "the gloss is still rendered")
+	assert.NotContains(t, s, "Detected injection-risk factors", "the identifier restatement is still dropped")
+
+	// A non-truncated assessment carries no caveat.
+	m2 := inbound.Message{ID: "22", Assessment: &inbound.Assessment{
+		Disposition: inbound.AssessmentHeld, Score: 70, Band: "high",
+		Factors: []string{"secrets_request"}, Summary: "Detected injection-risk factors: secrets_request.",
+	}}
+	assert.NotContains(t, formatHold(m2, nil, false), "partial content")
 }
 
 // A fail-safe (not-cleared) hold shows "could not be assessed" with no band/score.

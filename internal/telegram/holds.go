@@ -138,14 +138,23 @@ func holdAssessmentLine(a *inbound.Assessment) string {
 		return "could not be assessed (held fail-safe)"
 	}
 	// Band + score in operator terms; the factor identifiers ("secrets_request")
-	// named the rule that fired without saying what it means, so they are replaced
-	// by a fixed gloss (glossFactors). The stored summary is deliberately dropped:
-	// it only restated those same identifiers, adding length without information
-	// (#262). Any truncation/undecodable signal the operator needs is surfaced far
-	// more prominently in the fenced body section below, not in this one line.
+	// named the rule that fired without saying what it means, so they are replaced by
+	// a fixed gloss (glossFactors). The rest of the stored summary is dropped — it only
+	// restated those same identifiers — EXCEPT its truncation caveat, which is not a
+	// restatement but a statement of how far the score can be trusted (it was computed
+	// on partial content). That caveat is preserved here rather than left to the
+	// fenced-body section, because the degraded cards (fetch-failed, no readable body)
+	// return before that section, so this line is the only place it survives on those
+	// paths — which are exactly the cards where the operator cannot read the body to
+	// judge for themselves (#262, review). Recognised by the assessor's exported
+	// constant, not by matching the prose, so a reword of the note is a compile-time
+	// change here rather than a silent loss.
 	line := fmt.Sprintf("%s risk (%d)", a.Band, a.Score)
 	if reason := glossFactors(a.Factors); reason != "" {
 		line += " — " + reason
+	}
+	if strings.Contains(a.Summary, assessor.TruncationNote) {
+		line += " — scored on partial content (message was truncated during extraction)"
 	}
 	return line
 }
