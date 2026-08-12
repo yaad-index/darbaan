@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.17.2](https://github.com/yaad-index/darbaan/compare/v0.17.1...v0.17.2) (2026-08-11)
+
+
+### Bug Fixes
+
+* neutralize banner markers to a fixpoint so a rewrite cannot leave a live one ([#274](https://github.com/yaad-index/darbaan/issues/274)) ([#275](https://github.com/yaad-index/darbaan/issues/275)) ([5ea38aa](https://github.com/yaad-index/darbaan/commit/5ea38aad117e63908dae52079295c7ab16240f4f))
+* neutralize forged trust banners in the body instead of deleting them ([#238](https://github.com/yaad-index/darbaan/issues/238) C37) ([#273](https://github.com/yaad-index/darbaan/issues/273)) ([43467b2](https://github.com/yaad-index/darbaan/commit/43467b2b7bf0936bb09a37f67fe0ddc593234775))
+* validate serve config, escape admin client paths, surface dropped audit errors ([#238](https://github.com/yaad-index/darbaan/issues/238)) ([#269](https://github.com/yaad-index/darbaan/issues/269)) ([6e07f89](https://github.com/yaad-index/darbaan/commit/6e07f8962c76f6723f55f18383208d5afc8fb2ed))
+* widen admin-addr exposure warning to all-interface binds; demonstrate slash escaping ([#271](https://github.com/yaad-index/darbaan/issues/271)) ([#272](https://github.com/yaad-index/darbaan/issues/272)) ([d6ad353](https://github.com/yaad-index/darbaan/commit/d6ad353241dfe270a44a4894e6659cdc8aa4b88d))
+
 ## [0.17.1](https://github.com/yaad-index/darbaan/compare/v0.17.0...v0.17.1) (2026-08-11)
 
 
