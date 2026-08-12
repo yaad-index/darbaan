@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/yaad-index/darbaan/internal/assessor"
 	"github.com/yaad-index/darbaan/internal/inbound"
@@ -93,9 +94,19 @@ func TestFormatHoldPreservesTruncationCaveat(t *testing.T) {
 
 	// The caveat is anchored AHEAD of the gloss clauses, so a clamp (clampField, 300
 	// runes) or later prose growth truncates the enumerable factor detail first and never
-	// the trust qualifier (review). Pinning the order keeps that precedence from being
-	// silently reversed back to "caveat last", which would re-arm the very failure this
-	// fix removes.
+	// the trust qualifier. This is deliberately an ORDERING guard, a stronger substitute
+	// for a raw clamp-survival check: growth in the gloss clauses now sacrifices the list
+	// by construction rather than by a measured margin. It does not cover text inserted
+	// AHEAD of the caveat — remote, since the caveat sits in the first ~100 runes behind
+	// fixed strings — a residual recorded in #285.
+	//
+	// require, not assert: strings.Index returns -1 for a missing substring, and -1 is
+	// less than any real index, so a caveat that stopped rendering entirely would pass the
+	// ordering assertion vacuously. Fail HERE if it is absent, so this check is
+	// self-sufficient rather than relying on the presence assertion several lines above —
+	// which someone could later move, gate behind an early return, or split off without
+	// realising this one depends on it (#285).
+	require.Contains(t, s, "partial content", "the truncation caveat must be present for the ordering check to mean anything")
 	assert.Less(t, strings.Index(s, "partial content"), strings.Index(s, "asks the reader"),
 		"the truncation caveat must precede the factor glosses so a clamp sacrifices the list, not the caveat")
 
