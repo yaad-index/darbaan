@@ -82,7 +82,7 @@ func formatHold(m inbound.Message, raw []byte, fetchFailed bool) string {
 	// outbound side — a long line could push the message past the limit and fail every
 	// send, keeping the hold off the surface.
 	if line := holdAssessmentLine(m.Assessment); line != "" {
-		fmt.Fprintf(&b, "\nassessment: %s", clampField(line))
+		fmt.Fprintf(&b, "\nwhy: %s", clampField(line))
 	}
 	// C46: the stored body could not be read (HeldContent failed). Say so explicitly
 	// rather than degrading silently to a metadata-only card the operator can't
@@ -122,10 +122,11 @@ func formatHold(m inbound.Message, raw []byte, fetchFailed bool) string {
 const fenceOverhead = 80
 
 // holdAssessmentLine renders the injection-assessment disposition for the
-// operator (ADR 0032 change A): the system-defined band/score + factors +
-// sanitized summary, and for a fail-safe hold a plain "could not be assessed"
-// with no band/score. It draws only on the stored, system-set fields — never any
-// message content. Nil (not assessed) renders nothing.
+// operator in terms they can act on (#262): the system-defined band/score plus a
+// plain-language gloss of WHAT each flagged factor means, not the internal factor
+// identifiers. For a fail-safe hold it is a plain "could not be assessed". It
+// draws only on the stored, system-set fields (band, score, factor names) — never
+// any message content. Nil (not assessed) renders nothing.
 func holdAssessmentLine(a *inbound.Assessment) string {
 	if a == nil {
 		return ""
@@ -136,14 +137,51 @@ func holdAssessmentLine(a *inbound.Assessment) string {
 		}
 		return "could not be assessed (held fail-safe)"
 	}
-	line := fmt.Sprintf("%s risk, score %d", a.Band, a.Score)
-	if len(a.Factors) > 0 {
-		line += " [" + strings.Join(a.Factors, ", ") + "]"
-	}
-	if a.Summary != "" {
-		line += " — " + a.Summary
+	// Band + score in operator terms; the factor identifiers ("secrets_request")
+	// named the rule that fired without saying what it means, so they are replaced
+	// by a fixed gloss (glossFactors). The stored summary is deliberately dropped:
+	// it only restated those same identifiers, adding length without information
+	// (#262). Any truncation/undecodable signal the operator needs is surfaced far
+	// more prominently in the fenced body section below, not in this one line.
+	line := fmt.Sprintf("%s risk (%d)", a.Band, a.Score)
+	if reason := glossFactors(a.Factors); reason != "" {
+		line += " — " + reason
 	}
 	return line
+}
+
+// factorGloss maps each system-defined risk factor to one operator-facing clause
+// explaining what the system thinks the message is doing. The clauses carry the
+// only scope distinction that changes operator caution — content in an attachment
+// versus inline — because in v1 a factor's match scope is fixed by its rule, so
+// the scope rides on the factor's identity (an explicit per-match scope field
+// would be a detector-contract and stored-schema change, tracked separately).
+// Keyed by the string form of riskscore.Factor so the renderer needs no import of
+// the scorer's constants.
+var factorGloss = map[string]string{
+	"instruction_to_reader": "contains instructions directed at the reader",
+	"secrets_request":       "asks the reader to send or confirm a credential",
+	"hidden_directives":     "contains instructions hidden from view",
+	"attachment_directives": "an attachment carries instructions directed at the reader",
+}
+
+// glossFactors renders the flagged factors as a semicolon-joined list of
+// plain-language clauses. A factor with no gloss (e.g. one an operator added to
+// the point-table) falls back to its raw name rather than being silently dropped —
+// an unexplained flag is better than a hidden one.
+func glossFactors(factors []string) string {
+	if len(factors) == 0 {
+		return ""
+	}
+	clauses := make([]string, 0, len(factors))
+	for _, f := range factors {
+		if g, ok := factorGloss[f]; ok {
+			clauses = append(clauses, g)
+		} else {
+			clauses = append(clauses, f)
+		}
+	}
+	return strings.Join(clauses, "; ")
 }
 
 // fencedBody renders the stored message for the operator card: the DECODED text of

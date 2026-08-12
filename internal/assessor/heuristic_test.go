@@ -91,6 +91,30 @@ func TestHeuristicFactorsAlignWithDefaultTable(t *testing.T) {
 	assert.NoError(t, ValidateAlignment(det, riskscore.DefaultConfig()))
 }
 
+// TestHeuristicFactorScopeIsOneToOne pins that each factor the v1 detector emits
+// maps to exactly ONE match scope. The operator hold card (#262) glosses a factor
+// into plain language and lets the scope distinction that matters — "in an
+// attachment" vs inline — ride on the factor's identity, which is only truthful
+// while the factor→scope map is 1:1. The day a factor is reused across two scopes,
+// that gloss would silently start lying; this guard fails loudly at that point, at
+// which time the honest fix is a real per-match scope carried through the
+// assessment rather than derived from the factor. Nothing else enforces the
+// mapping, so it is pinned here.
+func TestHeuristicFactorScopeIsOneToOne(t *testing.T) {
+	scopes := map[riskscore.Factor]map[matchScope]struct{}{}
+	for _, r := range NewHeuristicDetector().rules {
+		if scopes[r.factor] == nil {
+			scopes[r.factor] = map[matchScope]struct{}{}
+		}
+		scopes[r.factor][r.scope] = struct{}{}
+	}
+	for f, s := range scopes {
+		assert.Lenf(t, s, 1, "factor %q is matched in %d distinct scopes — the operator card derives "+
+			"scope from the factor identity and that only holds for a 1:1 map; carry a real per-match "+
+			"scope instead of letting the gloss guess", f, len(s))
+	}
+}
+
 func TestHeuristicContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
