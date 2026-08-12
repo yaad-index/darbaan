@@ -37,20 +37,36 @@ func (p *Principal) CanSend(inbox string) bool {
 // the username or the password was wrong — no username-enumeration oracle
 // (ADR 0027). v1 ran a single credential; this generalizes it to a map of agents.
 type Auth struct {
-	byName map[string]Principal
+	byName map[string]storedPrincipal
+}
+
+// storedPrincipal is the internal record NewAuth keeps for each agent: the non-secret
+// grants plus the fixed-width MAC of the credential (pwMAC). The plaintext password is
+// hashed at construction and never retained, so Verify has no plaintext in scope to
+// compare against — a regression to a raw byte compare would have to visibly re-add
+// plaintext credential storage, which is reviewable, rather than being invisible to
+// every behavioural test (#266, C31 follow-up). A side benefit is that agent passwords
+// are not held in memory past startup.
+type storedPrincipal struct {
+	name         string
+	defaultInbox string
+	reads        map[string]bool
+	sends        map[string]bool
+	pwMAC        []byte
 }
 
 // dummyPassword equalizes the compare path for an unknown username.
 const dummyPassword = "x-darbaan-no-such-principal"
 
-// compareKey keys the credential comparison; it is random per process. Verify MACs
-// both the presented and the stored password to a fixed width before comparing, so
-// hmac.Equal — which, like any constant-time compare, is length-safe only for
-// equal-length inputs — never sees the raw password lengths. A keyed MAC (not a bare
-// password hash) is the right primitive here: it makes the fixed-width values
-// unpredictable, so they can't be precomputed or correlated across runs. Generated
-// once; a randomness failure is fatal, because the only fallbacks (comparing raw bytes,
-// or an unkeyed hash) would reintroduce the length oracle this closes.
+// compareKey keys the credential comparison; it is random per process. The presented
+// password is MAC'd in Verify and each stored credential is MAC'd once at construction
+// (NewAuth); the two fixed-width digests are compared, so hmac.Equal — which, like any
+// constant-time compare, is length-safe only for equal-length inputs — never sees the
+// raw password lengths. A keyed MAC (not a bare password hash) is the right primitive
+// here: it makes the fixed-width values unpredictable, so an attacker can't precompute
+// or correlate them across runs. Generated once; a randomness failure is fatal, because
+// the only fallbacks (comparing raw bytes, or an unkeyed hash) would reintroduce the
+// length oracle this closes.
 var compareKey = mustRandomKey(32)
 
 func mustRandomKey(n int) []byte {
@@ -68,12 +84,27 @@ func credMAC(s string) []byte {
 	return m.Sum(nil)
 }
 
+// dummyMAC is the fixed-width digest the not-found path compares against. Like the
+// stored credential digests it is precomputed (at package init), so an unknown username
+// does exactly the same work as a wrong password — MAC the presented password, one
+// fixed-width compare against an already-computed target — with no extra hashing on
+// either path for an attacker to time against.
+var dummyMAC = credMAC(dummyPassword)
+
 // NewAuth builds an Auth over the given principals, keyed by name. Name
 // uniqueness is validated upstream (agentcfg.Validate).
 func NewAuth(principals []Principal) *Auth {
-	byName := make(map[string]Principal, len(principals))
+	byName := make(map[string]storedPrincipal, len(principals))
 	for _, p := range principals {
-		byName[p.Name] = p
+		// Hash the credential here and keep only the digest; the plaintext p.Password
+		// is not stored (#266).
+		byName[p.Name] = storedPrincipal{
+			name:         p.Name,
+			defaultInbox: p.DefaultInbox,
+			reads:        p.Reads,
+			sends:        p.Sends,
+			pwMAC:        credMAC(p.Password),
+		}
 	}
 	return &Auth{byName: byName}
 }
@@ -91,14 +122,16 @@ func SingleAuth(name, password string) *Auth {
 // A constant-time compare is length-safe only for equal-length inputs — it
 // short-circuits on a length mismatch — so comparing raw passwords would leak the
 // stored password's length, and (against the fixed-length dummy) whether the username
-// exists at all. MAC-ing both sides first makes lengths uninformative. Every outcome
-// does identical work: MAC the presented password (before the lookup), MAC the target,
-// one fixed-width compare — so the found and not-found paths are indistinguishable, and
-// both return (nil, false), which both callers map to the same ErrAuthFailed with no
-// distinguishing log. This surface is keyed by the presented username, so unlike the
-// admin credential set (ADR 0029, which scans every credential with no early exit to
-// hide which one matched) there is no set membership to conceal here — only that a miss
-// is a miss regardless of which half was wrong (ADR 0027).
+// exists at all. MAC-ing both sides makes lengths uninformative. The stored credential's
+// MAC is computed once at construction (NewAuth) and only the presented password is
+// MAC'd here. Every outcome does identical work: MAC the presented password (before the
+// lookup), one fixed-width compare against a precomputed target MAC — the stored digest
+// for a hit, dummyMAC for a miss — so the found and not-found paths are
+// indistinguishable, and both return (nil, false), which both callers map to the same
+// ErrAuthFailed with no distinguishing log. This surface is keyed by the presented
+// username, so unlike the admin credential set (ADR 0029, which scans every credential
+// with no early exit to hide which one matched) there is no set membership to conceal
+// here — only that a miss is a miss regardless of which half was wrong (ADR 0027).
 //
 // "Identical work" describes the compare path; the map lookup ahead of it is not
 // identical (a hit compares the key it found, a miss need not), leaving a small residue
@@ -107,15 +140,22 @@ func SingleAuth(name, password string) *Auth {
 // username-keyed surface deliberately declines (there is no membership to hide).
 func (a *Auth) Verify(username, password string) (*Principal, bool) {
 	got := credMAC(password)
-	p, found := a.byName[username]
+	sp, found := a.byName[username]
 	if !found {
-		// MAC the dummy and compare too, so the not-found path does the same work as a
-		// wrong password — no username-existence timing oracle.
-		_ = hmac.Equal(got, credMAC(dummyPassword))
+		// Compare against the precomputed dummy so the not-found path does the same work
+		// as a wrong password — no username-existence timing oracle.
+		_ = hmac.Equal(got, dummyMAC)
 		return nil, false
 	}
-	if !hmac.Equal(got, credMAC(p.Password)) {
+	if !hmac.Equal(got, sp.pwMAC) {
 		return nil, false
 	}
-	return &p, true
+	// Rebuild the principal for the caller from the non-secret fields; the plaintext
+	// password was discarded at construction and no caller reads Principal.Password.
+	return &Principal{
+		Name:         sp.name,
+		DefaultInbox: sp.defaultInbox,
+		Reads:        sp.reads,
+		Sends:        sp.sends,
+	}, true
 }

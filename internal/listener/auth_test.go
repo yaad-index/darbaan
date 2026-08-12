@@ -46,6 +46,24 @@ func TestAuthPerAgent(t *testing.T) {
 	assert.False(t, ok, "agent-a's password must not authenticate agent-b")
 }
 
+// #266: the credential digest is computed at construction and the plaintext is
+// discarded, so the authenticated Principal handed back to callers carries no
+// password. This is the observable half of the structural pin — Verify has no plaintext
+// in scope to compare against, so a regression to plaintext storage would have to
+// visibly re-add it (and re-populate this field) rather than slip past every
+// behavioural test the way a raw-byte-compare revert does. The non-secret grants are
+// still propagated, so the reconstruction is checked too.
+func TestAuthReturnedPrincipalCarriesNoPlaintext(t *testing.T) {
+	a := listener.NewAuth([]listener.Principal{
+		{Name: "agent", Password: "s3cret", DefaultInbox: "in"},
+	})
+	p, ok := a.Verify("agent", "s3cret")
+	assert.True(t, ok)
+	assert.Equal(t, "agent", p.Name)
+	assert.Equal(t, "in", p.DefaultInbox, "non-secret grants are still propagated")
+	assert.Empty(t, p.Password, "the authenticated principal must not carry the plaintext credential")
+}
+
 // An empty Auth authenticates no one (no panic on the miss path).
 func TestAuthEmpty(t *testing.T) {
 	a := listener.NewAuth(nil)
