@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.18.0](https://github.com/yaad-index/darbaan/compare/v0.17.2...v0.18.0) (2026-08-12)
+
+
+### Features
+
+* render hold-card reason in operator terms ([#262](https://github.com/yaad-index/darbaan/issues/262), [#268](https://github.com/yaad-index/darbaan/issues/268)) ([#278](https://github.com/yaad-index/darbaan/issues/278)) ([00c5972](https://github.com/yaad-index/darbaan/commit/00c5972787cf160c07b7a6f0ca55dd74bab0c7e4))
+
+
+### Bug Fixes
+
+* anchor hold-card truncation caveat ahead of the gloss clauses ([#282](https://github.com/yaad-index/darbaan/issues/282)) ([#283](https://github.com/yaad-index/darbaan/issues/283)) ([ef4cdbe](https://github.com/yaad-index/darbaan/commit/ef4cdbec78880ba9d3b1dae379dd66435a9f3151))
+* store agent credential digests at construction ([#266](https://github.com/yaad-index/darbaan/issues/266)) ([#279](https://github.com/yaad-index/darbaan/issues/279)) ([95f1717](https://github.com/yaad-index/darbaan/commit/95f1717909077c4a35720cc7e8c249ec34cdf39d))
+
 ## [0.17.2](https://github.com/yaad-index/darbaan/compare/v0.17.1...v0.17.2) (2026-08-11)
 
 
