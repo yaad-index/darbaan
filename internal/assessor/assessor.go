@@ -175,6 +175,15 @@ func dedupeSort(factors []riskscore.Factor) []riskscore.Factor {
 	return out
 }
 
+// TruncationNote is the caveat summarize appends when the extraction that fed the
+// assessment hit its caps: the record's one statement that the score was computed on
+// partial content, which — unlike the factor list — says how far the verdict can be
+// trusted rather than what fired. Exported so a consumer that re-surfaces the caveat
+// (the operator hold card, #262) can recognise it in the stored summary by constant
+// rather than by matching the prose; a reword is then a compile-time change for that
+// consumer instead of a silent loss.
+const TruncationNote = "message content was truncated during extraction"
+
 // summarize renders a sanitized, factual summary. Its signature is deliberately
 // narrow — it takes only the (declared, filtered) factors and the truncation
 // flag, never the message content — so it *structurally* cannot quote message
@@ -193,7 +202,7 @@ func summarize(factors []riskscore.Factor, truncated bool) string {
 		fmt.Fprintf(&b, "Detected injection-risk factors: %s.", strings.Join(names, ", "))
 	}
 	if truncated {
-		b.WriteString(" Note: message content was truncated during extraction.")
+		b.WriteString(" Note: " + TruncationNote + ".")
 	}
 	return b.String()
 }

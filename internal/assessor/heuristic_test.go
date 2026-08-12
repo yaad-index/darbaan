@@ -91,6 +91,36 @@ func TestHeuristicFactorsAlignWithDefaultTable(t *testing.T) {
 	assert.NoError(t, ValidateAlignment(det, riskscore.DefaultConfig()))
 }
 
+// TestHeuristicFactorScopeMapping pins the EXACT factor→scope pairing the v1 detector
+// uses, not merely that the mapping is 1:1. The operator hold card (#262) glosses each
+// factor into plain language and lets the scope distinction that matters — "in an
+// attachment" vs inline — ride on the factor identity: attachment_directives renders as
+// "an attachment carries instructions". That wording is truthful only while the factor
+// keeps that specific scope. A RETARGET — say attachment_directives moved to the
+// all-content scope — leaves the map 1:1, so a cardinality-only guard stays green, while
+// making the card describe an inline match as "in an attachment". Pinning the pairs
+// catches a retarget and a second scope alike, and is the invariant the #262 derivation
+// actually rests on (escalation path: #277). Nothing else enforces it.
+func TestHeuristicFactorScopeMapping(t *testing.T) {
+	want := map[riskscore.Factor]matchScope{
+		riskscore.FactorInstruction:          scopeBody,
+		riskscore.FactorSecretsRequest:       scopeAll,
+		riskscore.FactorAttachmentDirectives: scopeAttachments,
+	}
+	got := map[riskscore.Factor]matchScope{}
+	for _, r := range NewHeuristicDetector().rules {
+		if prev, dup := got[r.factor]; dup {
+			assert.Failf(t, "factor matched in two scopes",
+				"factor %q maps to both scope %d and scope %d — the card derives one scope from the "+
+					"factor identity, which requires exactly one scope per factor", r.factor, prev, r.scope)
+		}
+		got[r.factor] = r.scope
+	}
+	assert.Equal(t, want, got, "factor→scope pairing changed: the hold-card gloss encodes the "+
+		"specific scope per factor, so a retarget silently makes the card lie. Update the gloss "+
+		"wording (and #277) deliberately if this mapping is meant to change.")
+}
+
 func TestHeuristicContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
