@@ -619,6 +619,11 @@ func (cli *CLI) buildAssessHook(inboxes []inboxcfg.Inbox, resolve inbound.Proven
 // rendered record (only the system-defined Summary crosses to a human).
 func outcomeToAssessment(o screener.Outcome) *inbound.Assessment {
 	r := o.Result
+	// Every record this version writes carries a non-nil Truncated, so nil is
+	// reserved to mean "persisted before the field existed" (the legacy cohort the
+	// renderer falls back to prose for). Take the address of a local copy, not of the
+	// value-receiver field, so the pointer is independent of o.
+	truncated := o.Truncated
 	return &inbound.Assessment{
 		Disposition: string(r.Disposition),
 		NotCleared:  r.NotCleared,
@@ -626,6 +631,7 @@ func outcomeToAssessment(o screener.Outcome) *inbound.Assessment {
 		Band:        string(r.Band),
 		Factors:     factorStrings(r.Factors),
 		Summary:     o.Summary,
+		Truncated:   &truncated,
 	}
 }
 

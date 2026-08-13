@@ -154,18 +154,34 @@ func holdAssessmentLine(a *inbound.Assessment) string {
 	// dropped "scored on partial content" is misleading — the precise failure this change
 	// exists to fix, which must not be re-armed by later prose growth (review).
 	//
-	// The caveat is recognised by the assessor's exported constant, which makes a reword
-	// of the note a compile-time change for THIS renderer. It does NOT protect records
-	// already on disk: those keep the old wording and would silently stop matching after
-	// a reword — the residue a structured flag removes (#280).
+	// The caveat is driven by the stored structured flag (a.Truncated), computed once
+	// at ingest, so the render no longer depends on the summary prose for records this
+	// version wrote — a reword of the note cannot drop it. Records persisted before the
+	// flag existed carry a nil flag; for that legacy cohort only, assessmentTruncated
+	// falls back to matching the assessor's exported constant in the stored summary, so
+	// the caveat still survives on old partial-content cards (#280).
 	line := fmt.Sprintf("%s risk (%d)", a.Band, a.Score)
-	if strings.Contains(a.Summary, assessor.TruncationNote) {
+	if assessmentTruncated(a) {
 		line += " — scored on partial content (message was truncated during extraction)"
 	}
 	if reason := glossFactors(a.Factors); reason != "" {
 		line += " — " + reason
 	}
 	return line
+}
+
+// assessmentTruncated reports whether the score was computed on partial content.
+// It reads the structured flag as authoritative when present (a record this version
+// wrote), and only falls back to the summary prose for the legacy cohort whose
+// records predate the flag (a.Truncated nil) — the state a plain bool could not
+// represent, which is why the stored field is a pointer (#280). A non-nil false is
+// therefore honoured as "not truncated" without consulting the prose, so a new
+// record never depends on the summary wording.
+func assessmentTruncated(a *inbound.Assessment) bool {
+	if a.Truncated != nil {
+		return *a.Truncated
+	}
+	return strings.Contains(a.Summary, assessor.TruncationNote)
 }
 
 // factorGloss maps each system-defined risk factor to one operator-facing clause

@@ -146,6 +146,15 @@ type Assessment struct {
 	Band        string   `json:"band,omitempty"`
 	Factors     []string `json:"factors,omitempty"`
 	Summary     string   `json:"summary,omitempty"` // sanitized, safe to surface to a human
+	// Truncated is the structured trust caveat: true means the score was computed on
+	// partial content (an extraction cap was hit). It is a pointer so the store can
+	// distinguish three states, which a plain bool cannot under encoding/json (absent
+	// and false both decode to false): nil = a record persisted before this field
+	// existed (the caveat, if any, survives only in Summary prose — see
+	// assessor.TruncationNote); non-nil = an authoritative flag this version wrote.
+	// A consumer reads the flag when present and falls back to the prose only for the
+	// nil (legacy) cohort, so new records never depend on the summary wording (#280).
+	Truncated *bool `json:"truncated,omitempty"`
 }
 
 // Assessment disposition values. These mirror the scorer's disposition strings;

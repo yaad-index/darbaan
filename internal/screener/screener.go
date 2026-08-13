@@ -39,6 +39,13 @@ type Outcome struct {
 	// when the content assessor actually ran (not on a short-circuit hold or a
 	// fail-safe not-cleared), and never contains message bytes.
 	Summary string
+	// Truncated reports that the assessed content was extracted on partial bytes
+	// (an extraction cap was hit), so the factors — and the composed score — reflect
+	// only what was read. Like Summary it is meaningful only when the assessor ran;
+	// on a short-circuit hold or a fail-safe not-cleared it stays false, since no
+	// content was scored on those paths. Carried structurally so the persisted
+	// assessment records the trust caveat as a value rather than in prose (#280).
+	Truncated bool
 }
 
 // Screener orchestrates one message's assessment.
@@ -108,8 +115,9 @@ func (s *Screener) Screen(ctx context.Context, raw []byte, trust string, recipie
 		return Outcome{Result: riskscore.NotCleared(fmt.Sprintf("held: assessment did not complete: %v", err))}
 	}
 	return Outcome{
-		Result:  s.scorer.Compose(cheap, assessment.Factors),
-		Summary: assessment.Summary,
+		Result:    s.scorer.Compose(cheap, assessment.Factors),
+		Summary:   assessment.Summary,
+		Truncated: assessment.Truncated,
 	}
 }
 

@@ -94,6 +94,19 @@ func TestSummaryTruncationNoted(t *testing.T) {
 	got, err := a.Assess(context.Background(), mailtext.Content{Truncated: true})
 	require.NoError(t, err)
 	assert.Contains(t, got.Summary, "truncated")
+	assert.True(t, got.Truncated, "the structured flag records the same fact the prose states")
+}
+
+// The structured Truncated flag tracks the extraction input, not the prose: a
+// non-truncated assessment reports false and appends no caveat, and the flag mirrors
+// the caps input so a consumer can key on it without matching the summary (#280).
+func TestAssessTruncationFlagTracksInput(t *testing.T) {
+	a, err := New(&fakeDetector{})
+	require.NoError(t, err)
+	got, err := a.Assess(context.Background(), mailtext.Content{Truncated: false})
+	require.NoError(t, err)
+	assert.False(t, got.Truncated, "a non-truncated extraction sets the flag false")
+	assert.NotContains(t, got.Summary, TruncationNote, "and appends no caveat")
 }
 
 // TestSummaryHasZeroAttackerBytes pins the hard invariant: the summary names
