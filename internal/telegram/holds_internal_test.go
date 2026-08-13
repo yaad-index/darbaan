@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -117,6 +118,68 @@ func TestFormatHoldPreservesTruncationCaveat(t *testing.T) {
 	}}
 	assert.NotContains(t, formatHold(m2, nil, false), "partial content")
 }
+
+// #280: the truncation caveat is now driven by the STRUCTURED flag, not the summary
+// prose. This pins the four states that matter, and demonstrates the mutation by its
+// effect on the EMITTED CARD (the caveat clause appears/disappears) rather than by an
+// assertion failing — a negative control is only a control if it is reachable in
+// production and shown to change the output. The factor throughout is secrets_request,
+// which the heuristic detector actually emits, so the rest of the card renders and the
+// mutation exercises a real rendering path.
+func TestFormatHoldTruncationStructuralFlag(t *testing.T) {
+	const gloss = "asks the reader to send or confirm a credential" // secrets_request, emittable
+	card := func(a *inbound.Assessment) string {
+		return formatHold(inbound.Message{ID: "280", Assessment: a}, nil, false)
+	}
+	// base is an ordinary held assessment whose summary carries NO truncation note, so
+	// any caveat on the card can only have come from the structured flag.
+	base := func() *inbound.Assessment {
+		return &inbound.Assessment{
+			Disposition: inbound.AssessmentHeld, Score: 70, Band: "high",
+			Factors: []string{"secrets_request"},
+			Summary: "Detected injection-risk factors: secrets_request.",
+		}
+	}
+
+	// (1) Structural flag true drives the caveat with no help from the prose — the whole
+	// point of #280: the render no longer depends on the summary wording.
+	withFlag := card(func() *inbound.Assessment { a := base(); a.Truncated = boolPtr(true); return a }())
+	assert.Contains(t, withFlag, "partial content", "a true flag renders the caveat though the summary has no note")
+	assert.Contains(t, withFlag, gloss)
+
+	// (2) The mutation: flip the flag true→false on an otherwise identical record. A
+	// false flag is an ordinary non-truncated assessment — reachable in production — so
+	// this control is real. The caveat clause leaves the EMITTED card; the gloss stays.
+	withoutFlag := card(func() *inbound.Assessment { a := base(); a.Truncated = boolPtr(false); return a }())
+	assert.NotContains(t, withoutFlag, "partial content", "flipping the flag to false removes the caveat from the card")
+	assert.Contains(t, withoutFlag, gloss, "only the caveat changes; the rest of the card is identical")
+	require.NotEqual(t, withFlag, withoutFlag, "the mutation must change the emitted output, not merely fail an assertion")
+
+	// (3) A non-nil false flag is AUTHORITATIVE over the prose: even a summary that still
+	// carries the note shows no caveat, so a new record never re-derives truncation from
+	// the wording the flag replaced.
+	authoritative := base()
+	authoritative.Truncated = boolPtr(false)
+	authoritative.Summary = "Detected injection-risk factors: secrets_request. Note: " + assessor.TruncationNote + "."
+	assert.NotContains(t, card(authoritative), "partial content",
+		"a false flag wins over a stray note in the summary — the prose is not consulted for new records")
+
+	// (4) The migration cohort: a record persisted BEFORE the field existed. Built from
+	// JSON with the key OMITTED — not set to false, which is a different input that would
+	// test a new record wearing an old record's name. The flag must decode to nil (the
+	// legacy state), and the caveat must survive via the summary-prose fallback — the
+	// exact partial-content cards the string match protects today, which the fix must not
+	// silently drop.
+	var legacy inbound.Assessment
+	require.NoError(t, json.Unmarshal([]byte(
+		`{"disposition":"held","score":70,"band":"high","factors":["secrets_request"],`+
+			`"summary":"Detected injection-risk factors: secrets_request. Note: `+assessor.TruncationNote+`."}`), &legacy))
+	require.Nil(t, legacy.Truncated, "an omitted key must decode to nil, or this exercises the wrong cohort")
+	assert.Contains(t, card(&legacy), "partial content",
+		"a legacy record with no flag keeps the caveat via the summary-prose fallback")
+}
+
+func boolPtr(b bool) *bool { return &b }
 
 // A fail-safe (not-cleared) hold shows "could not be assessed" with no band/score.
 func TestFormatHoldNotCleared(t *testing.T) {

@@ -32,13 +32,20 @@ import (
 	"github.com/yaad-index/darbaan/internal/riskscore"
 )
 
-// Assessment is the assessor's output: the flagged factors and a sanitized
-// summary that is safe to surface. It never carries a score — the scorer composes
-// that from these factors — and its summary never echoes raw attacker text as
-// instructions.
+// Assessment is the assessor's output: the flagged factors, a structural
+// truncation flag, and a sanitized summary that is safe to surface. It never
+// carries a score — the scorer composes that from these factors — and its summary
+// never echoes raw attacker text as instructions.
 type Assessment struct {
 	Factors []riskscore.Factor
-	Summary string
+	// Truncated reports that the extraction feeding this assessment hit its caps, so
+	// the factors were detected on partial content. It carries the same fact the
+	// summary states in prose (see TruncationNote), but as a structured value a
+	// consumer can key on without matching the sentence — the caveat then survives a
+	// reword and cannot be dropped by prose edits (#280). It is the assessor's own
+	// input (mailtext.Content.Truncated), recorded here, never re-derived downstream.
+	Truncated bool
+	Summary   string
 }
 
 // Detector detects risk factors in extracted message content. Implementations
@@ -129,7 +136,7 @@ func (a *Assessor) Assess(ctx context.Context, c mailtext.Content) (Assessment, 
 	// cross the boundary" invariant.
 	factors = a.filterDeclared(factors)
 	factors = dedupeSort(factors)
-	return Assessment{Factors: factors, Summary: summarize(factors, c.Truncated)}, nil
+	return Assessment{Factors: factors, Truncated: c.Truncated, Summary: summarize(factors, c.Truncated)}, nil
 }
 
 // filterDeclared drops any factor the detector did not declare at construction.
@@ -178,10 +185,15 @@ func dedupeSort(factors []riskscore.Factor) []riskscore.Factor {
 // TruncationNote is the caveat summarize appends when the extraction that fed the
 // assessment hit its caps: the record's one statement that the score was computed on
 // partial content, which — unlike the factor list — says how far the verdict can be
-// trusted rather than what fired. Exported so a consumer that re-surfaces the caveat
-// (the operator hold card, #262) can recognise it in the stored summary by constant
-// rather than by matching the prose; a reword is then a compile-time change for that
-// consumer instead of a silent loss.
+// trusted rather than what fired.
+//
+// The authoritative signal a consumer keys on is now the structured Truncated flag
+// (Assessment.Truncated, persisted per #280), not this prose. The constant remains
+// exported as the LEGACY recogniser: records persisted before the flag existed carry
+// no flag, and a consumer falls back to matching this constant in their stored
+// summary to recover the caveat for that cohort. It is a constant rather than a bare
+// string literal so that legacy match is a compile-time reference, and a reword stays
+// a compile-time change for the fallback instead of a silent loss.
 const TruncationNote = "message content was truncated during extraction"
 
 // summarize renders a sanitized, factual summary. Its signature is deliberately

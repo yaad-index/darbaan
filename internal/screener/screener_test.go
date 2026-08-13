@@ -87,6 +87,7 @@ func TestScreenShortCircuitSkipsAssessor(t *testing.T) {
 	assert.Equal(t, 0, det.calls, "the assessor must not run on a short-circuit")
 	assert.Equal(t, 0, extractCalls, "extraction must not run on a short-circuit")
 	assert.Empty(t, out.Summary)
+	assert.False(t, out.Truncated, "no content was scored on a short-circuit, so the flag stays false")
 }
 
 func TestScreenAgentHandled(t *testing.T) {
@@ -157,6 +158,7 @@ func TestScreenTruncatedButDecodableProceeds(t *testing.T) {
 	out := s.Screen(context.Background(), []byte("raw"), provenance.TrustTrusted, riskscore.RecipientTo)
 	assert.Equal(t, 1, det.calls, "a benign cap truncation still runs the assessor")
 	assert.False(t, out.Result.NotCleared, "a cap hit is not a fail-safe hold")
+	assert.True(t, out.Truncated, "the outcome carries the structured truncation flag when the assessor scored partial content")
 }
 
 func TestScreenAssessorErrorIsNotCleared(t *testing.T) {
