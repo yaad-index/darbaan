@@ -621,8 +621,9 @@ func outcomeToAssessment(o screener.Outcome) *inbound.Assessment {
 	r := o.Result
 	// Every record this version writes carries a non-nil Truncated, so nil is
 	// reserved to mean "persisted before the field existed" (the legacy cohort the
-	// renderer falls back to prose for). Take the address of a local copy, not of the
-	// value-receiver field, so the pointer is independent of o.
+	// renderer falls back to prose for). The local is just the idiom for taking a
+	// pointer to a value; o is a by-value parameter, so &o.Truncated would be equally
+	// caller-independent — the copy is not needed for that.
 	truncated := o.Truncated
 	return &inbound.Assessment{
 		Disposition: string(r.Disposition),
