@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.18.1](https://github.com/yaad-index/darbaan/compare/v0.18.0...v0.18.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* harden hold-card caveat order-guard against a vacuous pass ([#285](https://github.com/yaad-index/darbaan/issues/285)) ([#286](https://github.com/yaad-index/darbaan/issues/286)) ([a8823e5](https://github.com/yaad-index/darbaan/commit/a8823e5d4a37a2ed97440ea71ec53ac008edacfd))
+* persist a structured truncation flag on the assessment ([#280](https://github.com/yaad-index/darbaan/issues/280)) ([#288](https://github.com/yaad-index/darbaan/issues/288)) ([97f65ed](https://github.com/yaad-index/darbaan/commit/97f65ed44a915628e96314de80beaa902a514db2))
+
 ## [0.18.0](https://github.com/yaad-index/darbaan/compare/v0.17.2...v0.18.0) (2026-08-12)
 
 
