@@ -66,20 +66,28 @@ this is a consequence of the transport rather than an implementation detail. `Ve
 walks the whole chain inside one `db.View` today, and that is safe only because it
 runs offline with nothing appending. In the live process the same single-transaction
 walk would have a **client-paced lifetime**: the read transaction stays open as long
-as the HTTP client is consuming. bbolt cannot reclaim pages a read transaction is
-using, and its own transaction documentation warns that a long-running read
-transaction can make the database grow quickly. So a slow or stalled reader would
-make the audit database of a *running* gate grow — a read causing unbounded growth.
+as the HTTP client is consuming. That opens two distinct failure modes, and they
+differ in severity:
 
-Therefore the decision is to **bound the transaction, not the response**: each page
-is served from a fresh, short `db.View`. The page token carries a **resume
-position** — the last sequence number emitted — not a live cursor object; a bbolt
-cursor's keys and values are valid only inside their originating transaction, so each
-page re-derives its position with a `Seek` to the next key rather than resuming a
-saved cursor. Streaming becomes a property of the paged HTTP response, never of a
-single database snapshot; no read transaction outlives one page (which also keeps a
-read from interacting with the writer's periodic memory-map maintenance). Two costs
-are accepted out loud:
+- **Growth (disk).** bbolt cannot reclaim pages a read transaction is using — its
+  transaction documentation warns that a long-running read transaction can make the
+  database grow quickly. A slow reader would grow the audit database of a *running*
+  gate; a read causing unbounded growth.
+- **Writer stall (liveness), the more serious mode.** A long-lived read transaction
+  can also stall the writer's periodic memory-map maintenance, so an unbounded read
+  can block *appends*. This is not a tidiness cost — it is the gate losing the ability
+  to audit while a reader is open. A reviewer who saw only the growth cost might
+  reasonably decide to accept it; the liveness cost is what makes bounding
+  non-optional.
+
+Therefore the decision is to **bound the transaction, not the response**, which
+closes both modes at once: each page is served from a fresh, short `db.View`. The
+page token carries a **resume position** — the last sequence number emitted — not a
+live cursor object; a bbolt cursor's keys and values are valid only inside their
+originating transaction, so each page re-derives its position with a `Seek` to the
+next key rather than resuming a saved cursor. Streaming becomes a property of the
+paged HTTP response, never of a single database snapshot; no read transaction
+outlives one page. Two costs are accepted out loud:
 
 - The enumeration is **no longer a single point-in-time snapshot**. Because the log
   is append-only and seq-ordered, a seq-keyed cursor still guarantees no prior entry
