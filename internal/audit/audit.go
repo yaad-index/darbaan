@@ -70,6 +70,30 @@ type AuditLog interface {
 	Close() error
 }
 
+// Reader is the read capability over an audit log, kept distinct from AuditLog
+// (append/verify/close) on purpose. A backend that keeps a readable chain
+// implements it; the null backend does not — so a caller can tell "audit is
+// disabled" (a nil log, or a backend that is not a Reader) from "this backend
+// cannot list" and report the two as the different operator states they are
+// (ADR 0033 §4).
+type Reader interface {
+	// Page returns up to limit entries whose Seq is strictly greater than after,
+	// in ascending Seq order, read inside a single short-lived transaction that
+	// does not outlive the call. A slice shorter than limit means the end of the
+	// log was reached; after=0 starts from the first entry. limit <= 0 returns
+	// nothing.
+	//
+	// Paging is by resume position (the caller passes back the last Seq it saw),
+	// never a live cursor: a bbolt cursor's keys are valid only within their
+	// transaction, and — the reason the primitive is paged at all — a single walk
+	// held open at a client's pace would keep a read transaction alive in the
+	// running process, whose pages the writer cannot reclaim and whose lock a
+	// growing append blocks, stalling every subsequent decision write (ADR 0033
+	// §1a). One short View per page keeps the transaction bounded regardless of how
+	// slowly the caller consumes.
+	Page(after uint64, limit int) ([]Entry, error)
+}
+
 // Factory constructs an AuditLog of a given type from a path (ignored by sinks
 // that need no storage, e.g. null).
 type Factory func(path string) (AuditLog, error)

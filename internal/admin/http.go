@@ -6,11 +6,14 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/yaad-index/darbaan/internal/admincfg"
+	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
@@ -101,6 +104,10 @@ func NewServer(addr, token string, svc *Service) (*Server, error) {
 
 	// Per-account inbound-sync health (#195): is every fronted account syncing?
 	s.register(mux, "GET /sync-status", s.handleSyncStatus)
+
+	// Read the audit log's history live, while serve runs (ADR 0033). Paged so no
+	// read transaction outlives one page; audit:read is its own scope.
+	s.register(mux, "GET /audit", s.handleAuditList)
 
 	s.http = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
@@ -389,6 +396,79 @@ func writeAction(w http.ResponseWriter, out Outcome, err error) {
 	default:
 		writeJSON(w, http.StatusOK, out)
 	}
+}
+
+// auditListResponse is one page of the audit listing (ADR 0033): the entries plus
+// the resume position for the next page (omitted/0 when the log was exhausted).
+type auditListResponse struct {
+	Entries []audit.Entry `json:"entries"`
+	Next    uint64        `json:"next,omitempty"`
+}
+
+// auditListDefaultLimit applies when the caller gives no limit. The upper cap
+// (auditListMaxLimit) lives with the allocation in AuditList so the bound cannot
+// be lost by a caller that skips this handler's clamp.
+const auditListDefaultLimit = 100
+
+func (s *Server) handleAuditList(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	var after uint64
+	if v := q.Get("after"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid after (want a sequence number): %w", err))
+			return
+		}
+		after = n
+	}
+
+	limit := auditListDefaultLimit
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeErr(w, http.StatusBadRequest, errors.New("invalid limit (want a positive integer)"))
+			return
+		}
+		limit = min(n, auditListMaxLimit)
+	}
+
+	f := AuditFilter{Agent: q.Get("agent"), MessageID: q.Get("message_id")}
+	if v := q.Get("since"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid since (want RFC3339): %w", err))
+			return
+		}
+		f.Since = t
+	}
+	if v := q.Get("until"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid until (want RFC3339): %w", err))
+			return
+		}
+		f.Until = t
+	}
+
+	entries, next, err := s.svc.AuditList(f, after, limit)
+	switch {
+	case errors.Is(err, ErrAuditDisabled):
+		// Distinct typed codes, not one status: a client tells audit-off from
+		// backend-cannot-list positively (ADR 0033 §4).
+		writeErrWithCode(w, http.StatusNotFound, err, "audit_disabled")
+		return
+	case errors.Is(err, ErrAuditNotListable):
+		writeErrWithCode(w, http.StatusNotImplemented, err, "audit_not_listable")
+		return
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if entries == nil {
+		entries = []audit.Entry{}
+	}
+	writeJSON(w, http.StatusOK, auditListResponse{Entries: entries, Next: next})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

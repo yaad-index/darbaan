@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1148,7 +1149,91 @@ func (*VersionCmd) Run() error {
 // AuditCmd groups audit-log inspection subcommands. They open the audit database
 // directly (no running serve), so they operate on the on-disk chain.
 type AuditCmd struct {
+	Ls     AuditLsCmd     `cmd:"" help:"List audit log entries live via the running serve's admin API (ADR 0033)."`
 	Verify AuditVerifyCmd `cmd:"" help:"Verify the audit log's hash chain and sequence integrity (ADR 0011). Non-zero exit on any tampering or truncation."`
+}
+
+// AuditLsCmd lists audit entries through the running serve's admin API (ADR 0033),
+// not by opening the database — a read while serve holds the write lock would have
+// to stop the gate, and the incident case this exists for is a live one. It is a
+// thin admin-API client like the queue subcommands, and needs audit:read.
+type AuditLsCmd struct {
+	After     uint64 `name:"after" help:"Resume strictly after this sequence number (for paging)."`
+	Limit     int    `name:"limit" default:"100" help:"Maximum entries to return (the server caps a page at 1000)."`
+	Agent     string `name:"agent" help:"Only entries acted by this agent."`
+	MessageID string `name:"message-id" help:"Only entries for this message id."`
+	Since     string `name:"since" help:"Only entries at or after this time (RFC3339)."`
+	Until     string `name:"until" help:"Only entries before this time (RFC3339, half-open)."`
+	JSON      bool   `name:"json" help:"Emit line-delimited JSON entries instead of a table."`
+}
+
+func (c *AuditLsCmd) Run(cli *CLI) error {
+	client, err := cli.adminClient()
+	if err != nil {
+		return err
+	}
+	f := admin.AuditFilter{Agent: c.Agent, MessageID: c.MessageID}
+	if c.Since != "" {
+		t, err := time.Parse(time.RFC3339, c.Since)
+		if err != nil {
+			return fmt.Errorf("invalid --since (want RFC3339): %w", err)
+		}
+		f.Since = t
+	}
+	if c.Until != "" {
+		t, err := time.Parse(time.RFC3339, c.Until)
+		if err != nil {
+			return fmt.Errorf("invalid --until (want RFC3339): %w", err)
+		}
+		f.Until = t
+	}
+
+	entries, next, err := client.AuditList(context.Background(), f, c.After, c.Limit)
+	switch {
+	case errors.Is(err, admin.ErrAuditDisabled):
+		// Audit-off and backend-cannot-list are kept distinct on the way out too
+		// (ADR 0033 §4): each is a different operator state, not one generic empty.
+		fmt.Fprintln(os.Stderr, "audit is disabled (no audit backend configured); nothing to read")
+		return nil
+	case errors.Is(err, admin.ErrAuditNotListable):
+		fmt.Fprintln(os.Stderr, "the configured audit backend cannot list entries")
+		return nil
+	case err != nil:
+		return err
+	}
+
+	if len(entries) == 0 {
+		fmt.Fprintln(os.Stderr, "no audit entries match")
+		return nil
+	}
+
+	if c.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		for _, e := range entries {
+			if err := enc.Encode(e); err != nil {
+				return err
+			}
+		}
+	} else {
+		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		_, _ = fmt.Fprintln(w, "SEQ\tTIME\tEVENT\tAGENT\tINBOX\tACTOR\tMESSAGE_ID\tDETAIL")
+		for _, e := range entries {
+			r := e.Record
+			// Detail can carry upstream response text; sanitize the free-text fields
+			// before the operator's terminal like the queue table does (C22).
+			_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				e.Seq, e.Time, sanitizeField(r.Event), sanitizeField(r.Agent), sanitizeField(r.Inbox),
+				sanitizeField(r.Actor), sanitizeField(r.MessageID), truncate(sanitizeField(r.Detail), 60))
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if next > 0 {
+		fmt.Fprintf(os.Stderr, "more entries; resume with --after %d\n", next)
+	}
+	return nil
 }
 
 // AuditVerifyCmd runs the audit log's integrity check (ADR 0011, C15): the

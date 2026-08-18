@@ -8,7 +8,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	"time"
 
+	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
@@ -70,6 +73,71 @@ func (c *Client) List(ctx context.Context) ([]sluice.Meta, error) {
 		return nil, err
 	}
 	return metas, nil
+}
+
+// AuditList reads one page of the audit log's history (ADR 0033), filtered and
+// resuming strictly after `after`. It returns the entries and the next resume
+// position (0 when the log was exhausted). The two no-read states come back as the
+// typed ErrAuditDisabled / ErrAuditNotListable, so a caller can tell "audit off"
+// from "backend cannot list" positively rather than from the HTTP status.
+func (c *Client) AuditList(ctx context.Context, f AuditFilter, after uint64, limit int) ([]audit.Entry, uint64, error) {
+	q := url.Values{}
+	if after > 0 {
+		q.Set("after", strconv.FormatUint(after, 10))
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if f.Agent != "" {
+		q.Set("agent", f.Agent)
+	}
+	if f.MessageID != "" {
+		q.Set("message_id", f.MessageID)
+	}
+	if !f.Since.IsZero() {
+		q.Set("since", f.Since.Format(time.RFC3339))
+	}
+	if !f.Until.IsZero() {
+		q.Set("until", f.Until.Format(time.RFC3339))
+	}
+	path := "/audit"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	resp, err := c.request(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, 0, auditErrorFrom(resp)
+	}
+	var out auditListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, 0, err
+	}
+	return out.Entries, out.Next, nil
+}
+
+// auditErrorFrom maps the audit listing's typed error codes back to the sentinel
+// errors, so `errors.Is` works across the wire; anything else falls back to the
+// generic message like errorFrom.
+func auditErrorFrom(resp *http.Response) error {
+	var e struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&e)
+	switch e.Code {
+	case "audit_disabled":
+		return ErrAuditDisabled
+	case "audit_not_listable":
+		return ErrAuditNotListable
+	}
+	if e.Error == "" {
+		e.Error = resp.Status
+	}
+	return fmt.Errorf("admin: %s", e.Error)
 }
 
 // Show returns the raw RFC 822 of a held message.
