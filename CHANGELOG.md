@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.19.0](https://github.com/yaad-index/darbaan/compare/v0.18.1...v0.19.0) (2026-08-18)
+
+
+### Features
+
+* **admin:** audit ls — read the audit log live over the admin API ([#295](https://github.com/yaad-index/darbaan/issues/295)) ([c66df1d](https://github.com/yaad-index/darbaan/commit/c66df1d40fbcdf2519e632d24c6bbfa6e54d93c6)), closes [#292](https://github.com/yaad-index/darbaan/issues/292)
+
+
+### Bug Fixes
+
+* log an outbound message arriving, not only its decisions ([#293](https://github.com/yaad-index/darbaan/issues/293)) ([1bab062](https://github.com/yaad-index/darbaan/commit/1bab062e702d304ac8f7816a14f507afa31be4b6))
+
 ## [0.18.1](https://github.com/yaad-index/darbaan/compare/v0.18.0...v0.18.1) (2026-08-13)
 
 
