@@ -73,12 +73,19 @@ differ in severity:
   transaction documentation warns that a long-running read transaction can make the
   database grow quickly. A slow reader would grow the audit database of a *running*
   gate; a read causing unbounded growth.
-- **Writer stall (liveness), the more serious mode.** A long-lived read transaction
-  can also stall the writer's periodic memory-map maintenance, so an unbounded read
-  can block *appends*. This is not a tidiness cost — it is the gate losing the ability
-  to audit while a reader is open. A reviewer who saw only the growth cost might
-  reasonably decide to accept it; the liveness cost is what makes bounding
-  non-optional.
+- **Writer stall (liveness), the more serious mode.** A read transaction holds
+  bbolt's mmap read-lock for its entire open lifetime, and a write `Commit` that has
+  to grow the file takes that same lock exclusively to remap. So an open live read
+  blocks the next audit append that needs to grow — and because bbolt serializes all
+  writes behind a single writer lock, that one blocked `Commit` queues *every*
+  subsequent write to the audit database process-wide (enqueue, verdicts,
+  send-attempt records), not only the request that triggered the growth. bbolt's
+  open-timeout guards the initial file lock, not this in-process contention, so a
+  stalled HTTP client can stall message-decision writes **indefinitely**, not merely
+  for the length of one slow response. This is not a same-goroutine footgun that the
+  separate request goroutine happens to avoid; it is a direct, cross-request liveness
+  hazard for exactly the read pattern proposed here — and it is what makes bounding
+  the transaction non-optional rather than merely tidy.
 
 Therefore the decision is to **bound the transaction, not the response**, which
 closes both modes at once: each page is served from a fresh, short `db.View`. The
