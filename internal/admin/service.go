@@ -375,6 +375,96 @@ func (s *Service) auditHold(ctx context.Context, m inbound.Message, decision str
 	}
 }
 
+// ErrAuditDisabled and ErrAuditNotListable are the two distinct no-read states an
+// audit listing can hit (ADR 0033 §4). They must not collapse into one message:
+// "audit is off" and "this backend cannot enumerate" send an operator to different
+// places, and conflating them reproduces the absence-reads-as-a-different-absence
+// failure the read path exists to end.
+var (
+	ErrAuditDisabled    = errors.New("admin: audit is disabled (no audit backend configured)")
+	ErrAuditNotListable = errors.New("admin: the configured audit backend cannot list entries")
+)
+
+// AuditFilter narrows an audit listing. A zero value matches every entry; each set
+// field is ANDed. The time bounds are half-open [Since, Until).
+type AuditFilter struct {
+	Agent     string
+	MessageID string
+	Since     time.Time
+	Until     time.Time
+}
+
+func (f AuditFilter) match(e audit.Entry) bool {
+	if f.Agent != "" && e.Record.Agent != f.Agent {
+		return false
+	}
+	if f.MessageID != "" && e.Record.MessageID != f.MessageID {
+		return false
+	}
+	if !f.Since.IsZero() || !f.Until.IsZero() {
+		t, err := time.Parse(time.RFC3339Nano, e.Time)
+		if err != nil {
+			// An unparseable timestamp cannot be shown to satisfy a time bound, so a
+			// time-filtered query excludes it rather than guess.
+			return false
+		}
+		if !f.Since.IsZero() && t.Before(f.Since) {
+			return false
+		}
+		if !f.Until.IsZero() && !t.Before(f.Until) {
+			return false
+		}
+	}
+	return true
+}
+
+// auditScanBatch is how many raw entries one short read transaction pulls per page.
+// It bounds the transaction (ADR 0033 §1a) independently of how many the filter
+// keeps: a narrow filter pages through more batches, never one long-held read.
+const auditScanBatch = 256
+
+// AuditList returns up to limit audit entries matching f, with Seq greater than
+// after, in ascending Seq order, plus the resume position for the next page (0 when
+// the log was exhausted). It reads through the backend's paged Reader — one short
+// transaction per batch — so a slow consumer cannot hold a read open against the
+// running writer (ADR 0033 §1a). A backend with no readable chain surfaces as the
+// distinct ErrAuditDisabled / ErrAuditNotListable states, never one generic error.
+func (s *Service) AuditList(f AuditFilter, after uint64, limit int) ([]audit.Entry, uint64, error) {
+	if s.audit == nil {
+		return nil, 0, ErrAuditDisabled
+	}
+	r, ok := s.audit.(audit.Reader)
+	if !ok {
+		return nil, 0, ErrAuditNotListable
+	}
+	if limit <= 0 {
+		return nil, 0, nil
+	}
+	out := make([]audit.Entry, 0, limit)
+	cursor := after
+	for {
+		page, err := r.Page(cursor, auditScanBatch)
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, e := range page {
+			cursor = e.Seq
+			if !f.match(e) {
+				continue
+			}
+			out = append(out, e)
+			if len(out) == limit {
+				// A full page; more entries may follow, so hand back the resume cursor.
+				return out, cursor, nil
+			}
+		}
+		if len(page) < auditScanBatch {
+			// The batch was short, so the log is exhausted: no more pages.
+			return out, 0, nil
+		}
+	}
+}
+
 // Outcome is the result of an approve/reject action. Status is the committed
 // state (the source of truth); Warn carries a non-fatal downstream issue (a send
 // or bounce-delivery failure) without claiming the verdict itself failed.

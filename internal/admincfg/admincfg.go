@@ -38,6 +38,12 @@ const (
 	ScopeReconcileRelease = "reconcile:release"
 	ScopeInboxesRead      = "inboxes:read"
 	ScopeSyncRead         = "sync:read"
+	// ScopeAuditRead grants reading the audit log's history (ADR 0033). It is its
+	// own capability, deliberately not folded into queue:read: the audit log is the
+	// record of who-did-what across the deployment's life — a strictly larger
+	// disclosure than the live queue — so a client granted queue:read to triage the
+	// queue does not thereby inherit the whole history.
+	ScopeAuditRead = "audit:read"
 )
 
 // RouteScopes is the authoritative route→required-scope map (ADR 0029): every
@@ -62,6 +68,7 @@ var RouteScopes = map[string]string{
 	"POST /reconcile/{inbox}/release":     ScopeReconcileRelease,
 	"GET /inboxes":                        ScopeInboxesRead,
 	"GET /sync-status":                    ScopeSyncRead,
+	"GET /audit":                          ScopeAuditRead,
 }
 
 // allScopes is the set of valid scopes, derived from the RouteScopes values so it
