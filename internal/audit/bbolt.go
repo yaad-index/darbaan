@@ -131,6 +131,42 @@ func (l *bboltLog) Verify() error {
 	})
 }
 
+// Page implements Reader: it returns up to limit entries with Seq strictly
+// greater than after, ascending, inside one short-lived View. The transaction is
+// bounded to this call and never spans the caller's consumption — a growing
+// append must not wait on a client-paced reader (ADR 0033 §1a). Filtering is the
+// caller's job; a narrow filter simply pages through more short Views (it walks
+// the whole chain, but never holds one transaction open across the walk).
+func (l *bboltLog) Page(after uint64, limit int) ([]Entry, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	out := make([]Entry, 0, limit)
+	err := l.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketName)
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		// seqkeys are fixed-width big-endian, so key order is Seq order. Seeking to
+		// after+1 lands on the first entry with Seq > after; after=0 seeks to 1, the
+		// first entry (NextSequence issues 1 first).
+		k, v := c.Seek(seqkey.Encode(after + 1))
+		for ; k != nil && len(out) < limit; k, v = c.Next() {
+			var e Entry
+			if err := json.Unmarshal(v, &e); err != nil {
+				return fmt.Errorf("audit: decode entry at seq %d: %w", seqkey.Decode(k), err)
+			}
+			out = append(out, e)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (l *bboltLog) Close() error { return l.db.Close() }
 
 // OpenReadOnly opens an existing bbolt audit log read-only for offline integrity
