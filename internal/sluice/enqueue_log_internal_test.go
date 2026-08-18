@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -41,15 +42,26 @@ func TestEnqueueLogsArrival(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	got := buf.String()
-	require.Contains(t, got, "outbound message held")
-	require.Contains(t, got, "message_id="+msg.ID)
-	require.Contains(t, got, "agent=agent-x")
-	require.Contains(t, got, "inbox=inbox-y")
-	require.Contains(t, got, "rcpt_count=2")
+	// Scope every assertion to the arrival line itself, not to the whole
+	// buffer. Buffer-wide Contains would still pass if the fields drifted onto
+	// separate log records — the test would be satisfied while the thing it
+	// exists to protect, one line an operator can grep, had broken.
+	var line string
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(l, "outbound message held") {
+			require.Empty(t, line, "expected exactly one arrival line")
+			line = l
+		}
+	}
+	require.NotEmpty(t, line, "no arrival line logged")
+
+	require.Contains(t, line, "message_id="+msg.ID)
+	require.Contains(t, line, "agent=agent-x")
+	require.Contains(t, line, "inbox=inbox-y")
+	require.Contains(t, line, "rcpt_count=2")
 
 	// Recipients are counted, never named: the process log is the widest-read
 	// surface here and an address is the one field with no operational use.
-	require.NotContains(t, got, "one@example.test")
-	require.NotContains(t, got, "two@example.test")
+	require.NotContains(t, buf.String(), "one@example.test")
+	require.NotContains(t, buf.String(), "two@example.test")
 }
