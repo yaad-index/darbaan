@@ -85,7 +85,13 @@ differ in severity:
   for the length of one slow response. This is not a same-goroutine footgun that the
   separate request goroutine happens to avoid; it is a direct, cross-request liveness
   hazard for exactly the read pattern proposed here — and it is what makes bounding
-  the transaction non-optional rather than merely tidy.
+  the transaction non-optional rather than merely tidy. The consequence of that stall
+  is the gate ceasing to *decide*, not audit records merely arriving late: the append
+  runs synchronously inside the decision call (enqueue, reject, the send-attempt path)
+  with no goroutine and no timeout, and its `best-effort` label covers only a
+  *failing* append — the error is logged and swallowed — never a *blocking* one. A
+  stalled append holds the decision open. The `best-effort` comment must not be read
+  as having already weighed and accepted the blocking case; it has not.
 
 Therefore the decision is to **bound the transaction, not the response**, which
 closes both modes at once: each page is served from a fresh, short `db.View`. The
