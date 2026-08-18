@@ -430,10 +430,7 @@ func (s *Server) handleAuditList(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, errors.New("invalid limit (want a positive integer)"))
 			return
 		}
-		if n > auditListMaxLimit {
-			n = auditListMaxLimit
-		}
-		limit = n
+		limit = min(n, auditListMaxLimit)
 	}
 
 	f := AuditFilter{Agent: q.Get("agent"), MessageID: q.Get("message_id")}

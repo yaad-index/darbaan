@@ -447,9 +447,10 @@ func (s *Service) AuditList(f AuditFilter, after uint64, limit int) ([]audit.Ent
 	if limit <= 0 {
 		return nil, 0, nil
 	}
-	if limit > auditListMaxLimit {
-		limit = auditListMaxLimit
-	}
+	// min() rather than an if-reassignment: same bound, but the form CodeQL's
+	// allocation-size dataflow recognizes as a sanitizer, so the traced bound also
+	// clears the check honestly.
+	limit = min(limit, auditListMaxLimit)
 	out := make([]audit.Entry, 0, limit)
 	cursor := after
 	for {
