@@ -447,11 +447,15 @@ func (s *Service) AuditList(f AuditFilter, after uint64, limit int) ([]audit.Ent
 	if limit <= 0 {
 		return nil, 0, nil
 	}
-	// min() rather than an if-reassignment: same bound, but the form CodeQL's
-	// allocation-size dataflow recognizes as a sanitizer, so the traced bound also
-	// clears the check honestly.
+	// Cap how many one call returns — the bound lives beside the code, not only at
+	// the HTTP caller, since AuditList is exported.
 	limit = min(limit, auditListMaxLimit)
-	out := make([]audit.Entry, 0, limit)
+	// Seed the result capacity from a constant, not the request-derived limit: the
+	// capacity is a pure append-growth hint (nothing reads it back), so this removes
+	// the input→allocation dataflow entirely rather than trusting a static analyzer
+	// to recognize a clamp as a sanitizer. A property of the code cannot regress when
+	// the analyzer's model changes.
+	out := make([]audit.Entry, 0, auditScanBatch)
 	cursor := after
 	for {
 		page, err := r.Page(cursor, auditScanBatch)
