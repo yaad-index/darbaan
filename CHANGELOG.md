@@ -7,6 +7,11 @@
 
 * **admin:** audit ls — read the audit log live over the admin API ([#295](https://github.com/yaad-index/darbaan/issues/295)) ([c66df1d](https://github.com/yaad-index/darbaan/commit/c66df1d40fbcdf2519e632d24c6bbfa6e54d93c6)), closes [#292](https://github.com/yaad-index/darbaan/issues/292)
 
+
+### Bug Fixes
+
+* log an outbound message arriving, not only its decisions ([#293](https://github.com/yaad-index/darbaan/issues/293)) ([1bab062](https://github.com/yaad-index/darbaan/commit/1bab062))
+
 ## [0.18.1](https://github.com/yaad-index/darbaan/compare/v0.18.0...v0.18.1) (2026-08-13)
 
 
