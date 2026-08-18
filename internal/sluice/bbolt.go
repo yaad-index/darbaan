@@ -148,6 +148,13 @@ func (s *bboltStore) Enqueue(sub Submission) (Message, error) {
 		return Message{}, fmt.Errorf("sluice: enqueue: %w", err)
 	}
 	s.writeAudit(audit.Record{Event: "enqueue", Agent: msg.Agent, Inbox: msg.Inbox, MessageID: msg.ID})
+	// Arrivals are logged as well as audited. Without this the process log is
+	// asymmetric: every decision transition logs, nothing logs a message
+	// arriving, so the log shows decisions on messages it never saw arrive. An
+	// operator reading it concludes the messages appeared from nowhere, and an
+	// absence in the log reads as "nothing happened" rather than "this path
+	// does not log". Recipients are deliberately counted, not named.
+	slog.Info("outbound message held", "message_id", msg.ID, "agent", msg.Agent, "inbox", msg.Inbox, "rcpt_count", len(msg.Rcpt))
 	return msg, nil
 }
 
