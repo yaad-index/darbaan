@@ -56,8 +56,41 @@ Add a read capability to the audit backend and expose it as an admin-API route
 queue listing and `sync-status`. It reads the **in-process** audit handle `serve`
 already holds, so it answers while the gate runs. The reader is an enumeration over
 the hash chain in sequence order (the same walk `Verify` performs, without the
-integrity assertions), streamed so a large log is not materialized at once;
-filtering (by message id, agent, time range) and paging sit on top of it.
+integrity assertions); filtering (by message id, agent, time range) and paging sit
+on top of it.
+
+### 1a. Bound the read transaction, not the HTTP response
+
+Moving the enumeration into the live process changes what "stream it" may mean, and
+this is a consequence of the transport rather than an implementation detail. `Verify`
+walks the whole chain inside one `db.View` today, and that is safe only because it
+runs offline with nothing appending. In the live process the same single-transaction
+walk would have a **client-paced lifetime**: the read transaction stays open as long
+as the HTTP client is consuming. bbolt cannot reclaim pages a read transaction is
+using, and its own transaction documentation warns that a long-running read
+transaction can make the database grow quickly. So a slow or stalled reader would
+make the audit database of a *running* gate grow — a read causing unbounded growth.
+
+Therefore the decision is to **bound the transaction, not the response**: each page
+is served from a fresh, short `db.View`. The page token carries a **resume
+position** — the last sequence number emitted — not a live cursor object; a bbolt
+cursor's keys and values are valid only inside their originating transaction, so each
+page re-derives its position with a `Seek` to the next key rather than resuming a
+saved cursor. Streaming becomes a property of the paged HTTP response, never of a
+single database snapshot; no read transaction outlives one page (which also keeps a
+read from interacting with the writer's periodic memory-map maintenance). Two costs
+are accepted out loud:
+
+- The enumeration is **no longer a single point-in-time snapshot**. Because the log
+  is append-only and seq-ordered, a seq-keyed cursor still guarantees no prior entry
+  is missed or duplicated across pages; the only effect is that entries appended
+  *during* a multi-page walk may or may not appear, which is acceptable for reading
+  history.
+- A narrow filter **still walks the whole chain** — filtering happens over the
+  enumeration, it does not avoid the scan. This stays a latency property, not a
+  scan-avoidance one. (The offline path, if ever built, would not face the growth
+  concern and could use the single `db.View` walk — the growth risk is specific to
+  the live transport.)
 
 `verify` is untouched. Integrity checking wants a quiescent file, so it keeps its
 own offline command and its `OpenReadOnly` path. Only *listing* moves to the live
@@ -128,13 +161,18 @@ two it hit.
 - The scope vocabulary grows by one (`audit:read`), and least privilege is preserved:
   historical-record access is grantable and revocable independently of live-queue
   triage.
-- **Known limitation, recorded here as a trade-off rather than found later:** the
-  live path cannot answer a post-mortem when `serve` itself is wedged or down —
-  which can be exactly when an operator most wants the log. v1 accepts this. The
-  offline read (`verify`'s `OpenReadOnly` reused with the same enumeration) remains
-  available as a deliberate, separate serve-down path if and when we choose to expose
-  it; it is not built in v1. Naming it in the decision keeps it a known consequence
-  of choosing the live transport, not a defect discovered after shipping.
+- **Known limitation, recorded here as a trade-off rather than found later:** in v1
+  there is **no offline enumeration at all** — not merely an unexposed one. `verify`
+  can prove integrity but cannot list, and the new enumeration is reachable only
+  through the live admin API. So when `serve` itself is wedged or down — which can be
+  exactly when an operator most wants the log — the audit log is unreadable again,
+  the very condition #292 set out to end, now narrowed to the outage case. v1 accepts
+  this. Closing it later is cheap and additive: the same enumeration primitive over
+  `verify`'s `OpenReadOnly` gives a separate offline command, and offline it does not
+  face the growth concern of §1a (nothing is appending), so it can use the simple
+  single-`View` walk. It is deliberately deferred, not designed out. Naming the gap
+  in the decision keeps it a known consequence of shipping the live path first, not a
+  defect discovered after.
 - No redaction means the admin API's audit output carries agent/inbox/detail —
   consistent with the message bodies the same surface already serves. An operator who
   moves an excerpt *outside* the gate (a ticket, an issue) should treat it with the
