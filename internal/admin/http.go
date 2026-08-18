@@ -405,13 +405,10 @@ type auditListResponse struct {
 	Next    uint64        `json:"next,omitempty"`
 }
 
-// auditListMaxLimit caps a single page so one request cannot ask the server to
-// materialize an unbounded number of matches; auditListDefaultLimit applies when
-// the caller gives none.
-const (
-	auditListDefaultLimit = 100
-	auditListMaxLimit     = 1000
-)
+// auditListDefaultLimit applies when the caller gives no limit. The upper cap
+// (auditListMaxLimit) lives with the allocation in AuditList so the bound cannot
+// be lost by a caller that skips this handler's clamp.
+const auditListDefaultLimit = 100
 
 func (s *Server) handleAuditList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()

@@ -423,6 +423,13 @@ func (f AuditFilter) match(e audit.Entry) bool {
 // keeps: a narrow filter pages through more batches, never one long-held read.
 const auditScanBatch = 256
 
+// auditListMaxLimit caps the entries one call returns, so the result allocation
+// cannot be driven unbounded. It lives here, with the allocation, rather than only
+// at the HTTP handler: AuditList is exported and must carry its own bound — a
+// second caller that forgets to clamp would otherwise reintroduce the problem
+// silently.
+const auditListMaxLimit = 1000
+
 // AuditList returns up to limit audit entries matching f, with Seq greater than
 // after, in ascending Seq order, plus the resume position for the next page (0 when
 // the log was exhausted). It reads through the backend's paged Reader — one short
@@ -439,6 +446,9 @@ func (s *Service) AuditList(f AuditFilter, after uint64, limit int) ([]audit.Ent
 	}
 	if limit <= 0 {
 		return nil, 0, nil
+	}
+	if limit > auditListMaxLimit {
+		limit = auditListMaxLimit
 	}
 	out := make([]audit.Entry, 0, limit)
 	cursor := after

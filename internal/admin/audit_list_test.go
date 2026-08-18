@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -86,6 +87,29 @@ func TestAuditListPagingAndFilters(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, byMsg, 1)
 	assert.Equal(t, uint64(4), byMsg[0].Seq)
+}
+
+// The paged filter-fill must advance the cursor across a batch that yields zero
+// matches and fetch the next — the behaviour the whole paged shape exists to
+// provide, and the one a single-batch dataset cannot reach. auditScanBatch is 256,
+// so this crosses it: 256 non-matching entries then 4 matches. If the cursor
+// advanced only on a match, the loop would re-fetch the same all-filtered first
+// batch forever; this pins that it advances on every scanned entry.
+func TestAuditListCrossesBatchBoundary(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	al := wireAudit(t, svc)
+	const common, rare = 256, 4
+	for i := 0; i < common; i++ {
+		require.NoError(t, al.Append(audit.Record{Event: "enqueue", Agent: "common", MessageID: strconv.Itoa(i + 1)}))
+	}
+	for i := 0; i < rare; i++ {
+		require.NoError(t, al.Append(audit.Record{Event: "enqueue", Agent: "rare", MessageID: strconv.Itoa(common + i + 1)}))
+	}
+
+	got, next, err := svc.AuditList(admin.AuditFilter{Agent: "rare"}, 0, 10)
+	require.NoError(t, err)
+	assert.Equal(t, []uint64{257, 258, 259, 260}, auditSeqs(got))
+	assert.Equal(t, uint64(0), next, "all matches returned, log exhausted")
 }
 
 func TestAuditListTimeBounds(t *testing.T) {
