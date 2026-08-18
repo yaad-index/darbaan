@@ -10,7 +10,7 @@
 
 ### Bug Fixes
 
-* log an outbound message arriving, not only its decisions ([#293](https://github.com/yaad-index/darbaan/issues/293)) ([1bab062](https://github.com/yaad-index/darbaan/commit/1bab062))
+* log an outbound message arriving, not only its decisions ([#293](https://github.com/yaad-index/darbaan/issues/293)) ([1bab062](https://github.com/yaad-index/darbaan/commit/1bab062e702d304ac8f7816a14f507afa31be4b6))
 
 ## [0.18.1](https://github.com/yaad-index/darbaan/compare/v0.18.0...v0.18.1) (2026-08-13)
 
