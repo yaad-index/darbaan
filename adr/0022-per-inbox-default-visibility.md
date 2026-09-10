@@ -17,7 +17,7 @@ should declare it once rather than repeat an `action:` on every rule:
 - A **noisy personal inbox** (e.g. a busy personal Gmail): the agent should
   see **nothing by default**, and rules name the few things worth surfacing
   (e.g. "only mail labeled `x`"). Default-deny; rules are an **allowlist**.
-- An **assistant inbox** (`forudassistant`): the agent should see **everything by
+- An **assistant inbox** (e.g. an address used only by the agent): the agent should see **everything by
   default**, and rules name the noise to suppress (e.g. "hide mail from
   `a@b.com`"). Default-allow; rules are a **denylist**.
 
