@@ -319,6 +319,17 @@ func uploadable(a attachment) bool {
 	return a.size <= maxUpload && len(a.data) > 0
 }
 
+// fullBodyUploadable reports whether an offloaded full body of this byte length will
+// as a document. The inline marker and sendFullBody BOTH decide from this one
+// predicate (#119): they used to decide separately, and over the cap they disagreed
+// — the card promised a file named full-message-body.txt while the upload silently
+// skipped, so the operator was shown a marker naming an attachment that was never
+// sent. Two guards that happen to agree is the state to avoid; one predicate both
+// consult is why they cannot.
+func fullBodyUploadable(size int) bool {
+	return size > 0 && size <= maxUpload
+}
+
 func (c *Client) sendAttachments(ctx context.Context, queueID string, anchorID int, atts []attachment) {
 	for _, a := range atts {
 		if !uploadable(a) {
@@ -359,14 +370,16 @@ const fullBodyFilename = "full-message-body.txt"
 // decision. Sent before the email's own attachments so it is the first document
 // under the decision message.
 func (c *Client) sendFullBody(ctx context.Context, queueID string, anchorID int, body string) {
+	// Defence in depth, and unreachable by construction: the caller only calls this
+	// when formatNotification reported the body as offloadable, which is the same
+	// predicate. Kept so a future second caller cannot reintroduce the disagreement.
+	if !fullBodyUploadable(len(body)) {
+		if len(body) > maxUpload {
+			c.logger.Warn("telegram full body too large to attach", "id", queueID, "bytes", len(body))
+		}
+		return
+	}
 	data := []byte(body)
-	if len(data) == 0 {
-		return
-	}
-	if len(data) > maxUpload {
-		c.logger.Warn("telegram full body too large to attach", "id", queueID, "bytes", len(data))
-		return
-	}
 	params := &bot.SendDocumentParams{
 		ChatID:   c.operatorID,
 		Document: &models.InputFileUpload{Filename: fullBodyFilename, Data: bytes.NewReader(data)},
@@ -530,13 +543,24 @@ func formatNotification(n notification) (text string, bodyOffloaded bool) {
 		return header + "\n\n(no text body)" + suffix, false
 	}
 	prefix := header + "\n\n--- body ---\n"
+	// One predicate decides both the marker's wording and whether the caller uploads,
+	// so the card cannot name a file that will not be sent (#119). Over the cap the
+	// marker states the size instead of a filename, and the returned flag is false —
+	// the caller then never reaches sendFullBody at all, which is what makes the
+	// agreement structural rather than two guards that happen to match.
+	offloadable := fullBodyUploadable(len(n.body))
 	marker := "\n...[truncated — full body attached as " + fullBodyFilename + "]"
+	if !offloadable {
+		marker = "\n...[truncated — full body too large to attach (" + humanSize(int64(len(n.body))) + ")]"
+	}
+	// avail is computed from the marker actually chosen, so a differently-sized
+	// marker shifts the truncation budget correctly instead of overrunning the cap.
 	avail := maxNotificationUnits - utf16Len(prefix) - utf16Len(suffix) - utf16Len(marker)
 	if avail < 0 {
 		avail = 0
 	}
 	if utf16Len(n.body) > avail {
-		return prefix + truncateUTF16(n.body, avail) + marker + suffix, true
+		return prefix + truncateUTF16(n.body, avail) + marker + suffix, offloadable
 	}
 	return prefix + n.body + suffix, false
 }
