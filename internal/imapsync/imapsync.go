@@ -547,6 +547,16 @@ func (s *Syncer) WriteKeywords(owner, inbox, id string, add, remove []string) er
 	if err != nil {
 		return fmt.Errorf("imapsync: select %q: %w", s.mailbox, err)
 	}
+	// Refuse when validity is unknown on EITHER side, before the mismatch check: a
+	// bare inequality reads 0 != 0 as "matches" and would STORE against a UID space
+	// the server never confirmed. sel.UIDValidity is 0 when the server omits the
+	// UIDVALIDITY response code, and m.UIDValidity is 0 for any record predating the
+	// persisted field (#253 skips those in reconcile, #255 backfills them). 0 is
+	// never a valid UIDVALIDITY, so it means "unknown", not "matching". Mirrors the
+	// same correction on the X-GM-LABELS path (newLabelStore, xgmlabels.go).
+	if sel.UIDValidity == 0 || m.UIDValidity == 0 {
+		return fmt.Errorf("imapsync: keyword write for %s: unconfirmed mailbox validity (server %d, record %d)", id, sel.UIDValidity, m.UIDValidity)
+	}
 	if sel.UIDValidity != m.UIDValidity {
 		return fmt.Errorf("imapsync: keyword write for %s: mailbox reset (uidvalidity %d != %d)", id, sel.UIDValidity, m.UIDValidity)
 	}
