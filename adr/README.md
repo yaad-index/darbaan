@@ -47,3 +47,4 @@ incoming-message injection assessment.
 | [0032](0032-incoming-message-injection-assessment.md) | Incoming-message injection assessment |
 | [0033](0033-audit-log-read-path.md) | Reading the audit log: live over the admin API, with a dedicated scope |
 | [0034](0034-operator-identity-send-without-approval.md) | Sending without approval when every recipient is an operator identity |
+| [0035](0035-configurable-detector-patterns.md) | Operator-configurable detector patterns |
