@@ -26,7 +26,14 @@ there, and that ADR is the reference rather than this note. The Consequence is
 narrowed to: a message is released after a full approval pass (ADR 0004) or
 through a configured send-permitting path.
 
-**The Decision is unchanged.** It already requires every send-permitting path to be
+**Two sentences are narrowed, not one.** The Decision's own clause *"nothing
+auto-sends"* is unqualified and is affected exactly as the Consequence is, for the
+same reason and by the same ADR; read it as subject to ADR 0034. The neighbouring
+*"out of the box nothing sends"* is unaffected, because it is already scoped to the
+default and the default is unchanged.
+
+**The Decision's REQUIREMENTS are unchanged, which is a narrower claim than the
+Decision being unchanged.** It already requires every send-permitting path to be
 human-configured, and names allowlists among them, so the path ADR 0034 defines is
-an instance of this Decision rather than an exception to it. Default-deny and
+an instance of those requirements rather than an exception to them. Default-deny and
 fail-closed are unchanged.
