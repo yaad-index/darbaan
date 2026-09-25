@@ -102,6 +102,24 @@ type Message struct {
 	// message's empty Raw as "no body".
 	Pending bool `json:"pending,omitempty"`
 
+	// BounceShaped records whether the stored body looks like a DSN
+	// (bounceguard.Shaped), computed when the body is written so the lazy read face
+	// can shape-check from metadata alone (ADR 0024 follow-up, #127). It closes the
+	// gap where a multipart/report DSN from a NON-daemon From is invisible to the
+	// cheap envelope-From pre-check and so is never fetched to be examined.
+	//
+	// It is a POINTER because "not yet computed" and "computed, not bounce-shaped"
+	// call for opposite handling, and only one of them is a statement about the
+	// message. nil means no body has been written yet, so nothing has looked: the
+	// guard then falls back to the From pre-check, which is the behaviour that
+	// predates this field. A bare false would assert "not a bounce" about a message
+	// nothing has examined, in the place a later reader trusts most — the same
+	// reasoning as Assessment and audit.Record.Retryable.
+	//
+	// Records written before this field decode to nil, which is exactly the correct
+	// reading for them, so no backfill is needed.
+	BounceShaped *bool `json:"bounce_shaped,omitempty"`
+
 	// Envelope + Size are stored metadata for the IMAP read face: FETCH ENVELOPE,
 	// RFC822Size, and header SEARCH (Subject/From/To/Date) serve from these
 	// without the body. Envelope is nil / Size 0 for records stored before the
