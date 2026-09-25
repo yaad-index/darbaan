@@ -65,6 +65,22 @@ that is silently blind in exactly the way the operator was trying to fix, report
 clean results the whole time. This is the same class as any probe whose filter cannot
 match: the null result is indistinguishable from a real absence.
 
+⚠️ **The existing alignment check cannot catch this, so the requirement above is
+necessary rather than belt-and-braces.** `ValidateAlignment` walks `det.Factors()` and
+asserts each has a scorer point-table entry — it validates **detector → scorer**. A key
+that appears only in operator config is not in `Factors()` at all, so an unknown key
+leaves the check passing cleanly. The new validation is **config → detector** and has no
+existing equivalent.
+
+🚨 **`mode: replace` needs one more guard, because it is the setting that deletes the
+defaults.** An unknown key and an invalid regex are both parser-visible. A `replace` list
+whose patterns are *valid and simply wrong* is not: it compiles, loads, matches nothing,
+and reports clean — which is precisely the failure this ADR exists to end, reached
+through the one option that removes the built-ins that would otherwise still fire.
+**So a `replace` factor must carry at least one example string that the resulting pattern
+set is required to match at startup.** Augment does not need it: the defaults remain and
+a useless addition degrades to the previous behaviour rather than to nothing.
+
 **An invalid regex must fail startup** for the same reason, rather than being skipped
 with a log line that a running deployment will not re-read.
 
@@ -88,6 +104,13 @@ validated is the *effective* one after defaults, augments and replacements are a
 - Documentation must carry worked non-English examples. Without them the feature is
   technically present and practically unused, which is the state it already exists to
   end.
+- 🚨 **This ADR widens the ambiguity named in Context point 2 rather than closing it.** A
+  clean assessment already could not be distinguished from "assessed with patterns that
+  cannot match this language"; with per-factor `enabled: false` it also cannot be
+  distinguished from "that factor was switched off". **So the assessment must record
+  which factors were ACTIVE for the message**, not only which fired. Without that, a
+  clean result is uninterpretable, and the operator's ability to judge the score — the
+  thing the configurability is for — is reduced rather than improved.
 
 ## Boundaries
 
