@@ -571,6 +571,18 @@ func (s *Service) approve(ctx context.Context, id, asInbox string) (Outcome, err
 		if identity == "" {
 			return Outcome{}, fmt.Errorf("%w: %q", ErrUnknownInbox, asInbox)
 		}
+		// The send is routed through asInbox's Sender, so its PRESENCE is a
+		// precondition of the approve too (#245). Without this it is discovered only
+		// after the commit, leaving the message approved-with-SendErr: re-sendable,
+		// but no longer re-approvable (decide() refuses non-pending), and silent
+		// unless the operator reads the warning. ApproveID deliberately keeps that
+		// soft-strand (C25) — there the inbox is stamped on the message, so staying
+		// approved and re-sendable once config is restored is the only recovery.
+		// Here the operator named the inbox in this request, so refuse it outright
+		// and leave the message pending.
+		if _, ok := s.senderFor(asInbox); !ok {
+			return Outcome{}, fmt.Errorf("%w: %q", errNoSender, inbound.NormInbox(asInbox))
+		}
 		pending, err := s.store.Get(id)
 		if err != nil {
 			return Outcome{}, err

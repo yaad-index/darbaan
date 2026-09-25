@@ -1025,8 +1025,12 @@ func (*SyncStatusCmd) Run(cli *CLI) error {
 		if last == "" {
 			last = "never"
 		}
+		// LastError carries the upstream IMAP server's response text verbatim, so it
+		// gets the same treatment as every other operator-table free-text field
+		// (C22): sanitize before truncate, so the rune budget counts cleaned text.
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%s\n",
-			s.Inbox, state, last, s.ConsecutiveErrors, s.UIDValidity, s.WatermarkUID, s.LastError)
+			s.Inbox, state, last, s.ConsecutiveErrors, s.UIDValidity, s.WatermarkUID,
+			truncate(sanitizeField(s.LastError), 40))
 	}
 	return w.Flush()
 }

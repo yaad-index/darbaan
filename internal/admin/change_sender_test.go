@@ -349,3 +349,68 @@ func TestChangeSenderRoundtrip(t *testing.T) {
 	assert.Equal(t, string(sluice.StatusSent), out.Status)
 	assert.Equal(t, "work", sentVia)
 }
+
+// #245: ApproveAs pre-validates the target inbox's SENDER as well as its identity,
+// before committing the verdict. An inbox that still has an identity but whose
+// sender was removed from config is the whole bug: the C5 identity pre-check passes,
+// the verdict commits, and only then does the send fail — leaving the message
+// approved-with-SendErr, which is re-sendable but no longer re-approvable
+// (decide() refuses non-pending) and silent unless the operator reads the warning.
+// Refusing pre-commit keeps it PENDING, the one state a retry works from.
+//
+// Deliberately narrower than ApproveID, which keeps that soft-strand on purpose
+// (C25) because there the inbox is stamped on the message rather than named in this
+// request — TestApproveRefusesSendWhenInboxSenderRemoved must keep passing unchanged.
+func TestApproveAsRefusesBeforeCommitWhenTargetSenderRemoved(t *testing.T) {
+	q, _ := seedStore(t)
+	m, err := q.Enqueue(sluice.Submission{
+		Agent: "agent", Inbox: inbound.DefaultInbox, From: "a@x.test", Rcpt: []string{"d@y.test"},
+		Raw: []byte("From: a@x.test\r\nTo: d@y.test\r\nSubject: hi\r\n\r\nb\r\n"),
+	})
+	require.NoError(t, err)
+
+	svc := admin.NewService(q, newInbound(t), backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	var anySend bool
+	// Only the default sender remains; "work"'s sender is gone from config.
+	svc.SetSenders(map[string]backend.Sender{
+		inbound.DefaultInbox: senderFunc(func(sluice.Message) error { anySend = true; return nil }),
+	})
+	// But "work" still resolves to an identity — the pairing that defeats C5 alone.
+	svc.SetInboxIdentities(map[string]string{inbound.DefaultInbox: "default@x.test", "work": "work@x.test"})
+
+	_, err = svc.ApproveAs(context.Background(), m.ID, "work")
+	require.Error(t, err, "an approve-as that cannot possibly send must not commit")
+	assert.Contains(t, err.Error(), "no configured sender")
+	assert.False(t, anySend, "and nothing may be delivered through any account")
+
+	stored, err := q.Get(m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, sluice.StatusPending, stored.Status, "the verdict must NOT have committed")
+	assert.Empty(t, stored.SendErr, "not the approved-with-SendErr strand this guard exists to avoid")
+}
+
+// #245 positive control: with the target inbox's sender present the new pre-check is
+// invisible — ApproveAs commits and delivers through the chosen inbox exactly as
+// before. Without this, a pre-check that refused everything would also pass the test
+// above.
+func TestApproveAsStillSendsWhenTargetSenderPresent(t *testing.T) {
+	q, _ := seedStore(t)
+	m, err := q.Enqueue(sluice.Submission{
+		Agent: "agent", Inbox: inbound.DefaultInbox, From: "a@x.test", Rcpt: []string{"d@y.test"},
+		Raw: []byte("From: a@x.test\r\nTo: d@y.test\r\nSubject: hi\r\n\r\nb\r\n"),
+	})
+	require.NoError(t, err)
+
+	svc := admin.NewService(q, newInbound(t), backend.StubSender{}, testSigner(t), strictRouter(), "darbaan.test")
+	var sentVia string
+	svc.SetSenders(map[string]backend.Sender{
+		inbound.DefaultInbox: senderFunc(func(sluice.Message) error { sentVia = "default"; return nil }),
+		"work":               senderFunc(func(sluice.Message) error { sentVia = "work"; return nil }),
+	})
+	svc.SetInboxIdentities(map[string]string{inbound.DefaultInbox: "default@x.test", "work": "work@x.test"})
+
+	out, err := svc.ApproveAs(context.Background(), m.ID, "work")
+	require.NoError(t, err)
+	assert.Equal(t, string(sluice.StatusSent), out.Status)
+	assert.Equal(t, "work", sentVia, "still routes through the chosen inbox's sender")
+}

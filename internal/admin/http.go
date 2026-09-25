@@ -240,6 +240,14 @@ func (s *Server) handleApproveAs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	// A known inbox whose sender was removed from config: config changed underneath
+	// a well-formed request, so this is the same 409 handleResend returns for the
+	// same cause — not a 400 (the request was valid) and not writeAction's default
+	// 500, which would make an operator-fixable condition look like a server fault.
+	if errors.Is(err, errNoSender) {
+		writeErr(w, http.StatusConflict, err)
+		return
+	}
 	writeAction(w, out, err)
 }
 
