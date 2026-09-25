@@ -45,3 +45,5 @@ incoming-message injection assessment.
 | [0030](0030-gate-stamp-trust-provenance-headers-on-inbound-mail.md) | Gate-stamp trust/provenance headers on inbound mail |
 | [0031](0031-per-sender-trust-rules.md) | Per-sender trust rules |
 | [0032](0032-incoming-message-injection-assessment.md) | Incoming-message injection assessment |
+| [0033](0033-audit-log-read-path.md) | Audit-log read path |
+| [0034](0034-operator-identity-send-without-approval.md) | Sending without approval when every recipient is an operator identity |
