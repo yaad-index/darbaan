@@ -29,9 +29,14 @@ list states that "a message is released to the real upstream SMTP only after a f
 approval pass (see ADR 0004)". Under this ADR some messages are released without one, so
 **that bullet becomes false as written** — a defect in 0003's text rather than in this
 decision, and the shape worth naming: a still-correct Decision can shield a stale
-Consequence, because a reader who checks the Decision stops there. 0003 is Accepted and
-therefore immutable, so the correction belongs in a follow-up ADR or an amendment to
-0003, not in an edit to it.
+Consequence, because a reader who checks the Decision stops there.
+
+**Tracked as #312**, with the suggested form being an `## Amendment` section appended to
+0003 in place — this repository's established mechanism, used by 14 ADR files including
+Accepted records from the v1 set. *(An earlier draft of this paragraph said the fix must
+not be "an edit to" 0003, which contradicted the mechanism it recommended in the same
+sentence: here an amendment IS an in-file edit, and immutability means the original
+text is not rewritten, not that the file is never touched.)*
 
 ## Decision
 
