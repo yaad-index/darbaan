@@ -18,3 +18,15 @@ approval never decays into "send later"; an unapproved message waits forever.
 - Only the human's configuration can loosen sending, never the agent or an injection.
 - A message is released to the real upstream SMTP only after a full approval pass
   (see ADR 0004).
+
+## Amendment (2026-09-25): the release Consequence is narrowed by ADR 0034
+**The second Consequence above no longer holds as written.** ADR 0034 defines an
+additional send-permitting path; its conditions and its boundaries are stated
+there, and that ADR is the reference rather than this note. The Consequence is
+narrowed to: a message is released after a full approval pass (ADR 0004) or
+through a configured send-permitting path.
+
+**The Decision is unchanged.** It already requires every send-permitting path to be
+human-configured, and names allowlists among them, so the path ADR 0034 defines is
+an instance of this Decision rather than an exception to it. Default-deny and
+fail-closed are unchanged.
