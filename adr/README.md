@@ -45,3 +45,4 @@ incoming-message injection assessment.
 | [0030](0030-gate-stamp-trust-provenance-headers-on-inbound-mail.md) | Gate-stamp trust/provenance headers on inbound mail |
 | [0031](0031-per-sender-trust-rules.md) | Per-sender trust rules |
 | [0032](0032-incoming-message-injection-assessment.md) | Incoming-message injection assessment |
+| [0035](0035-configurable-detector-patterns.md) | Operator-configurable detector patterns |
