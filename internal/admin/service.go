@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/yaad-index/darbaan/internal/approver"
@@ -660,6 +661,95 @@ func (s *Service) sendVia(ctx context.Context, inbox string, sendMsg sluice.Mess
 		return fmt.Errorf("%w: %q", errNoSender, inbound.NormInbox(inbox))
 	}
 	return snd.Send(ctx, sendMsg)
+}
+
+// bypassDecidedBy is the DecidedBy stamped on an operator-identity bypass. It is
+// deliberately a fixed, short, self-describing string rather than a name: it
+// lands in the approve audit row's Detail and in Message.DecidedBy, both of which
+// an operator reads later, and it must be impossible to mistake for a person.
+const bypassDecidedBy = "operator-identity bypass (ADR 0034)"
+
+// bypassAuditEvent is the positive marker for a bypassed send. It exists because
+// the alternative tell would be an ABSENCE: Actor is empty on this path (there is
+// no operator client), and an empty field cannot separate a bypass from a row
+// written before the field existed, from a missing actor, or from a bug. An
+// absence is not a signal, so the row asserts the path affirmatively (ADR 0034,
+// Audit).
+const bypassAuditEvent = "bypass"
+
+// SendOperatorIdentityBypass releases an already-enqueued message whose every
+// recipient is an operator identity, skipping the approval hold (ADR 0034).
+// matched carries the canonical identities that matched, for the audit trail.
+//
+// This is a PRE-CHAIN BYPASS, not an approver stage: it calls the store's Approve
+// directly instead of decide(), because running the configured approval chain is
+// precisely what this path skips. ADR 0004 would also admit an automated approver
+// inside the chain, and that is deliberately NOT what this is — 0003 anticipates
+// this shape as an allowlist, a send-permitting path beside approval chains
+// rather than one of their stages.
+//
+// The message is already durably committed when this runs, so a failed upstream
+// send leaves it approved with a recorded SendErr: re-sendable by the operator,
+// and never lost. The caller keeps the submission accepted (ADR 0003 returns 250
+// once the message is trapped) rather than failing it — a 4xx would invite a
+// retry that duplicates mail already in the store.
+func (s *Service) SendOperatorIdentityBypass(ctx context.Context, id string, matched []string) (sluice.Message, error) {
+	// actor is empty: ADR 0029 defines it as the operator CLIENT that decided, and
+	// no operator decided this. Inventing one would put a fabricated approver in a
+	// tamper-evident log, which is worse than the ambiguity the bypass row fixes.
+	m, err := s.store.Approve(id, bypassDecidedBy, nil, "", "")
+	if err != nil {
+		return sluice.Message{}, err
+	}
+
+	// Positive marker, written after the transition commits so the row can never
+	// claim a bypass that did not happen. Best-effort, matching the store's own
+	// audit contract: the approve row it just wrote already carries
+	// bypassDecidedBy in its Detail, so even with this append lost the trail
+	// cannot be misread as a human approval.
+	if s.audit != nil {
+		if aerr := s.audit.Append(audit.Record{
+			Event:     bypassAuditEvent,
+			Agent:     m.Agent,
+			Inbox:     m.Inbox,
+			MessageID: m.ID,
+			Detail:    bypassDetail(matched),
+		}); aerr != nil {
+			slog.Warn("best-effort audit append failed", "message_id", m.ID, "event", bypassAuditEvent, "err", aerr)
+		}
+	}
+
+	sendErr := s.sendVia(ctx, m.Inbox, m)
+	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr, false, "", "")
+	if rerr != nil {
+		return sluice.Message{}, rerr
+	}
+	if sendErr == nil {
+		// Recipients are counted, not named, matching the arrival log's own choice.
+		slog.Info("outbound message sent without approval: every recipient is an operator identity",
+			"message_id", m.ID, "agent", m.Agent, "inbox", m.Inbox, "rcpt_count", len(m.Rcpt))
+	} else {
+		// Deliberately not an error return: the message is approved and carries the
+		// send error, which is the operator's re-send path (C4).
+		slog.Warn("operator-identity bypass could not send; message stays approved and re-sendable",
+			"message_id", m.ID, "agent", m.Agent, "inbox", m.Inbox, "error", sendErr)
+	}
+	return final, nil
+}
+
+// bypassDetail renders the matched identities for the audit row, bounded so one
+// message with many recipients cannot write an unbounded Detail. The values are
+// config-derived — AllMatch returns the canonical form of entries validated at
+// startup, never raw recipient text — so there is no untrusted content here.
+func bypassDetail(matched []string) string {
+	const max = 5
+	shown := matched
+	suffix := ""
+	if len(matched) > max {
+		shown = matched[:max]
+		suffix = fmt.Sprintf(" (+%d more)", len(matched)-max)
+	}
+	return "every recipient is an operator identity: " + strings.Join(shown, ", ") + suffix
 }
 
 // ErrNotResendable is returned by ReSend when the message is not an approved
