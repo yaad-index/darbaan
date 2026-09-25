@@ -58,6 +58,35 @@ func errorFrom(resp *http.Response) error {
 	return fmt.Errorf("admin: %s", e.Error)
 }
 
+// notFoundFrom classifies a 404. It returns sentinel ONLY when the body carries
+// marker — positive evidence that THIS service produced the 404 — and otherwise the
+// body's own error text, or the bare status when there is none.
+//
+// The whole point is what it refuses to do. A bare 404 from a route-less daemon
+// under version skew, or from a mis-pointed admin address, renders as "404 Not
+// Found": text that reads like a statement about the id, from a peer that has never
+// heard of it. Mapping that to a sentinel would report every id as already-decided.
+// The default mux 404 body does not decode to a non-empty error field, so it lands
+// on the generic branch correctly.
+//
+// One implementation for both the inbound not-held and the outbound not-found paths
+// (#260): the reasoning is identical, and a predicate this easy to get subtly wrong
+// should not exist twice.
+func notFoundFrom(resp *http.Response, marker string, sentinel error) error {
+	var e struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&e)
+	if e.Code == marker {
+		return sentinel
+	}
+	if e.Error == "" {
+		e.Error = resp.Status
+	}
+	return fmt.Errorf("admin: %s", e.Error)
+}
+
 // List returns the held messages' metadata.
 func (c *Client) List(ctx context.Context) ([]sluice.Meta, error) {
 	resp, err := c.request(ctx, http.MethodGet, "/queue", nil)
@@ -154,6 +183,12 @@ func (c *Client) Show(ctx context.Context, id string) ([]byte, error) {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		// Typed only on this service's marker (#260), so the operator surface can
+		// state "no longer in the queue" on a signal rather than on status text a
+		// stranger's 404 also matches.
+		return nil, notFoundFrom(resp, codeNotFound, ErrQueueNotFound)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, errorFrom(resp)
 	}
@@ -237,24 +272,7 @@ func (c *Client) HeldContent(ctx context.Context, id string) ([]byte, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
-		// Map a 404 to the typed sentinel ONLY on positive evidence that THIS service
-		// produced it — the codeNotHeld marker in the body. A bare 404 from a route-less
-		// daemon (version skew) or a mis-pointed peer carries no such code; it falls
-		// through to the generic error the guidance routes to the tool branch, rather
-		// than silently reporting every id as already-decided. The default mux 404 body
-		// does not decode to a non-empty error field, so it lands here correctly.
-		var e struct {
-			Error string `json:"error"`
-			Code  string `json:"code"`
-		}
-		_ = json.NewDecoder(resp.Body).Decode(&e)
-		if e.Code == codeNotHeld {
-			return nil, ErrNotHeld
-		}
-		if e.Error == "" {
-			e.Error = resp.Status
-		}
-		return nil, fmt.Errorf("admin: %s", e.Error)
+		return nil, notFoundFrom(resp, codeNotHeld, ErrNotHeld)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, errorFrom(resp)
