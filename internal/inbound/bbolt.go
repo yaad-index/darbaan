@@ -13,6 +13,7 @@ import (
 	"go.etcd.io/bbolt"
 
 	"github.com/yaad-index/darbaan/internal/blobstore"
+	"github.com/yaad-index/darbaan/internal/bounceguard"
 	"github.com/yaad-index/darbaan/internal/provenance"
 	"github.com/yaad-index/darbaan/internal/seqkey"
 )
@@ -214,13 +215,14 @@ func (s *bboltStore) SetContentAssessed(owner, inbox, id string, raw []byte, a *
 			return ErrNotFound
 		}
 		// Content blob first, then the metadata flip (same ordering as Add).
-		clean, err := s.putBlob(inbox, id, raw)
+		clean, shaped, err := s.putBlob(inbox, id, raw)
 		if err != nil {
 			return err
 		}
 		rec.Pending = false
 		rec.Blobbed = true
-		rec.Assessment = a // persisted with the content; nil = not assessed
+		rec.Assessment = a        // persisted with the content; nil = not assessed
+		rec.BounceShaped = shaped // computed with the content, so present ⇒ known (#127)
 		msg = rec.Message
 		msg.Raw = clean
 		return putStored(tx, key, rec)
@@ -243,18 +245,27 @@ func (s *bboltStore) SetContentAssessed(owner, inbox, id string, raw []byte, a *
 // is rejected rather than stored; an inert non-message blob (e.g. a
 // locally-generated bounce) passes through untouched (unstamped → read as
 // unknown).
-func (s *bboltStore) putBlob(inbox, id string, raw []byte) ([]byte, error) {
+func (s *bboltStore) putBlob(inbox, id string, raw []byte) ([]byte, *bool, error) {
 	// Trust is resolved from the authenticated inbox and the message's From
 	// (per-sender rules, ADR 0031). The From is read from the raw here; the trust
 	// asymmetry keeps that safe (only `trusted` is gated on the upstream, slice 2).
 	clean, err := provenance.Sanitize(raw, s.resolve(inbox, provenance.From(raw)))
 	if err != nil {
-		return nil, fmt.Errorf("sanitize content: %w", err)
+		return nil, nil, fmt.Errorf("sanitize content: %w", err)
 	}
 	if err := s.blobs.Put(id, clean); err != nil {
-		return nil, fmt.Errorf("write content: %w", err)
+		return nil, nil, fmt.Errorf("write content: %w", err)
 	}
-	return clean, nil
+	// The bounce-shape flag is computed HERE, at the one chokepoint every body write
+	// passes through, rather than at each caller (#127). Two callers computing it
+	// independently is how a stored flag and the body it describes drift apart, and
+	// returning it makes the compiler require any future third write path to decide
+	// what to do with it rather than silently leaving the field nil.
+	//
+	// Computed from `clean`, not `raw`: clean is what is stored and later served, so
+	// the flag describes the bytes a reader will actually see.
+	shaped := bounceguard.Shaped(clean)
+	return clean, &shaped, nil
 }
 
 // put builds and persists a new message. For a present message it writes the
@@ -286,11 +297,12 @@ func (s *bboltStore) put(tx *bbolt.Tx, d Delivery, pending bool, a *Assessment) 
 	key := seqkey.Encode(seq)
 	blobbed := false
 	if !pending {
-		clean, err := s.putBlob(msg.Inbox, msg.ID, d.Raw)
+		clean, shaped, err := s.putBlob(msg.Inbox, msg.ID, d.Raw)
 		if err != nil {
 			return Message{}, nil, err
 		}
-		msg.Raw = clean // present (return carries it; storedRec drops it for storage)
+		msg.Raw = clean           // present (return carries it; storedRec drops it for storage)
+		msg.BounceShaped = shaped // known at insert for a present message (#127)
 		blobbed = true
 	}
 	if err := putStored(tx, key, storedRec(msg, blobbed)); err != nil {
