@@ -1768,8 +1768,17 @@ func (c *QueueShowCmd) Run(cli *CLI) error {
 		return err
 	}
 	raw, err := client.Show(context.Background(), c.ID)
+	// Only THIS service's marker produces the typed error, so this sentence is
+	// reachable only when the daemon actually said so (#260). A bare 404 from a
+	// route-less or mis-pointed peer renders as "404 Not Found" — text that also
+	// contains "not found" — and falls to the branch below as a tool fault, which is
+	// what it is. The operator was previously asked to tell those two apart by
+	// reading the status string.
+	if errors.Is(err, admin.ErrQueueNotFound) {
+		return fmt.Errorf("message %s is no longer in the outbound queue (decided, gone, or an unknown id) — the decision is already made; take no action here", c.ID)
+	}
 	if err != nil {
-		return err
+		return err // the tool, not the message: could not connect / a server fault — surfaced verbatim
 	}
 	if len(raw) == 0 {
 		return fmt.Errorf("message %s has no stored body — it is a genuinely empty message (an empty submission); that is its full content, not a fetch failure", c.ID)

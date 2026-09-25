@@ -108,6 +108,21 @@ var ErrHoldsUnavailable = errors.New("admin: inbound holds are not configured on
 // never become "not held" for every id.
 const codeNotHeld = "not_held"
 
+// ErrQueueNotFound is returned by the outbound Show path when the id is not in the
+// queue — decided, gone, or never existed. It is errors.Is-able so the operator
+// surface can say "no longer in the queue, take no action" on THIS service's word
+// rather than on a status string, which is the whole point: a bare 404 from a
+// route-less daemon or a mis-pointed admin address renders as "404 Not Found",
+// whose text also contains "not found", and the operator was being asked to tell
+// those apart by reading it (#260).
+var ErrQueueNotFound = errors.New("admin: message is not in the outbound queue")
+
+// codeNotFound is the machine-readable marker the outbound not-found response
+// carries, so a client maps a 404 to ErrQueueNotFound ONLY on positive evidence
+// that THIS service produced it. Mirrors codeNotHeld on the inbound side; the
+// reasoning is identical and so is the failure it prevents.
+const codeNotFound = "not_found"
+
 // ErrReconcileUnavailable is returned by the reconcile controls when no inbox has
 // an upstream syncer, so there is nothing to reconcile or release.
 var ErrReconcileUnavailable = errors.New("admin: reconcile control not available (no upstream inbox configured)")

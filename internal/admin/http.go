@@ -217,7 +217,10 @@ func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 	m, err := s.svc.Show(r.PathValue("id"))
 	if errors.Is(err, sluice.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, err)
+		// Carry the marker so a client maps this to the typed not-found only on
+		// positive evidence that this service answered (#260). A bare 404 from
+		// elsewhere carries no code and stays a generic tool error.
+		writeErrWithCode(w, http.StatusNotFound, err, codeNotFound)
 		return
 	}
 	if err != nil {

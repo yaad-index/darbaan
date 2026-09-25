@@ -519,7 +519,7 @@ func formatNotification(n notification) (text string, bodyOffloaded bool) {
 		return header + "\n\n(!) body and attachments could NOT be fetched — this is not an empty message. Retry with `darbaan queue show " + n.id +
 			"`: if it shows the body, the failure was transient — proceed on what it shows. " +
 			"If it reports the message has no stored body, it is a genuinely empty submission — that IS its full content, decide on that (approving sends an empty message). " +
-			"If it reports the message is not found or no longer pending, the decision has already been made — take no action. " +
+			"If it reports the message is no longer in the outbound queue, the decision has already been made — take no action. " +
 			"If it fails any other way (cannot connect, permission denied, a server error), that is the tool or its configuration, not the message — fix it and look again before deciding; do NOT approve unseen.", false
 	}
 	// The attachment line is security-critical (the exfil vector), so it is reserved
