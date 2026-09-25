@@ -59,36 +59,35 @@ assessment:
 
 ## Fail-safe
 
+Two parser-visible requirements, together because they share one reason.
+
 **An unknown factor name must fail startup, not be ignored.** A misspelled key would
 otherwise produce a pattern list that compiles, loads, and matches nothing — a detector
 that is silently blind in exactly the way the operator was trying to fix, reporting
-clean results the whole time. This is the same class as any probe whose filter cannot
-match: the null result is indistinguishable from a real absence.
+clean results the whole time. **An invalid regex must fail startup on the same ground**,
+rather than being skipped with a log line that a running deployment will not re-read.
+Both are the same class as any probe whose filter cannot match: the null result is
+indistinguishable from a real absence.
 
-⚠️ **The existing alignment check cannot catch this, so the requirement above is
-necessary rather than belt-and-braces.** `ValidateAlignment` walks `det.Factors()` and
-asserts each has a scorer point-table entry — it validates **detector → scorer**. A key
-that appears only in operator config is not in `Factors()` at all, so an unknown key
-leaves the check passing cleanly. The new validation is **config → detector** and has no
-existing equivalent.
+⚠️ **The existing alignment check catches neither, so those requirements are necessary
+rather than belt-and-braces.** `ValidateAlignment` walks `det.Factors()` and asserts each
+has a scorer point-table entry — it validates **detector → scorer**. A key appearing only
+in operator config is not in `Factors()` at all, so an unknown key leaves the check
+passing cleanly. **The new validation is config → detector and has no existing
+equivalent.** Separately, that check runs **unconditionally, including when assessment is
+disabled**, so a misconfiguration fails at startup rather than waiting for the day the
+feature is enabled; that property must survive this change and extend to
+operator-supplied factors, validating the *effective* set after defaults, augments and
+replacements are applied.
 
-🚨 **`mode: replace` needs one more guard, because it is the setting that deletes the
-defaults.** An unknown key and an invalid regex are both parser-visible. A `replace` list
-whose patterns are *valid and simply wrong* is not: it compiles, loads, matches nothing,
-and reports clean — which is precisely the failure this ADR exists to end, reached
-through the one option that removes the built-ins that would otherwise still fire.
-**So a `replace` factor must carry at least one example string that the resulting pattern
-set is required to match at startup.** Augment does not need it: the defaults remain and
-a useless addition degrades to the previous behaviour rather than to nothing.
-
-**An invalid regex must fail startup** for the same reason, rather than being skipped
-with a log line that a running deployment will not re-read.
-
-ADR 0032's existing alignment check between detector factors and scorer factors runs
-**unconditionally, including when assessment is disabled**, so a misconfiguration fails
-at startup instead of waiting for the day the operator enables the feature. That
-property must survive this change and extend to operator-supplied factors: the set
-validated is the *effective* one after defaults, augments and replacements are applied.
+🚨 **`mode: replace` needs a third guard, because it is the one setting that deletes the
+defaults.** The two requirements above are parser-visible. A `replace` list whose patterns
+are *valid and simply wrong* is not: it compiles, loads, matches nothing, and reports
+clean — precisely the failure this ADR exists to end, reached through the only option that
+removes the built-ins that would otherwise still fire. **So a `replace` factor must carry
+at least one example string that the resulting pattern set is required to match at
+startup.** Augment needs no equivalent: the defaults remain, so a useless addition
+degrades to the previous behaviour rather than to nothing.
 
 ## Consequences
 
