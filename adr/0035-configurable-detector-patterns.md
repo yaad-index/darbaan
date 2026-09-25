@@ -59,7 +59,8 @@ assessment:
 
 ## Fail-safe
 
-Two parser-visible requirements, together because they share one reason.
+Three requirements. The first two are parser-visible and share one reason, so they sit
+together; the third exists precisely because it is **not** parser-visible.
 
 **An unknown factor name must fail startup, not be ignored.** A misspelled key would
 otherwise produce a pattern list that compiles, loads, and matches nothing — a detector
