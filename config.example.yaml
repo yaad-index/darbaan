@@ -36,8 +36,10 @@ dkim-domain: ""              # signing domain (d=); typically the listener domai
 # Upstream Sender — the only component that delivers approved mail off the box.
 # DEFAULT is "stub": nothing sends, default-deny stays structural (ADR 0003).
 # Setting sender-type=smtp is the DELIBERATE flip — it makes a fully-approved
-# message actually deliver. Only ever reached after the approval pipeline; no
-# path sends without approval. The app password is supplied via
+# message actually deliver. Only ever reached after the approval pipeline —
+# with one exception, opt-in and off by default: the operator-identity bypass
+# below (ADR 0034), where a message whose every recipient is your own configured
+# address sends without the hold. The app password is supplied via
 # DARBAAN_SMTP_PASSWORD (a Gmail app password, account 2FA), never inlined here
 # and never logged (ADR 0012). Real credentials live only in Darbaan (ADR 0002).
 sender-type: stub                  # stub | smtp
@@ -96,6 +98,43 @@ agent-username: ""
 # Approval chains: ordered approver names. v1 ships the manual (human) approver.
 approval-strict: [manual]
 approval-light: [manual]
+
+# --- Operator-identity send bypass (optional; ADR 0034) ----------------------
+# OFF by default: with no `operator_identities:` list, every outbound message is
+# held, which is the behaviour above and is unchanged by upgrading.
+#
+# When set, a message whose EVERY recipient is one of these addresses is sent
+# WITHOUT the approval hold. The case it exists for is routine self-directed mail
+# — a receipt or a report to your own inbox — where approving it and delivering it
+# both end with the same person reading the same bytes, so the round-trip has no
+# decision in it.
+#
+# Matching is exact on the address and ignores the display name, so
+# `Some Name <you@example.com>` and a bare `you@example.com` both match the entry
+# `you@example.com`. There is no domain matching, no wildcard and no substring: an
+# entry like `*@example.com` or `@example.com` FAILS STARTUP rather than loading
+# and silently never matching. ONE non-listed recipient sends the whole message
+# down the normal approval path — there is no partial send and no splitting by
+# recipient. A message with no recipients at all is never bypassed.
+#
+# 🚨 THE LIMIT, and it is the assumption the whole feature rests on: matching an
+# address does not establish who READS that address. An alias, a group address, or
+# a mailbox with a server-side forwarding rule satisfies an exact match while
+# delivering somewhere else entirely. By listing an address here you are asserting
+# that you are its only reader, and nothing in Darbaan can verify that assertion.
+# So do not list an address that forwards, and do not list a correspondent who
+# ACTS on what they receive — a bank, an employer, a service provider, a support
+# desk — however routine that mail is. Those are exactly the addresses that
+# generate the most repetitive mail, which is where the pressure to widen this
+# will come from.
+#
+# A bypassed send is still recorded in the audit log, marked as bypassed and
+# naming the identity that matched, and the message's DecidedBy reads
+# "operator-identity bypass (ADR 0034)" rather than a person's name.
+#
+# operator_identities:
+#   - you@example.com
+#   - you+reports@example.com
 
 # Incoming-message injection assessment (ADR 0032, Amendment 1). OFF by default.
 # When enabled, each incoming message is assessed for prompt-injection risk

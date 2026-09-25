@@ -45,6 +45,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/inboxcfg"
 	"github.com/yaad-index/darbaan/internal/listener"
 	"github.com/yaad-index/darbaan/internal/mailtext"
+	"github.com/yaad-index/darbaan/internal/opidentity"
 	"github.com/yaad-index/darbaan/internal/policy"
 	"github.com/yaad-index/darbaan/internal/provenance"
 	"github.com/yaad-index/darbaan/internal/riskscore"
@@ -236,6 +237,61 @@ func (c *CLI) assessmentConfig() (riskscore.Config, error) {
 		return riskscore.Config{}, fmt.Errorf("assessment config: %w", err)
 	}
 	return riskscore.Parse(section)
+}
+
+// operatorIdentities resolves the operator-identity list (ADR 0034) from the
+// optional top-level `operator_identities:` section of the config file. An absent
+// or empty section yields a disabled list, which is today's behaviour: every
+// message is held. A malformed entry fails startup here rather than loading an
+// identity that could never match (opidentity.Parse).
+func (c *CLI) operatorIdentities() (opidentity.List, error) {
+	data, err := c.configBytes()
+	if err != nil {
+		return opidentity.List{}, err
+	}
+	if len(data) == 0 {
+		return opidentity.List{}, nil
+	}
+	return opidentity.Parse(data)
+}
+
+// operatorBypassQueue is the submission sink the SMTP face is handed when the
+// operator-identity bypass is configured (ADR 0034). It traps every submission
+// exactly as before — the message is durably committed first, so nothing about
+// default-deny or the 250-on-commit contract changes — and only then releases the
+// ones whose EVERY recipient is an operator identity.
+//
+// It sits here, between the listener and the sluice, for a reason worth keeping:
+// the SMTP face must not gain a Sender. ADR 0003 puts the upstream send in serve's
+// admin service, and the submission face "never sends upstream". Wrapping the
+// Enqueuer keeps that true — the listener still only knows how to trap.
+type operatorBypassQueue struct {
+	sluice.MessageStore
+	identities opidentity.List
+	release    func(ctx context.Context, id string, matched []string) (sluice.Message, error)
+}
+
+// Enqueue traps the submission, then bypasses the hold when every recipient is an
+// operator identity. A release failure is logged and swallowed deliberately: the
+// message is already durably queued, so the submission stays accepted and the
+// message stays approved-and-re-sendable (or pending, if the transition itself
+// failed) rather than provoking a client retry that would duplicate mail.
+func (q *operatorBypassQueue) Enqueue(sub sluice.Submission) (sluice.Message, error) {
+	msg, err := q.MessageStore.Enqueue(sub)
+	if err != nil {
+		return msg, err
+	}
+	matched, ok := q.identities.AllMatch(msg.Rcpt)
+	if !ok {
+		return msg, nil // held under the existing rules
+	}
+	released, rerr := q.release(context.Background(), msg.ID, matched)
+	if rerr != nil {
+		slog.Error("operator-identity bypass failed; message stays in the queue",
+			"message_id", msg.ID, "agent", msg.Agent, "inbox", msg.Inbox, "error", rerr)
+		return msg, nil
+	}
+	return released, nil
 }
 
 // resolveInboxes resolves the configured inboxes (ADR 0023), or a single implicit
@@ -1413,12 +1469,29 @@ func (*ServeCmd) Run(cli *CLI) error {
 	route := func(from, catchAll string) (string, bool) {
 		return inboxcfg.Route(inboxes, from, catchAll)
 	}
+
+	// Operator-identity bypass (ADR 0034). Resolved before the submission face is
+	// wired so a malformed identity fails startup rather than at first send. The
+	// count is logged either way: "the bypass is off" is then something an operator
+	// can read in the log, not something they have to infer from its absence.
+	opIDs, err := cli.operatorIdentities()
+	if err != nil {
+		return fmt.Errorf("operator identities: %w", err)
+	}
+	var submitQueue listener.Enqueuer = q
+	if opIDs.Enabled() {
+		slog.Warn("operator-identity send bypass ENABLED (ADR 0034): a message whose EVERY recipient is a configured operator identity is sent without the approval hold",
+			"identities", opIDs.Len())
+		submitQueue = &operatorBypassQueue{MessageStore: q, identities: opIDs, release: svc.SendOperatorIdentityBypass}
+	} else {
+		slog.Info("operator-identity send bypass disabled (default): every outbound message is held")
+	}
 	smtpSrv, err := listener.NewServer(listener.ServerConfig{
 		Addr:          cli.ListenerAddr,
 		Domain:        cli.ListenerDomain,
 		TLSConfig:     tlsConfig,
 		AllowInsecure: cli.ListenerAllowInsecure,
-	}, auth, q, route)
+	}, auth, submitQueue, route)
 	if err != nil {
 		return err
 	}

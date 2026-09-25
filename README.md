@@ -46,6 +46,14 @@ The upstream sender is **stub by default** — it delivers *nothing*. Real deliv
 is a deliberate opt-in, so the default-deny holds even before any policy is
 configured.
 
+There is exactly one configured exception, off unless you switch it on: with
+`operator_identities:` set, a message whose **every** recipient is one of your own
+listed addresses is sent without the hold (ADR 0034) — the self-directed-mail case,
+where approving it and delivering it both end with you reading the same bytes. One
+non-listed recipient sends the whole message down the normal path. Listing an
+address asserts that you are its only reader, which Darbaan cannot verify, so an
+address that forwards does not belong there; `config.example.yaml` has the detail.
+
 ## Inbound — read the real mailbox, gated
 
 - **Synced into Darbaan's own store.** Darbaan pulls from the upstream mailbox
