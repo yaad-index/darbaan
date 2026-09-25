@@ -897,7 +897,10 @@ func onDemandSyncNow(od *imapsync.OnDemandSync, inbox string, timeout time.Durat
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	_, _, terr := od.Trigger(ctx, inbox)
-	if terr != nil && ctx.Err() != nil {
+	// One shared classifier with the coordinator's own backoff bookkeeping (#258):
+	// the same subtle predicate decided both, and writing it twice invites the two
+	// to drift apart.
+	if imapsync.EndedOnContext(ctx, terr) {
 		slog.Debug("on-demand sync deferred: pull exceeded its budget", "inbox", inbox)
 		return nil
 	}
