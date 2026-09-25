@@ -19,7 +19,7 @@ approval never decays into "send later"; an unapproved message waits forever.
 - A message is released to the real upstream SMTP only after a full approval pass
   (see ADR 0004).
 
-## Amendment (2026-09-25): the release Consequence is narrowed by ADR 0034
+## Amendment (2026-09-25): TWO claims narrowed by ADR 0034, one in the Decision and one in the Consequences
 **The second Consequence above no longer holds as written.** ADR 0034 defines an
 additional send-permitting path; its conditions and its boundaries are stated
 there, and that ADR is the reference rather than this note. The Consequence is
