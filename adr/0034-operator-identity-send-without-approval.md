@@ -10,12 +10,28 @@ hold buys nothing: the approval step and the delivery both end with the same per
 reading the same bytes. The round-trip adds latency and an interaction, and the
 interaction has no decision in it.
 
-ADR 0003 already provides for this. Its decision names "approval chains, allowlists,
-any future auto-approve" as send-permitting paths, and requires only that each one be
+ADR 0003 already provides for this. Its decision lists "approval chains, allowlists,
+any future auto-approve" as send-permitting paths and requires only that each one be
 **human-configured**: *"Only the human's configuration can loosen sending, never the
-agent or an injection."* So this ADR does not supersede or narrow 0003; it defines one
-specific path that 0003 anticipated, and inherits 0003's constraint on how such a path
-may be configured.
+agent or an injection."*
+
+The word carrying that is **"allowlists"**, listed separately from "approval chains".
+"Any future auto-approve" will not do the work on its own, because it reads naturally as
+a stage *inside* a chain — ADR 0004 admits automated checks and agents as approvers, so
+an auto-approving stage is an ordinary chain member. 0034 is not a chain stage: it is a
+pre-chain bypass, and an allowlist is the bypass-shaped item in 0003's list.
+
+So this ADR **instantiates a path 0003 anticipated** rather than inventing one, and
+inherits 0003's constraint on how such a path may be configured.
+
+⚠️ **That is true of 0003's Decision and not of its Consequences.** 0003's consequence
+list states that "a message is released to the real upstream SMTP only after a full
+approval pass (see ADR 0004)". Under this ADR some messages are released without one, so
+**that bullet becomes false as written** — a defect in 0003's text rather than in this
+decision, and the shape worth naming: a still-correct Decision can shield a stale
+Consequence, because a reader who checks the Decision stops there. 0003 is Accepted and
+therefore immutable, so the correction belongs in a follow-up ADR or an amendment to
+0003, not in an edit to it.
 
 ## Decision
 
@@ -66,9 +82,12 @@ message later becomes eligible without a human acting.
 
 A bypassed send is recorded in the audit log and **marked as bypassed**. Without the
 marker the fastest path through the system would be the one that leaves no trace, and
-"no entry in the log" would stop meaning "nothing was sent". This matters more here
-than on the held path, because `Enqueue` records no actor, so an unmarked bypass would
-be close to invisible after the fact.
+"no entry in the log" would stop meaning "nothing was sent".
+
+The marker has to be positive rather than inferred. `Enqueue` records no actor, so
+without it the only tell would be an **empty** `Actor` field — and an empty field cannot
+distinguish a bypassed send from a row written before the field existed, from a
+not-recorded actor, or from a bug. An absence is not a signal.
 
 ## Consequences
 
@@ -86,6 +105,14 @@ be close to invisible after the fact.
 
 ## Boundaries
 
+- 🚨 **Exact-address matching does not establish who reads the address.** It stops
+  wildcards and display-name spoofing, but an address that **forwards** — an alias, a
+  group address, a server-side rule — satisfies the match while delivering to somebody
+  else. That breaks the same-audience argument this ADR rests on, without breaking any
+  of its conditions. **The operator configuring an identity is asserting that they are
+  its only reader, and nothing in the system can verify that assertion.** State it where
+  the config is documented, because it is the one way this path can be widened by
+  accident rather than by decision.
 - Does not extend to non-operator recipients. Widening it is a separate decision with a
   separate argument.
 - Does not change what is held, only whether a matching message is held at all.
