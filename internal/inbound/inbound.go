@@ -216,6 +216,12 @@ type InboundStore interface {
 	SetKeywords(owner, inbox, id string, keywords []string) (Message, error)
 	// ClearKeywordsDirty clears the dirty flag after upstream replication succeeds.
 	ClearKeywordsDirty(owner, inbox, id string) error
+	// StampUIDValidity records v as the message's UIDVALIDITY, but ONLY when the
+	// stored value is unknown (0): a known validity is never overwritten, so a caller
+	// racing a sync or a second stamp cannot replace a real value (#255). It returns
+	// the record as stored afterwards; the caller compares its UIDValidity to v to
+	// learn whether its stamp took effect.
+	StampUIDValidity(owner, inbox, id string, v uint32) (Message, error)
 	// DirtyKeywords returns the inbox's messages whose keywords await upstream
 	// replication — per inbox, since each inbox reconciles against its own backend.
 	DirtyKeywords(owner, inbox string) ([]Message, error)

@@ -406,6 +406,16 @@ func (s *Syncer) FetchContent(owner, inbox, id string) (inbound.Message, error) 
 	if err != nil {
 		return inbound.Message{}, fmt.Errorf("imapsync: select %q: %w", s.mailbox, err)
 	}
+	if m.UIDValidity == 0 {
+		// Unknown, not reset: the record predates the persisted field, so it never
+		// recorded its UID space. Establish it from this fetch, or refuse (#255).
+		stamped, err := s.stampUnknownValidity(c, sel.UIDValidity, m)
+		if err != nil {
+			s.logger.Warn("content unavailable: unconfirmed mailbox validity", "id", id, "reason", err)
+			return inbound.Message{}, fmt.Errorf("imapsync: content for %s unavailable: %w: %w", id, err, inbound.ErrContentUnavailable)
+		}
+		m = stamped
+	}
 	if sel.UIDValidity != m.UIDValidity {
 		// The mailbox was reset upstream: the whole UID space changed, so this
 		// mapping is stale. Don't drop a single record here — a UIDVALIDITY change is
@@ -525,6 +535,15 @@ func (s *Syncer) WriteKeywords(owner, inbox, id string, add, remove []string) er
 	}
 	if m.UpstreamUID == 0 {
 		return fmt.Errorf("imapsync: keyword write for %s: no upstream uid", id)
+	}
+
+	// A record predating the persisted field has an unknown validity, which both
+	// writers below refuse. Establish it from a real fetch first, or keep refusing
+	// (#255); this is what restores label replication for those records.
+	if m.UIDValidity == 0 {
+		if m, err = s.stampForWrite(m); err != nil {
+			return fmt.Errorf("imapsync: keyword write for %s: %w", id, err)
+		}
 	}
 
 	// Gmail: replicate as real labels via X-GM-LABELS (capability-gated, ADR 0020
