@@ -1,6 +1,6 @@
 # ADR 0027: Multi-agent tenancy — per-agent logins, grants, and per-principal mailbox naming
 
-**Status:** Accepted (2026-07-01)
+**Status:** Accepted (2026-07-01); amended 2026-09-26 (see the end)
 
 ## Context
 
@@ -316,3 +316,24 @@ Implemented as four PRs, each independently reviewable:
 
 Relates to ADR 0002, 0003, 0004, 0009, 0010, 0011, 0012, 0016, 0019, 0021, 0022,
 0023, 0025.
+
+## Amendment (2026-09-26): credential comparison, and what keeps owner values apart
+
+Corrections to text above, which stays as written (ADR 0037). Items A12 and A17 of #237.
+
+**Credential comparison (A12).** "Authentication" says the password is compared with
+`subtle.ConstantTimeCompare`. On raw values that primitive returns early when the
+lengths differ, so it leaks the stored password's length. What ships (#264) hashes
+both sides to a fixed width first and compares the digests in constant time; the
+stored credential digests are computed once, at construction. That is also what
+ADR 0029's admin token comparison does, so the two now match, as ADR 0029 assumed.
+
+**Owner values (A17).** The text says a bounce's owner (the agent id) and synced
+mail's owner (the inbox name) are "different owner values that never collide". That
+is not true by construction, since an agent could be named like an inbox. It is
+**enforced**, in two places:
+
+- configuration load rejects an agent whose name equals an inbox name
+  (`agentcfg.Validate`), so the two owner spaces cannot overlap;
+- the owner rekey touches only synced records, which carry an upstream UID, and
+  never bounces, which do not (`UpstreamUID == 0`).
