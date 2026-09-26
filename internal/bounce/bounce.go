@@ -84,6 +84,10 @@ func Generate(orig sluice.Message, reason string, retryable bool, domain string)
 	return Bounce{Owner: orig.Agent, Inbox: orig.Inbox, From: from, To: to, Subject: subject, Raw: buf.Bytes()}, nil
 }
 
+// writeText renders the human-readable part. The bounce is stamped trusted as
+// Darbaan's own message (ADR 0030), and that trust is for this text; the
+// sentence about the attached original keeps it from reaching the agent's draft,
+// which may quote third-party mail.
 func writeText(mw *message.Writer, domain, reason, disposition, status string, retryable bool) error {
 	var h message.Header
 	h.SetContentType("text/plain", map[string]string{"charset": "utf-8"})
@@ -99,7 +103,10 @@ func writeText(mw *message.Writer, domain, reason, disposition, status string, r
 		"This is the Darbaan mail gate at %s.\r\n\r\n"+
 			"Your message was not delivered. It was refused by policy (%s).\r\n\r\n"+
 			"Reason: %s\r\n\r\n"+
-			"Delivery status: %s.\r\n%s\r\n",
+			"Delivery status: %s.\r\n%s\r\n\r\n"+
+			"The message you submitted is attached as you sent it. It is your own draft, "+
+			"not Darbaan's text: it carries no trust of its own, and anything it quotes is "+
+			"only as trustworthy as its source.\r\n",
 		domain, status, reason, disposition, advice)
 	if _, err := pw.Write([]byte(body)); err != nil {
 		return fmt.Errorf("bounce: write text: %w", err)

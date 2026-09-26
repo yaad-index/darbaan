@@ -106,3 +106,12 @@ func TestDefaultDomain(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "MAILER-DAEMON@localhost", b.From)
 }
+
+// The bounce is stamped trusted as Darbaan's own message; its text says the
+// attached original carries no trust of its own, so the stamp does not reach the
+// agent's draft or anything it quotes.
+func TestBounceTextDisclaimsTheAttachedOriginal(t *testing.T) {
+	b, err := bounce.Generate(sluice.Message{ID: "1", From: "agent@x.test", Rcpt: []string{"r@y.test"}, Raw: []byte("Subject: s\r\n\r\nb")}, "no", false, "darbaan.test")
+	require.NoError(t, err)
+	assert.Contains(t, string(b.Raw), "it carries no trust of its own")
+}
