@@ -71,7 +71,7 @@ admin-addr: "127.0.0.1:1144"
 # revocable credential, list them under `admin_clients:`. Each client's token
 # comes from DARBAAN_ADMIN_TOKEN_<NAME> (name uppercased, non-alphanumerics ->
 # '_'), never inlined (ADR 0012). Scopes are per route, least-privilege:
-#   queue:read / queue:decide, holds:read / holds:decide,
+#   queue:read / queue:decide, holds:read (operator-only: reads held bodies) / holds:decide,
 #   reconcile:read / reconcile:release, inboxes:read.
 # Revoke one client by unsetting its token env and restarting; the others are
 # unaffected. A client whose token env is unset is skipped with a startup warning.
@@ -87,7 +87,9 @@ admin-addr: "127.0.0.1:1144"
 #     scopes: [queue:read, queue:decide, holds:read, holds:decide, reconcile:read]
 #     # token from DARBAAN_ADMIN_TOKEN_TELEGRAM
 #   - name: pre-screener    # read-only: inspects but never decides
-#     scopes: [queue:read, holds:read]
+#     # NOT holds:read: it reads held message bodies, which the hold keeps from
+#     # agents, so it is operator-only (ADR 0029 Amendment 1, ADR 0036).
+#     scopes: [queue:read]
 #     # token from DARBAAN_ADMIN_TOKEN_PRE_SCREENER
 
 # The agent's Darbaan SMTP username. The password is NOT configured here: it is

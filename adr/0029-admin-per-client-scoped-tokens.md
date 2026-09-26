@@ -71,8 +71,9 @@ that scope reaches it.
 
 A client's token grants exactly its listed scopes. Least-privilege examples:
 
-- A **pre-screener** that only reads → the `*:read` scopes only; it cannot
-  approve, reject, expose, drop, or release.
+- A **pre-screener** that only reads → the `*:read` scopes **except `holds:read`**
+  (amended by ADR 0036, see Amendment 1 below); it cannot approve, reject, expose,
+  drop, or release.
 - The **Telegram client** → `queue:read` + `queue:decide` + `holds:read` +
   `holds:decide`, **plus `reconcile:read`** — required for the proactive
   cap-latch alert (`pollReconcile`, #149, shipped v0.11.0), which reads
@@ -175,3 +176,23 @@ authority), not folded into this one.
    preserves back-compat.
 3. **Wiring + docs** — `serve` builds the clients from config; config example +
    README; finalize this ADR (status → Accepted, README index row).
+
+## Amendment 1 (ADR 0036): `holds:read` is an operator-only scope
+
+`holds:read` grants more than the held-message list in the route table above. It
+also covers `GET /holds/{id}/content` (ADR 0032), which returns a held message's
+full stored body, and `GET /holds/{id}/evidence` (ADR 0036), which returns the text
+its fired factors matched. A message is held precisely so that its content does
+not reach the agent before a human has judged it, so any credential carrying
+`holds:read` can read exactly what the hold withholds.
+
+Therefore:
+
+- **`holds:read` is operator-only.** It must not be granted to any credential an
+  agent holds or can reach.
+- **The pre-screener example is amended** to the read scopes excluding
+  `holds:read`. A read-only automated client is the likeliest to be run by, or on
+  behalf of, an agent.
+- **This is a property of each deployment, not something the code enforces.** The
+  daemon logs at every start which admin credentials can read held message bodies,
+  the root token included, so it is visible rather than assumed.
