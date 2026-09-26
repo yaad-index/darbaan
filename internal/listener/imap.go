@@ -295,7 +295,7 @@ func (s *imapSession) listAndFilter(inbox string) (full, visible []inbound.Messa
 // spoof=true for a bounce-shaped candidate it couldn't fetch/verify, ADR 0024);
 // it is logged and the message is hidden.
 func (s *imapSession) guardHides(m inbound.Message, inbox string) bool {
-	spoof, err := s.guard.Verdict(envelopeFromLocals(m), m.Raw, func() ([]byte, error) {
+	spoof, err := s.guard.Verdict(envelopeFromLocals(m), m.BounceShaped, m.Raw, func() ([]byte, error) {
 		fm, e := s.fetch(m.Owner, inbox, m.ID)
 		return fm.Raw, e
 	})
@@ -578,6 +578,22 @@ func (s *imapSession) rawResolver(m inbound.Message) rawFunc {
 				// A REJECTED hold is already served as a tombstone by the caller; this
 				// closes the UNDECIDED (invisible) stale-snapshot race.
 				if full.HeldByAssessment() && full.HoldDecision != inbound.HoldApproved {
+					raw = nil
+					break
+				}
+				// Authoritative bounce-guard re-check (#127), for the same stale-snapshot
+				// reason as the hold gate above. The SELECT snapshot is metadata-only, so a
+				// PENDING DSN whose envelope From is not daemon-like carried no shape flag
+				// and nothing could have examined it — it was listed. THIS fetch is what
+				// writes that flag (the store computes it at the content chokepoint), and it
+				// is the same fetch that would hand over the body. Re-running the guard on
+				// the freshly fetched record is therefore what makes compute-on-first-fetch
+				// safe rather than merely eventually-correct: the body is never served
+				// before the check the flag exists to enable.
+				//
+				// full.Raw is populated here, so the guard takes its raw-in-hand path and
+				// runs the complete shape check without a second fetch.
+				if s.guard != nil && s.guardHides(full, s.selectedInbox) {
 					raw = nil
 					break
 				}

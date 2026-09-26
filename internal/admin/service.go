@@ -322,7 +322,7 @@ func (s *Service) guardHoldsSpoof(m inbound.Message, inbox string) bool {
 	// a spoof the read face hides is also surfaced here for an operator decision —
 	// the two stay consistent. The error rides along with spoof=true; the read
 	// face logs it.
-	spoof, _ := s.guard.Verdict(envelopeFromLocals(m), m.Raw, func() ([]byte, error) {
+	spoof, _ := s.guard.Verdict(envelopeFromLocals(m), m.BounceShaped, m.Raw, func() ([]byte, error) {
 		fm, e := s.inbox.Get(s.inboxOwner(inbox), inbox, m.ID)
 		return fm.Raw, e
 	})

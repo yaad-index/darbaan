@@ -81,18 +81,30 @@ func Candidate(fromLocalParts []string) bool {
 // transient fetch error must not surface a possibly-forged MAILER-DAEMON. A
 // non-candidate never fetches, so legitimate mail is never hidden on a fetch
 // error. The signature check inside IsSpoof is likewise fail-closed.
-func (g *Guard) Verdict(fromLocalParts []string, rawInHand []byte, getRaw func() ([]byte, error)) (bool, error) {
+func (g *Guard) Verdict(fromLocalParts []string, shaped *bool, rawInHand []byte, getRaw func() ([]byte, error)) (bool, error) {
 	if len(rawInHand) > 0 {
 		return g.IsSpoof(rawInHand)
 	}
-	if !Candidate(fromLocalParts) {
-		return false, nil
+	// shaped is the stored bounce-shape flag for this message's body (#127), which
+	// closes the case the From pre-check structurally cannot see: a multipart/report
+	// DSN whose From is not mailer-daemon or postmaster. It is a POINTER because nil
+	// (no body written yet, so nothing has looked) is not the same claim as false
+	// (examined, not bounce-shaped), and only one of them is evidence.
+	//
+	// 🔑 This is ADDITIVE ONLY. A true flag adds a trigger; false and nil add
+	// nothing and remove nothing, so the flag can cause MORE checking than before
+	// and never less. That is deliberate: a stored flag is a cache of a past read,
+	// and letting a cache SUPPRESS a check would make a stale or mis-written flag
+	// able to hide a spoof — the failure this guard exists to prevent. The From
+	// pre-check therefore stays an independent trigger rather than an else-branch.
+	if (shaped != nil && *shaped) || Candidate(fromLocalParts) {
+		raw, err := getRaw()
+		if err != nil {
+			return true, err
+		}
+		return g.IsSpoof(raw)
 	}
-	raw, err := getRaw()
-	if err != nil {
-		return true, err
-	}
-	return g.IsSpoof(raw)
+	return false, nil
 }
 
 // Shaped reports whether raw looks like a bounce / DSN — header and structure
