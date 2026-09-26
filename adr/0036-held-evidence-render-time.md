@@ -99,6 +99,16 @@ text, so a missing span always means disagreement and must never be absorbed int
 "no span by nature" category. A future factor scored on structure rather than text brings its
 own state with its own ADR.
 
+⚠️ **The two states apply only when the re-run actually ran and its result was actually
+rendered.** Two cases fall outside them and must not borrow the "not available" line,
+because that line asserts a disagreement and neither case observed one:
+
+- **The stored body could not be read** (the existing unreadable-body card, `holds.go`, the
+  C46 branch). There is no re-run, so no factor can claim a mismatch. The card keeps its
+  existing unreadable-body line, names the factors that fired, and quotes nothing.
+- **A span was found but dropped for length.** The card says the matched text was omitted
+  for space, and never "the current rules no longer match".
+
 ### Rendering constraints
 
 - Each span is fenced and inert, rendered with the same fencing as the body, and labelled
