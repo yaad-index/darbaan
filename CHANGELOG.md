@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.20.0](https://github.com/yaad-index/darbaan/compare/v0.19.0...v0.20.0) (2026-09-26)
+
+
+### Features
+
+* **admin:** re-run the detector to find a held message's matched text ([#333](https://github.com/yaad-index/darbaan/issues/333)) ([f6fc097](https://github.com/yaad-index/darbaan/commit/f6fc097fcb2890114efe1dcf63b771c9f316331c))
+* **admin:** send without the approval hold when every recipient is an operator identity ([#313](https://github.com/yaad-index/darbaan/issues/313)) ([4b72b51](https://github.com/yaad-index/darbaan/commit/4b72b515144ce96be1e4d81c3aefdf0811c49232)), closes [#305](https://github.com/yaad-index/darbaan/issues/305)
+* **assessor:** operator-configurable detector patterns ([#330](https://github.com/yaad-index/darbaan/issues/330)) ([482ce08](https://github.com/yaad-index/darbaan/commit/482ce08f40cca0addcc6423cbe0cbcf5f2de4965))
+* **assessor:** record which detector factors were active ([#332](https://github.com/yaad-index/darbaan/issues/332)) ([9dd7b7b](https://github.com/yaad-index/darbaan/commit/9dd7b7bd24fcf3580ba7467eb109edbe9e63dad6))
+* **imapsync:** count failed label removals where the operator sees sync health ([#343](https://github.com/yaad-index/darbaan/issues/343)) ([030b3e1](https://github.com/yaad-index/darbaan/commit/030b3e16d073017ab79b3676f0bc032fdad6983d))
+* **imapsync:** establish an unknown UIDVALIDITY from an identity-matched fetch ([#327](https://github.com/yaad-index/darbaan/issues/327)) ([241d74a](https://github.com/yaad-index/darbaan/commit/241d74ab98d76fe4f93e5d548cf98fdc95adea82))
+* **screener:** hold a message whose extraction hit a cap ([#325](https://github.com/yaad-index/darbaan/issues/325)) ([04fa5ed](https://github.com/yaad-index/darbaan/commit/04fa5ed56489840df5c98526445fe692ed12b667))
+* **telegram:** show the matched text on a held message's card ([#335](https://github.com/yaad-index/darbaan/issues/335)) ([65f7883](https://github.com/yaad-index/darbaan/commit/65f788350025c89df8cb137af54c3dc70aa152c3))
+
+
+### Bug Fixes
+
+* **admin:** key the outbound not-found reply to a service marker, not a status string ([#317](https://github.com/yaad-index/darbaan/issues/317)) ([0326e91](https://github.com/yaad-index/darbaan/commit/0326e9179ab624a83df9ebba80b4e79450fb6b6f)), closes [#260](https://github.com/yaad-index/darbaan/issues/260)
+* **assessor:** neutralize fence markers built from lookalike characters ([#326](https://github.com/yaad-index/darbaan/issues/326)) ([f4b9b7f](https://github.com/yaad-index/darbaan/commit/f4b9b7f466e5c6da9f273421ed9130f5c793c6e0))
+* **imapsync:** back off the on-demand retry window after a deadline-ended pull ([#314](https://github.com/yaad-index/darbaan/issues/314)) ([2ffa426](https://github.com/yaad-index/darbaan/commit/2ffa426fe24afa006d0df528ded9e3d6996ab7b3)), closes [#258](https://github.com/yaad-index/darbaan/issues/258)
+* **imapsync:** refuse plain-keyword writes on unknown mailbox validity ([#306](https://github.com/yaad-index/darbaan/issues/306)) ([f93f027](https://github.com/yaad-index/darbaan/commit/f93f02763f03520d6febbaa7d21aebb2738ce2b5))
+* **inbound:** stamp Darbaan's own bounces trusted by construction ([#342](https://github.com/yaad-index/darbaan/issues/342)) ([3d4bcf7](https://github.com/yaad-index/darbaan/commit/3d4bcf7a658574a7cc57168bfb11d8c64a1953d4))
+* **inboxcfg:** refuse the unimplemented Authentication-Results gate settings ([#340](https://github.com/yaad-index/darbaan/issues/340)) ([996cf6a](https://github.com/yaad-index/darbaan/commit/996cf6a3e127cb4d5129c328392e7e598b11329e))
+* **listener:** a human hold decision outranks later rule results ([#341](https://github.com/yaad-index/darbaan/issues/341)) ([be8d091](https://github.com/yaad-index/darbaan/commit/be8d091d2bc15e1a79d1fa7cc912e6dc4c5d5904))
+* **listener:** a rejected hold is a tombstone whatever held it ([#344](https://github.com/yaad-index/darbaan/issues/344)) ([7935e69](https://github.com/yaad-index/darbaan/commit/7935e6948b762edb8988875fc45cd2052664598a))
+* pre-check the approve-as sender and sanitize the sync-status LAST ERROR column ([#309](https://github.com/yaad-index/darbaan/issues/309)) ([69f1936](https://github.com/yaad-index/darbaan/commit/69f1936c7ddd9bf25d578b9d8f8f0a97467f567b)), closes [#245](https://github.com/yaad-index/darbaan/issues/245)
+* **telegram:** decide the truncation marker and the full-body upload from one predicate ([#321](https://github.com/yaad-index/darbaan/issues/321)) ([ecbb958](https://github.com/yaad-index/darbaan/commit/ecbb958fe1dfc37fd6bbbc239b220991be203d7e)), closes [#119](https://github.com/yaad-index/darbaan/issues/119)
+
 ## [0.19.0](https://github.com/yaad-index/darbaan/compare/v0.18.1...v0.19.0) (2026-08-18)
 
 
