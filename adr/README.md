@@ -48,3 +48,4 @@ incoming-message injection assessment.
 | [0033](0033-audit-log-read-path.md) | Reading the audit log: live over the admin API, with a dedicated scope |
 | [0034](0034-operator-identity-send-without-approval.md) | Sending without approval when every recipient is an operator identity |
 | [0035](0035-configurable-detector-patterns.md) | Operator-configurable detector patterns |
+| [0036](0036-held-evidence-render-time.md) | Show the matched evidence on a held message, at render time only |
