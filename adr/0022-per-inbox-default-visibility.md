@@ -1,6 +1,6 @@
 # ADR 0022: Per-inbox default visibility (filter mode) — match-only rules over a default disposition
 
-**Status:** Proposed (2026-06-29)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-29)
 
 ## Context
 

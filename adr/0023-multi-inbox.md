@@ -1,6 +1,6 @@
 # ADR 0023: Multi-inbox — N inboxes in one Darbaan, each with its own backend, filters, visibility, and identity
 
-**Status:** Proposed (2026-06-29)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-29)
 
 ## Context
 

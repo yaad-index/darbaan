@@ -1,6 +1,6 @@
 # ADR 0018: Tiered storage — metadata in the KV store, message content on the filesystem
 
-**Status:** Proposed (2026-06-26)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-26)
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR 0025: Approval gate — full-body fidelity for long messages (.txt attachment)
 
-**Status:** Proposed (2026-06-29)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-29)
 
 ## Context
 

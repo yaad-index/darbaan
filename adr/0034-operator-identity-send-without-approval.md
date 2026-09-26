@@ -1,6 +1,6 @@
 # ADR 0034: Sending without approval when every recipient is an operator identity
 
-**Status:** Proposed (2026-09-25, pending operator sign-off)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-09-25)
 
 ## Context
 

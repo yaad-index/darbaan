@@ -1,6 +1,6 @@
 # ADR 0020: Agent labeling via IMAP keywords (with Gmail X-GM-LABELS mapping)
 
-**Status:** Proposed (2026-06-27)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-27)
 
 ## Context
 

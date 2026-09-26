@@ -1,6 +1,6 @@
 # ADR 0017: Admin and approval interfaces are separate host processes over the local API
 
-**Status:** Proposed (2026-06-26)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-26)
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR 0028: On-demand inbound sync — pull the queried inbox on STATUS
 
-**Status:** Proposed (2026-07-04); amended 2026-09-26 (see the end)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-07-04); amended 2026-09-26 (see the end)
 
 ## Context
 
