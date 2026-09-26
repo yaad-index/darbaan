@@ -116,8 +116,9 @@ type Message struct {
 
 	// HoldDecision records the human's call on a hold-for-human message (ADR
 	// 0021): "" = undecided (held, hidden from the agent), "approved" = exposed to
-	// the agent, "rejected" = stays hidden. Only meaningful while a hold rule
-	// matches the message; it is the one persisted, human-supplied filter state.
+	// the agent, "rejected" = stays hidden. Once set, it decides whether the message
+	// is served, whatever the rules say later (ADR 0021, 2026-09-26 amendment); it is
+	// the one persisted, human-supplied filter state.
 	// A single HoldDecision releases the message past EVERY hold source it matches
 	// (filter, bounce-spoof guard, injection assessment) — there is no per-source
 	// approval.

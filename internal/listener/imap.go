@@ -269,6 +269,19 @@ func (s *imapSession) listAndFilter(inbox string) (full, visible []inbound.Messa
 				continue // undecided → invisible
 			}
 		}
+		// A human hold decision outranks later rule results for that message (ADR 0021,
+		// 2026-09-26 amendment). Rules re-evaluate on every read, so without this a rule
+		// edit could hide a message the operator exposed, or serve in full one the
+		// operator rejected. It runs before the no-filter shortcut, which would
+		// otherwise serve a rejected message too. Only undecided messages reach the
+		// rules below.
+		switch m.HoldDecision {
+		case inbound.HoldApproved:
+			visible = append(visible, m)
+			continue
+		case inbound.HoldRejected:
+			continue
+		}
 		if flt == nil {
 			visible = append(visible, m)
 			continue
@@ -277,11 +290,8 @@ func (s *imapSession) listAndFilter(inbox string) (full, visible []inbound.Messa
 		case filter.Allow:
 			visible = append(visible, m)
 		case filter.Hold:
-			// Held messages are hidden until a human approves exposure (ADR 0021);
-			// rejected/undecided stay hidden (fail-safe).
-			if m.HoldDecision == inbound.HoldApproved {
-				visible = append(visible, m)
-			}
+			// Held and undecided (decided messages were settled above): hidden until
+			// a human decides (ADR 0021).
 		}
 	}
 	return full, visible, nil
