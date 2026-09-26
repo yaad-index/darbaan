@@ -58,14 +58,26 @@ The evidence call returns message bytes, so its reachability is **exactly that o
 `HeldContent` and no wider.** It is not a new surface for any caller that cannot already
 read held content.
 
+⚠️ **This needs new wiring, not just a new method.** `admin.Service` holds no reference to a
+detector or assessor today: `NewService` takes none, and no field carries one. The detector
+has to be injected the way the service's other late-bound dependencies already are (the
+sender, guard and filter setters), and it must be the instance the ingest path scores with,
+not a second one constructed for the admin side.
+
 ### Required behaviour when the re-run disagrees
 
 The render-time match is a **second observation**, and it can disagree with the stored
 verdict: ADR 0035 makes the pattern set operator-configurable, so the ruleset can change
 between assessment and render, and the stored content can be re-fetched. When a stored
 factor has no span in the re-run, **the card names the factor, quotes nothing, and says so
-explicitly** — for example *"matched text not available: the rules changed after this
-message was assessed"*.
+explicitly**. The card may say only what the system actually observed: *"matched text not
+available: the current rules no longer match this message"*.
+
+⚠️ **The card must not state WHY.** A rule change, a re-fetch that returned different content,
+and a defect in the re-run all produce the same observation, and the stored record cannot
+tell them apart. Attributing the disagreement to a rule change needs the per-message record
+of which factors were ACTIVE, which ADR 0035's consequences require and which is not yet
+implemented. Until that field exists, the fallback states the observation and never a cause.
 
 🚨 **Quoting a span for a factor that is no longer the reason is worse than quoting none.**
 It presents stale evidence as current with no signal that it is stale, to an operator whose
