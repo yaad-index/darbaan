@@ -1,6 +1,6 @@
 # ADR 0031: Per-sender trust rules
 
-**Status:** Proposed (2026-07-23); amended 2026-09-26 (see the end)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-07-23); amended 2026-09-26 (see the end)
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR 0021: Inbound filter — rule schema, operators, and serve-time evaluation
 
-**Status:** Proposed (2026-06-27)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-27)
 
 ## Context
 

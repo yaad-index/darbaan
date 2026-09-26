@@ -1,6 +1,6 @@
 # ADR 0033: Reading the audit log — live over the admin API, with a dedicated scope
 
-**Status:** Proposed (2026-08-18, pending operator approval)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-08-18)
 
 Gives the append-only audit log ([ADR 0011](0011-append-only-audit-log.md)) a
 **read** path. It rides the loopback admin API ([ADR 0017](0017-interfaces-as-clients-over-local-api.md))

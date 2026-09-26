@@ -1,6 +1,6 @@
 # ADR 0024: Inbound bounce-spoof guard — hide unsigned DSN-shaped mail by default
 
-**Status:** Proposed (2026-06-29)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-29)
 
 > Numbering note: ADR 0023 is reserved for the multi-inbox ADR (referenced by
 > ADR 0022); this guard was specified first and takes 0024.

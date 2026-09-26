@@ -1,6 +1,6 @@
 # ADR 0032: Incoming-message injection assessment
 
-**Status:** Accepted (2026-08-08); amended 2026-09-26 (see the end). **Amendment 1 (2026-08-08, pending operator sign-off):**
+**Status:** Accepted (2026-08-08); amended 2026-09-26 (see the end). **Amendment 1 (2026-08-08), accepted (operator sign-off recorded by approval of the PR that sets this status):**
 pins the assessment trigger to *eager-at-ingest* and adds the agent-visible state
 model (invisible / real / tombstone), superseding the lazy-trigger + placeholder-visible
 implementation — see [Amendment 1](#amendment-1--eager-at-ingest-trigger-and-agent-visible-state-model-2026-08-08).
@@ -415,3 +415,14 @@ makes the message visible, is written after it in one metadata write. A read can
 observe metadata without its body, or a visible message without its disposition; a
 crash between the two leaves an unreferenced blob and no visible message, which the
 next sync re-pulls.
+
+## Amendment (2026-09-26): status of this ADR and of Amendment 1
+
+Correction to text above, which stays as written (ADR 0037). Item A13 of #237.
+
+Two passages describe the state when this ADR was proposed rather than its state now:
+Consequences says "Scope here is the decision only (Proposed)" with implementation
+"deferred to follow-up PRs after sign-off", and Amendment 1 carries its own
+"Status: Proposed (pending operator sign-off)". The decision and Amendment 1 have both
+since shipped, and the Status line at the top is the authoritative record of their
+acceptance.

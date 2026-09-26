@@ -1,6 +1,6 @@
 # ADR 0004: Pluggable, multi-level approval pipeline
 
-**Status:** Accepted (2026-06-25)
+**Status:** Accepted (2026-06-25). Its compile-time plugin mechanism is superseded by [ADR 0017](0017-interfaces-as-clients-over-local-api.md) (runtime clients); the pipeline decision stands.
 
 ## Context
 Approval may come from a person via different surfaces, or from an automated

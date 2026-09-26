@@ -1,6 +1,6 @@
 # ADR 0005: Agent pre-screener as a compile-time plugin; risk routing
 
-**Status:** Accepted (2026-06-25)
+**Status:** Accepted (2026-06-25). Its compile-time plugin mechanism is superseded by [ADR 0017](0017-interfaces-as-clients-over-local-api.md), and automated pre-screening moved inbound under [ADR 0032](0032-incoming-message-injection-assessment.md); the light/strict routing stands.
 
 ## Context
 An automated agent can pre-screen queued mail for injection/exfiltration smell

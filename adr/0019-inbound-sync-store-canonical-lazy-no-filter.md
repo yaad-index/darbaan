@@ -1,6 +1,6 @@
 # ADR 0019: Inbound mailbox sync — store-canonical incremental pull, lazy content, no filter (v1)
 
-**Status:** Proposed (2026-06-26)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-26)
 
 ## Context
 

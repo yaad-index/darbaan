@@ -1,6 +1,6 @@
 # ADR 0010: Multi-mailbox in v1; multi-agent deferred
 
-**Status:** Accepted (2026-06-25)
+**Status:** Accepted (2026-06-25). Its deferred multi-agent sketch is superseded by [ADR 0027](0027-multi-agent-tenancy.md); the v1 multi-mailbox decision stands.
 
 ## Context
 Darbaan should front several mailboxes. Supporting several independent agent
