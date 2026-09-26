@@ -45,13 +45,16 @@ type Content struct {
 	Attachments []Attachment
 	// Truncated is true if any cap (per-part, total, part-count, or depth) was hit,
 	// so a caller knows the extraction is bounded — the content it holds is real,
-	// there is just more of it beyond the limits.
+	// there is just more of it beyond the limits. The screener holds such a message
+	// (#251) but keeps the score computed on the bounded content.
 	Truncated bool
 	// Undecodable is true if a part could not be decoded or read at all, or the MIME
 	// structure errored mid-stream, so text the message carries never reached the
-	// assessor (C19/C20). Unlike Truncated (a benign bound on readable content), this
-	// is an extraction hard-fail: the caller must not clear the message on it — the
-	// assessor cannot vouch for content it never saw (ADR 0032 fail-safe, Amendment 1).
+	// assessor (C19/C20). Both flags hold the message; they differ in what the
+	// assessment is worth. Truncated content was really read, so its score is kept.
+	// Undecodable is an extraction hard-fail with no trustworthy score, so it holds
+	// fail-safe as not-cleared — the assessor cannot vouch for content it never saw
+	// (ADR 0032 fail-safe, Amendment 1).
 	Undecodable bool
 }
 
@@ -284,12 +287,12 @@ func (st *walkState) budgetText(text string) string {
 }
 
 // readCapped reads at most MaxPartText bytes from a part body, reporting the two
-// incompleteness modes separately: capped is a benign per-part cap hit (the bytes
+// incompleteness modes separately: capped is a per-part cap hit, not an error (the bytes
 // it returns are real, there are just more), while failed is a genuine read/decode
 // error — go-message decodes transfer-encoding and charset here, so a bogus
 // charset= surfaces as failed with the text never seen (C20). The caller flags a
-// cap as Truncated but a failure as Undecodable, so a hard-fail can hold while a
-// bounded read does not.
+// cap as Truncated but a failure as Undecodable, so a hard-fail holds as not-cleared
+// while a bounded read holds with its score kept.
 func (st *walkState) readCapped(r io.Reader) (text string, capped, failed bool) {
 	limit := st.lim.MaxPartText
 	b, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))

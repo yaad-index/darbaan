@@ -119,6 +119,20 @@ func TestFormatHoldPreservesTruncationCaveat(t *testing.T) {
 	assert.NotContains(t, formatHold(m2, nil, false), "partial content")
 }
 
+// #251: a truncated message is held whatever its score, so a "low risk" card in the
+// held queue must say why it is there — the caveat carries the hold reason, not only
+// the trust qualifier.
+func TestFormatHoldTruncationStatesWhyHeld(t *testing.T) {
+	a := &inbound.Assessment{Disposition: inbound.AssessmentHeld, Score: 10, Band: "low", Truncated: boolPtr(true)}
+	line := holdAssessmentLine(a)
+	assert.Contains(t, line, "low risk (10)")
+	assert.Contains(t, line, "never assessed")
+	assert.Contains(t, line, "always held")
+
+	a.Truncated = boolPtr(false)
+	assert.NotContains(t, holdAssessmentLine(a), "always held", "an untruncated card carries no truncation hold reason")
+}
+
 // #280: the truncation caveat is now driven by the STRUCTURED flag, not the summary
 // prose. This pins the four states that matter, and demonstrates the mutation by its
 // effect on the EMITTED CARD (the caveat clause appears/disappears) rather than by an

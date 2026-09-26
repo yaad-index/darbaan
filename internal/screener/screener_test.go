@@ -146,19 +146,52 @@ func TestScreenUndecodableIsNotCleared(t *testing.T) {
 	assert.Empty(t, out.Summary)
 }
 
-// A benign cap (Truncated) is NOT a hard-fail: the assessor saw real, bounded
-// content, so screening proceeds normally rather than holding.
-func TestScreenTruncatedButDecodableProceeds(t *testing.T) {
-	sc := mustScorer(t, nil) // trusted baseline is low, no factors → agent-handled
+// #251: a cap hit (Truncated) is held for the human, because content beyond the cap
+// was never assessed but is still served in full. It is NOT a fail-safe hold: the
+// assessor saw real, bounded content, so it still runs and its score is kept.
+func TestScreenTruncatedIsHeldWithItsScore(t *testing.T) {
+	sc := mustScorer(t, nil) // trusted baseline, no factors: agent-handled if not truncated
 	det := &spyDetector{}
 	s := mustScreener(t, sc, det, WithExtractor(func([]byte, mailtext.Limits) (mailtext.Content, error) {
 		return mailtext.Content{Body: "bounded body", Truncated: true}, nil
 	}))
 
 	out := s.Screen(context.Background(), []byte("raw"), provenance.TrustTrusted, riskscore.RecipientTo)
-	assert.Equal(t, 1, det.calls, "a benign cap truncation still runs the assessor")
+	assert.Equal(t, riskscore.DispositionHeld, out.Result.Disposition, "a cap hit is held whatever the score")
+	assert.Equal(t, riskscore.BandLow, out.Result.Band, "the score of the assessed part is kept, not discarded")
+	assert.Equal(t, 1, det.calls, "a cap truncation still runs the assessor")
 	assert.False(t, out.Result.NotCleared, "a cap hit is not a fail-safe hold")
+	assert.Contains(t, out.Result.Reason, "extraction limits")
 	assert.True(t, out.Truncated, "the outcome carries the structured truncation flag when the assessor scored partial content")
+}
+
+// The positive control for the test above: the identical message without a cap hit
+// is agent-handled, so the hold there is caused by Truncated and nothing else.
+func TestScreenSameMessageNotTruncatedIsAgentHandled(t *testing.T) {
+	sc := mustScorer(t, nil)
+	det := &spyDetector{}
+	s := mustScreener(t, sc, det, WithExtractor(func([]byte, mailtext.Limits) (mailtext.Content, error) {
+		return mailtext.Content{Body: "bounded body"}, nil
+	}))
+
+	out := s.Screen(context.Background(), []byte("raw"), provenance.TrustTrusted, riskscore.RecipientTo)
+	assert.Equal(t, riskscore.DispositionAgentHandled, out.Result.Disposition)
+	assert.False(t, out.Truncated)
+}
+
+// A truncated message that already scored into a hold keeps the scorer's own reason:
+// truncation adds a hold, it never overwrites why one already happened.
+func TestScreenTruncatedAndAlreadyHeldKeepsScoreReason(t *testing.T) {
+	sc := mustScorer(t, nil) // unknown baseline 30 + instruction 40 = 70 → held on score
+	det := &spyDetector{ret: []riskscore.Factor{riskscore.FactorInstruction}}
+	s := mustScreener(t, sc, det, WithExtractor(func([]byte, mailtext.Limits) (mailtext.Content, error) {
+		return mailtext.Content{Body: "bounded body", Truncated: true}, nil
+	}))
+
+	out := s.Screen(context.Background(), []byte("raw"), provenance.TrustUnknown, riskscore.RecipientTo)
+	assert.Equal(t, riskscore.DispositionHeld, out.Result.Disposition)
+	assert.Equal(t, 70, out.Result.Score)
+	assert.NotContains(t, out.Result.Reason, "extraction limits", "an existing score hold keeps its own reason")
 }
 
 func TestScreenAssessorErrorIsNotCleared(t *testing.T) {

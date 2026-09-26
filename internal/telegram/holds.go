@@ -162,7 +162,7 @@ func holdAssessmentLine(a *inbound.Assessment) string {
 	// the caveat still survives on old partial-content cards (#280).
 	line := fmt.Sprintf("%s risk (%d)", a.Band, a.Score)
 	if assessmentTruncated(a) {
-		line += " — scored on partial content (message was truncated during extraction)"
+		line += " — scored on partial content: the message exceeded the extraction limits, so part of it was never assessed, and such messages are always held"
 	}
 	if reason := glossFactors(a.Factors); reason != "" {
 		line += " — " + reason
