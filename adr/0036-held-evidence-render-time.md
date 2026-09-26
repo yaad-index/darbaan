@@ -26,8 +26,14 @@ Two facts from the current code shape the choice:
 
 - **The hold card already fetches the stored body at render time.** `notifyHold`
   (`internal/telegram/holds.go`) calls `HeldContent` and fences the result (ADR 0032
-  change A). A render-time match therefore adds no new fetch and no new exposure of the
-  body: the bytes it would quote are already on the card, below it.
+  change A). A render-time match therefore adds no new fetch. ⚠️ **For body-scoped
+  factors the quoted bytes are already on the card. That is NOT true for every factor:**
+  `fencedBody` renders the decoded body only, while the attachment-directive factor matches
+  attachment text and the secrets-request factor matches across body and attachments. A
+  span from those factors quotes text the card does not otherwise show. The audience is the
+  same operator and the text is fenced, so this is accepted, but it is a new exposure to the
+  operator chat and is not covered by the "already on the card" argument. Each span
+  therefore names its source (the body, or the attachment's filename).
 - **The detector only answers yes or no.** `matchesAny` (`internal/assessor/heuristic.go`)
   uses `MatchString`. Returning a span needs a new method; it is not a flag to flip.
 
@@ -48,15 +54,15 @@ Options not taken, and why:
 
 ### Where the match runs
 
-The span is computed on the daemon side, by the same detector instance and configuration
-that produced the stored verdict, and handed to the notifier as transient data alongside
-the content it already fetches. **The notifier must not construct its own detector.** Two
+The span is computed on the daemon side, by **the ingest path's detector instance** with
+its *current* configuration, which can differ from the configuration that produced the
+stored verdict (that difference is exactly the disagreement case below). It is handed to the
+notifier as transient data alongside the content it already fetches. **The notifier must not construct its own detector.** Two
 detectors built from two copies of the configuration can disagree silently, which is the
 failure the next section exists to handle rather than to multiply.
 
-The evidence call returns message bytes, so its reachability is **exactly that of
-`HeldContent` and no wider.** It is not a new surface for any caller that cannot already
-read held content.
+The evidence route returns message bytes and requires **`holds:read`** (ADR 0029), the
+scope `HeldContent` already requires, and nothing broader.
 
 ⚠️ **This needs new wiring, not just a new method.** `admin.Service` holds no reference to a
 detector or assessor today: `NewService` takes none, and no field carries one. The detector
@@ -77,16 +83,21 @@ available: the current rules no longer match this message"*.
 and a defect in the re-run all produce the same observation, and the stored record cannot
 tell them apart. Attributing the disagreement to a rule change needs the per-message record
 of which factors were ACTIVE, which ADR 0035's consequences require and which is not yet
-implemented. Until that field exists, the fallback states the observation and never a cause.
+implemented. And even that field would show only a factor switched *off*, not patterns
+*edited*. Backing "the rules changed" would need a digest of the effective pattern set recorded
+with each assessment. Until something records that, the fallback states the observation and
+never a cause.
 
 🚨 **Quoting a span for a factor that is no longer the reason is worse than quoting none.**
 It presents stale evidence as current with no signal that it is stale, to an operator whose
 entire task at that moment is to judge the evidence.
 
-⚠️ **And absence must never read as "nothing matched".** The card distinguishes three
-states and never collapses them: a span shown; a factor that fired with no span available
-(and why); a factor with no textual span by nature, such as one scored on structure rather
-than content.
+⚠️ **And absence must never read as "nothing matched".** For every factor that fired, the
+card shows exactly one of two states: **a span**, or **the explicit "matched text not
+available" line** above. There is no third state today. Every current factor is a pattern over
+text, so a missing span always means disagreement and must never be absorbed into a
+"no span by nature" category. A future factor scored on structure rather than text brings its
+own state with its own ADR.
 
 ### Rendering constraints
 
@@ -119,6 +130,19 @@ the admin API, or a CLI an agent can run — would hand the payload to exactly t
 the hold protects, and the hold would stop meaning anything. **The operator chat upload is
 the only permitted delivery.** A CLI such as `darbaan holds show` must not be offered as
 the expansion path on this card, because an agent with shell access can run it.
+
+🚨 **But the button is not the boundary. The credential is.** Any client holding
+`holds:read` can already read a held body, and would be able to read the evidence route too.
+**ADR 0029's least-privilege example gives a pre-screener "the `*:read` scopes", which includes
+`holds:read`.** If an agent ever runs as that pre-screener, it can read exactly the payload the
+hold withholds from it, whatever this card does. So:
+
+- **`holds:read` is an operator-only scope.** It must not be granted to any credential an
+  agent holds or can reach.
+- **ADR 0029's pre-screener example is amended** to the read scopes *excluding* `holds:read`.
+  This ADR records that requirement; the amendment itself is a follow-up to 0029.
+- Implementation checks the configured clients and confirms that no agent-facing credential
+  carries `holds:read` today, rather than assuming it.
 
 ## Consequences
 
