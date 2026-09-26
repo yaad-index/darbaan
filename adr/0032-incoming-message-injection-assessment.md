@@ -1,6 +1,6 @@
 # ADR 0032: Incoming-message injection assessment
 
-**Status:** Accepted (2026-08-08). **Amendment 1 (2026-08-08, pending operator sign-off):**
+**Status:** Accepted (2026-08-08); amended 2026-09-26 (see the end). **Amendment 1 (2026-08-08, pending operator sign-off):**
 pins the assessment trigger to *eager-at-ingest* and adds the agent-visible state
 model (invisible / real / tombstone), superseding the lazy-trigger + placeholder-visible
 implementation — see [Amendment 1](#amendment-1--eager-at-ingest-trigger-and-agent-visible-state-model-2026-08-08).
@@ -370,3 +370,48 @@ isolated assessor, the deterministic score composition, the point-table / baseli
 band / threshold configuration, and the fail-safe routing (the original decision)
 are unchanged — only the trigger point and the agent-visible disposition surface
 change.
+
+## Amendment (2026-09-26): fail-safe cases, what the agent sees, band edges, write ordering
+
+Corrections to text above, which stays as written (ADR 0037). Items A2 to A5 of #237.
+
+**Fail-safe (A2).** The Fail-safe section's first bullet conflates three cases. What
+the system does:
+
+- **Assessment not configured** (the feature is off): **no assessment runs at all**,
+  and ingest is identical to the path before this ADR. The bullet's "falls back to
+  the system-composed terms" is wrong: the cheap terms are evaluated only inside an
+  assessment, so with the feature off there is no scoring of any kind.
+- **Configured but failing** (the assessor errors or times out, extraction
+  hard-fails, or part of the message cannot be decoded): **not cleared, held.**
+- **Extraction hit a size or shape cap**: **held**, with the score of the part that
+  was assessed kept as evidence (#251). The bounded content was assessed, but the
+  part beyond the cap was not and would otherwise be served unscanned.
+
+The detector/scorer factor alignment is validated **at every start, including when
+assessment is off**, so a misconfiguration fails at startup rather than lying dormant
+behind the flag until the day it is switched on.
+
+**What the agent sees (A3).** Decision §4 says only the assessor's summary, factors and
+score cross to the agent, "never the raw payload"; the §6 closing paragraph says the
+agent "only ever sees" those, "never the raw payload". Both hold for **the assessor's
+own output**, which never carries message bytes. Neither holds for **the message**:
+by §6's first bullet, a message below the threshold is served to the agent in full,
+and so is one the operator exposes. A held message is not served until the operator
+decides, and a dropped one never is.
+
+**Band edges and threshold (A4).** The bands are half-open at their upper edge, as the
+code has always computed them: **[0, 33) low, [33, 66) medium, [66, 100] high**. The
+listed `0–33 / 33–66 / 66–100` assigned 33 and 66 to two bands each. The default
+human-surface threshold is **70**, not "≈ 70", and it is a setting separate from the
+band edges: with the defaults, a score from 66 to 69 is labelled high but is not held.
+§6's "high band, by default" is therefore approximate; the rule is the threshold.
+
+**Write ordering (A5).** "Core invariant and fail-safe" says metadata, body and
+disposition "land in one store write". Since ADR 0018 the body and the metadata are in
+separate stores, so no single write covers both. The invariant rests on **ordering**:
+the body blob is written first, and the metadata, which carries the disposition and
+makes the message visible, is written after it in one metadata write. A read cannot
+observe metadata without its body, or a visible message without its disposition; a
+crash between the two leaves an unreferenced blob and no visible message, which the
+next sync re-pulls.

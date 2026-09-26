@@ -1,6 +1,6 @@
 # ADR 0026: Upstream reconciliation — retract the local copy when a message leaves the source
 
-**Status:** Proposed (2026-06-30)
+**Status:** Proposed (2026-06-30); amended 2026-09-26 (see the end)
 
 ## Context
 
@@ -141,3 +141,15 @@ Defaults: `fraction = 0.5`, `floor = 5`, both per-inbox configurable (`reconcile
 **Rationale:** the cap exists so a source-side anomaly — a mass deletion or bulk un-label upstream — cannot silently empty the local store. The latch keeps the operator in the loop for an anomalous purge while still allowing a confirmed legitimate large removal to complete: neither alerting forever nor auto-purging.
 
 Relates to ADR 0004, 0017 (admin API / approval surface for the release action).
+
+## Amendment (2026-09-26): citations and the scope of "never modified"
+
+Corrections to text above, which stays as written (ADR 0037). Item A10 of #237.
+
+- **The audit log is ADR 0011**, not "ADR 0007". Every retraction's audit record is
+  written under ADR 0011's append-only log; ADR 0007 is signed-bounce trust.
+- **Read-only upstream is ADR 0019**, not ADR 0002, and ADR 0020 has since narrowed it
+  with one exception: agent labels are written upstream (X-GM-LABELS or keywords).
+- **"The upstream is never modified" is scoped to content**: reconciliation never
+  deletes, expunges, or alters a message upstream. It does not cover label or flag
+  writes, which ADR 0020 permits and which this ADR does not perform.

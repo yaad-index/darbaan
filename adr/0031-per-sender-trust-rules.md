@@ -1,6 +1,6 @@
 # ADR 0031: Per-sender trust rules
 
-**Status:** Proposed (2026-07-23)
+**Status:** Proposed (2026-07-23); amended 2026-09-26 (see the end)
 
 ## Context
 
@@ -92,3 +92,20 @@ Write-path and serve-path stay consistent because both derive from the **same** 
 1. **Per-inbox rules + resolution (matched on `From`, upstream-trust model).** Parse + validate the `rules` list (level, matcher, note; reject duplicate matchers); resolve most-specific rule → inbox default → unknown; widen the chokepoint's trust input to `(inbox, From)`. Delivers trusted/untrusted/unknown for a strong upstream, reusing the ADR 0030 chokepoint.
 2. **Authentication-Results gate for `trusted`** (opt-in `require_authenticated`): trusted `authserv-id` config, DMARC/DKIM alignment check, forged-`Authentication-Results` defense; gate failure → `unknown`.
 3. **(Later)** richer matchers (pattern/regex), additional match criteria, and/or a global rule set.
+
+## Amendment (2026-09-26): the example's `level: unknown` is not a valid value
+
+Correction to text above, which stays as written (ADR 0037). Item A11 of #237.
+
+The example configuration sets `trust: level: unknown`. Configuration load rejects it
+(`trust.level "unknown" is invalid (want "trusted" or "untrusted", or omit for
+unknown)`), as ADR 0030 specifies: **unknown is expressed by omitting `level`**, and
+that is its only spelling, for an inbox and for a per-sender rule alike. This ADR does
+not add `unknown` as a legal value. The example should read:
+
+```yaml
+    trust:
+      # level omitted: the unknown default (ADR 0030)
+      require_authenticated: true
+      authserv_id: mx.google.com
+```

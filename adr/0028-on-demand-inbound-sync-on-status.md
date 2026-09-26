@@ -1,6 +1,6 @@
 # ADR 0028: On-demand inbound sync — pull the queried inbox on STATUS
 
-**Status:** Proposed (2026-07-04)
+**Status:** Proposed (2026-07-04); amended 2026-09-26 (see the end)
 
 ## Context
 
@@ -144,3 +144,10 @@ only lets the agent skip the wait between its cycles.
 - `NOOP` stays cheap and dial-free, so idle keep-alives cost nothing upstream.
 - The change is inert until an operator opts an inbox in, so existing
   deployments are unaffected.
+
+## Amendment (2026-09-26): citation
+
+Correction to text above, which stays as written (ADR 0037). Item A10 of #237.
+
+**Read-only upstream is ADR 0019**, not ADR 0002, narrowed by ADR 0020's label
+exception. The on-demand pull remains read-only with respect to message content.
