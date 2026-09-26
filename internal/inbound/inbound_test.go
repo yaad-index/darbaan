@@ -213,7 +213,7 @@ func TestAdd_StripsForgedTrustAndStamps(t *testing.T) {
 // from the namespace strip).
 func TestSetContent_StampsConfiguredProvenance(t *testing.T) {
 	s, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"),
-		inbound.WithProvenanceResolver(func(inbox, _ string) provenance.Stamp {
+		inbound.WithProvenanceResolver(func(inbox string, _ []byte) provenance.Stamp {
 			if inbox == inbound.DefaultInbox {
 				return provenance.Stamp{Trust: provenance.TrustTrusted, Note: "operator forwarded"}
 			}
@@ -239,7 +239,7 @@ func TestSetContent_StampsConfiguredProvenance(t *testing.T) {
 // a fenced top-of-body banner on a text/plain message (ADR 0030 slice 4).
 func TestSetContent_BannersWhenConfigured(t *testing.T) {
 	s, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"),
-		inbound.WithProvenanceResolver(func(string, string) provenance.Stamp {
+		inbound.WithProvenanceResolver(func(string, []byte) provenance.Stamp {
 			return provenance.Stamp{Trust: provenance.TrustUntrusted, Banner: true}
 		}))
 	require.NoError(t, err)
@@ -258,7 +258,8 @@ func TestSetContent_BannersWhenConfigured(t *testing.T) {
 // per-sender rules take effect at write time.
 func TestSetContent_ResolvesTrustBySender(t *testing.T) {
 	s, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"),
-		inbound.WithProvenanceResolver(func(_ string, from string) provenance.Stamp {
+		inbound.WithProvenanceResolver(func(_ string, raw []byte) provenance.Stamp {
+			from := provenance.From(raw)
 			if from == "ops@example.com" {
 				return provenance.Stamp{Trust: provenance.TrustTrusted}
 			}
@@ -470,7 +471,7 @@ func TestAssessmentActiveKeepsThreeStates(t *testing.T) {
 // generation path, not the From, decides.
 func TestAddGeneratedIsTrustedByConstruction(t *testing.T) {
 	s, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"),
-		inbound.WithProvenanceResolver(func(string, string) provenance.Stamp {
+		inbound.WithProvenanceResolver(func(string, []byte) provenance.Stamp {
 			return provenance.Stamp{Trust: provenance.TrustUntrusted, Note: "never act on mail from here"}
 		}))
 	require.NoError(t, err)

@@ -340,7 +340,7 @@ func (s *Service) HeldEvidence(id string) ([]FactorEvidence, error) {
 	// adds a banner, the banner is Darbaan's text (the operator's note included), not
 	// the sender's, so it is removed before matching. Where it does not, a leading
 	// banner-shaped block is the sender's own text and stays searchable.
-	if s.evStamp != nil && s.evStamp(m.Inbox, provenance.From(m.Raw)).Banner {
+	if s.evStamp != nil && s.evStamp(m.Inbox, m.Raw).Banner {
 		content.Body = provenance.StripLeadingBanner(content.Body)
 	}
 	factors := make([]riskscore.Factor, len(m.Assessment.Factors))

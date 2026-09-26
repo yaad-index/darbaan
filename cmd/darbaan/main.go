@@ -520,9 +520,9 @@ func provenanceResolver(inboxes []inboxcfg.Inbox) inbound.ProvenanceResolver {
 	for _, in := range inboxes {
 		byName[inbound.NormInbox(in.Name)] = in
 	}
-	return func(inbox, from string) provenance.Stamp {
+	return func(inbox string, raw []byte) provenance.Stamp {
 		if in, ok := byName[inbound.NormInbox(inbox)]; ok {
-			return in.SenderStamp(from) // per-sender rule → inbox default → unknown (ADR 0031)
+			return in.Stamp(raw) // per-sender rule → inbox default → unknown, trusted gated on authentication (ADR 0031)
 		}
 		return provenance.Stamp{Trust: provenance.TrustUnknown}
 	}
@@ -737,7 +737,7 @@ func (cli *CLI) buildAssessHook(inboxes []inboxcfg.Inbox, resolve inbound.Proven
 	// display form would never match and would silently fail open (C42/C6). The
 	// caller's `from` argument is therefore unused here.
 	return func(inbox, _ string, raw []byte, env *inbound.Envelope) *inbound.Assessment {
-		trust := resolve(inbox, provenance.From(raw)).Trust
+		trust := resolve(inbox, raw).Trust
 		var to, cc []string
 		if env != nil {
 			to = envAddrStrings(env.To)
@@ -1723,7 +1723,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 			// strip-then-stamp pass as the trust verdict, so the namespace strip
 			// clears any inbound X-Darbaan-Risk look-alike before the system value
 			// is stamped. Empty advisory strings leave the headers unset.
-			st := provResolver(inbox, provenance.From(raw))
+			st := provResolver(inbox, raw)
 			st.Risk = risk
 			st.RiskFactors = riskFactors
 			return provenance.Sanitize(raw, st)

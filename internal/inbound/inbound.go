@@ -278,14 +278,15 @@ type InboundStore interface {
 	Close() error
 }
 
-// ProvenanceResolver maps a message's (authenticated inbox, sender address) to
-// the provenance the store's content-write chokepoint stamps (ADR 0030 + 0031):
-// its trust verdict and optional note. It reads only config — the inbox's trust
-// default and its per-sender rules, matched against `from`. The sender From is
-// message-derived, but the trust asymmetry keeps it safe: a From only ever raises
-// trust to `trusted` under the upstream-authentication boundary. A nil resolver
-// selects the unknown-trust / no-note fail-safe default.
-type ProvenanceResolver func(inbox, from string) provenance.Stamp
+// ProvenanceResolver maps a message arriving in an authenticated inbox to the
+// provenance the store's content-write chokepoint stamps (ADR 0030 + 0031): its
+// trust verdict and optional note. It reads the inbox's trust default and its
+// per-sender rules, matched against the message's From, and, when the inbox
+// requires it, the upstream's own Authentication-Results, which gate every
+// `trusted` outcome (ADR 0031 slice 2, as amended 2026-09-26). It takes the raw
+// message so that gate cannot be skipped by a caller. A nil resolver selects the
+// unknown-trust / no-note fail-safe default.
+type ProvenanceResolver func(inbox string, raw []byte) provenance.Stamp
 
 // Factory constructs an InboundStore of a given type from a path and provenance
 // resolver (nil → stamp unknown trust, no note).
