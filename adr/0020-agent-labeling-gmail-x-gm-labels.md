@@ -87,13 +87,21 @@ first-class Gmail labels.
 
 Relates to ADR 0001, 0002, 0009, 0016, 0019.
 
-## Amendment (2026-09-26): failed label writes are not reconciled; they are made visible
+## Amendment (2026-09-26): which failed label writes converge, and making the rest visible
 
 Decision on item A6 of #237; text above stays as written (ADR 0037).
 
 The text says a failed upstream label write "is logged and reconciled on the next
-sync". No ADR provides that reconciliation and the code does not perform it, so a
-failed write leaves Darbaan's labels and the upstream's diverged indefinitely. The
-divergence is acknowledged, and it **must not be silent**: a failed label write is
-logged and **counted where an operator can see it**. A reconciliation or retry
-mechanism is left to a later ADR. The visible count follows this amendment in code.
+sync". That holds for **additions** and not for **removals**:
+
+- A record whose label write fails stays dirty, and every sync re-applies its full
+  wanted label set until the write succeeds (`reconcileKeywords`). A failed addition
+  therefore converges.
+- The re-apply is additive: it applies the wanted set and removes nothing. A failed
+  **removal** is never retried, and the label stays upstream indefinitely while
+  Darbaan's own view no longer has it.
+
+The divergence from failed removals is acknowledged, and it **must not be silent**: a
+failed label removal is logged and **counted where an operator can see it**, as is a
+record that keeps failing to converge. A mechanism that also converges removals is
+left to a later ADR. The visible count follows this amendment in code.
