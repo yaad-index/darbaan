@@ -71,11 +71,7 @@ var secretsPatterns = compileAll(
 
 // NewHeuristicDetector returns the v1 detector with the default ruleset.
 func NewHeuristicDetector() *HeuristicDetector {
-	return &HeuristicDetector{rules: []rule{
-		{factor: riskscore.FactorInstruction, scope: scopeBody, patterns: instructionPatterns},
-		{factor: riskscore.FactorSecretsRequest, scope: scopeAll, patterns: secretsPatterns},
-		{factor: riskscore.FactorAttachmentDirectives, scope: scopeAttachments, patterns: instructionPatterns},
-	}}
+	return &HeuristicDetector{rules: builtinRules()}
 }
 
 // Detect applies each rule to its scope of the extracted content and returns the

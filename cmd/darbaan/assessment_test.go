@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yaad-index/darbaan/internal/assessor"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/provenance"
 	"github.com/yaad-index/darbaan/internal/riskscore"
@@ -179,4 +180,57 @@ func TestBuildAssessHookResolvesTrustFromRawAddress(t *testing.T) {
 	// on the raw's normalized RFC5321 address instead.
 	_ = hook(inbound.DefaultInbox, "Alice <ALICE@example.com>", raw, &inbound.Envelope{})
 	assert.Equal(t, "alice@example.com", gotAddr, "trust resolved on the normalized raw address, not the display form")
+}
+
+// ADR 0035: an invalid detector: entry aborts startup even with assessment off, so
+// a pattern that could never match cannot wait for the day it is switched on.
+func TestBuildAssessHookAbortsOnBadDetectorConfigWhenDisabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("assessment:\n  detector:\n    instruction:\n      patterns: [\"x\"]\n"), 0o600))
+	cli := &CLI{Config: path, AssessmentEnabled: false, AssessmentTimeout: time.Second}
+	_, err := cli.buildAssessHook(nil, nilResolver, riskscore.DefaultConfig())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown factor "instruction"`)
+}
+
+// The detector: key sits inside assessment: beside the scorer's keys, and each
+// reader takes only its own: the scorer ignores detector:, and a valid detector
+// section builds.
+func TestAssessmentSectionCarriesScorerAndDetectorKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	y := "" +
+		"assessment:\n" +
+		"  threshold: 55\n" +
+		"  detector:\n" +
+		"    secrets_request:\n" +
+		"      enabled: false\n"
+	require.NoError(t, os.WriteFile(path, []byte(y), 0o600))
+	cli := &CLI{Config: path, AssessmentEnabled: false, AssessmentTimeout: time.Second}
+
+	cfg, err := cli.assessmentConfig()
+	require.NoError(t, err)
+	assert.Equal(t, 55, cfg.Threshold)
+
+	dcfg, err := cli.detectorConfig()
+	require.NoError(t, err)
+	require.Contains(t, dcfg.Factors, riskscore.FactorSecretsRequest)
+
+	_, err = cli.buildAssessHook(nil, nilResolver, cfg)
+	require.NoError(t, err)
+}
+
+// Switching factors off is visible at startup: they are named, and an untouched
+// detector names nothing.
+func TestSwitchedOffFactorsNamesThem(t *testing.T) {
+	cfg, err := assessor.ParseDetectorConfig([]byte("detector:\n  secrets_request:\n    enabled: false\n"))
+	require.NoError(t, err)
+	d, err := assessor.NewConfiguredDetector(cfg)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"secrets_request"}, switchedOffFactors(d))
+
+	all, err := assessor.NewConfiguredDetector(assessor.DetectorConfig{Disabled: true})
+	require.NoError(t, err)
+	assert.Len(t, switchedOffFactors(all), 3, "detection off names every built-in factor")
+
+	assert.Empty(t, switchedOffFactors(assessor.NewHeuristicDetector()))
 }
