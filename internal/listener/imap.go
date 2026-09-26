@@ -247,6 +247,12 @@ func (s *imapSession) listAndFilter(inbox string) (full, visible []inbound.Messa
 		// broad allow rule.
 		if s.guard != nil {
 			if s.guardHides(m, inbox) {
+				// A spoof the operator rejected from the held queue is served as the
+				// tombstone like any rejected hold (ADR 0021/0032, 2026-09-26
+				// amendment); in drop mode no hold exists and it stays unseen.
+				if s.holdSpoof && m.HoldDecision == inbound.HoldRejected {
+					visible = append(visible, m)
+				}
 				continue
 			}
 		}
@@ -280,6 +286,9 @@ func (s *imapSession) listAndFilter(inbox string) (full, visible []inbound.Messa
 			visible = append(visible, m)
 			continue
 		case inbound.HoldRejected:
+			// Reject means a tombstone whatever held the message (ADR 0021/0032,
+			// 2026-09-26 amendment): visible, served with system content only.
+			visible = append(visible, m)
 			continue
 		}
 		if flt == nil {
@@ -553,10 +562,10 @@ func tombstoneMessage(m inbound.Message) inbound.Message {
 }
 
 // isTombstone reports whether m serves the rejected-hold tombstone rather than its
-// real content (ADR 0032 Amendment 1). Keyed on the decided disposition, which is
-// authoritative at read time because assessment is eager-at-ingest.
+// real content. A rejected hold is a tombstone whatever held it: assessment, a
+// filter rule, or the spoof guard (ADR 0021/0032, 2026-09-26 amendment).
 func isTombstone(m inbound.Message) bool {
-	return m.HeldByAssessment() && m.HoldDecision == inbound.HoldRejected
+	return m.HoldDecision == inbound.HoldRejected
 }
 
 // tombstoneResolver is a rawFunc that always yields the system tombstone body.
