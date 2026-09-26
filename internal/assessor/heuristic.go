@@ -100,26 +100,41 @@ func (d *HeuristicDetector) Detect(ctx context.Context, c mailtext.Content) ([]r
 	return out, nil
 }
 
-// stripFormatRunes removes every Unicode format (Cf) code point from s, for
-// match-only use in detector matching. (The fence folds the same Cf class itself,
-// rune by rune, so it can map a match back to the original span.) The bypass
-// class is the whole Cf category \u2014 zero-width space/joiners, BOM, word joiner,
-// the LRM/RLM/ALM bidi marks, the embedding/override/isolate controls, the
-// invisible math operators, and the soft hyphen \u2014 not any fixed list, so matching
-// the category covers present and future members. It is safe here precisely
-// because it never touches served/stored text; the marginal cost is a rare false
-// merge on a visible Arabic prepended-sign rune, which errs toward a hold \u2014 the
+// stripFormatRunes removes every invisible rune (see isIgnorable) from s, for
+// match-only use in detector matching. The fence folds the same class itself, rune
+// by rune, so it can map a match back to the original span; both call isIgnorable,
+// so the two cannot drift apart. The name predates the class widening beyond Cf
+// and is kept because design records cite it. It is safe here precisely because it
+// never touches served/stored text; the marginal cost is a rare false merge on a
+// visible Arabic prepended-sign rune (which is Cf), erring toward a hold \u2014 the
 // right direction for a security matcher.
 func stripFormatRunes(s string) string {
-	if !strings.ContainsFunc(s, func(r rune) bool { return unicode.Is(unicode.Cf, r) }) {
+	if !strings.ContainsFunc(s, isIgnorable) {
 		return s
 	}
 	return strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Cf, r) {
+		if isIgnorable(r) {
 			return -1
 		}
 		return r
 	}, s)
+}
+
+// isIgnorable reports whether r renders as nothing and can therefore be planted
+// inside a keyword or a fence marker without changing what a reader sees. It is
+// the Unicode default-ignorable class, taken by category and property rather than
+// any fixed list, so present and future members are covered:
+//   - Cf, the format runes: zero-width space and joiners, BOM, word joiner, the
+//     LRM/RLM/ALM bidi marks, the embedding/override/isolate controls, the
+//     invisible math operators, the soft hyphen;
+//   - Variation_Selector: VS1-16, VS17-256 and the Mongolian free variation
+//     selectors, which are category Mn and so escaped a Cf-only test (#251);
+//   - Other_Default_Ignorable_Code_Point: the combining grapheme joiner (Mn) and the
+//     Hangul fillers, which are even category Lo yet render blank.
+func isIgnorable(r rune) bool {
+	return unicode.Is(unicode.Cf, r) ||
+		unicode.Is(unicode.Variation_Selector, r) ||
+		unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r)
 }
 
 // Factors returns the distinct factors this detector can emit (sorted), so

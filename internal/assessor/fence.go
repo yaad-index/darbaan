@@ -3,7 +3,6 @@ package assessor
 import (
 	"regexp"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
@@ -36,7 +35,8 @@ func Fence(label, text string) string {
 // neutralizeMarkers rewrites every spoofed fence marker in text so it can no
 // longer read as the real frame, to a human or to an LLM summarizing the alert.
 // A spoof may hide a marker from a plain match three ways: mixed case, an
-// invisible format rune planted inside it (C44), or lookalike characters —
+// invisible rune planted inside it (C44; any default-ignorable, #251), or
+// lookalike characters —
 // fullwidth or mathematical forms, or letters from another script (#251).
 //
 // Matching runs on a folded copy and only the matched span is rewritten in the
@@ -61,8 +61,8 @@ func neutralizeMarkers(text string) string {
 	return b.String()
 }
 
-// foldForMarkers returns a match-only copy of text in which format runes are
-// dropped, each other rune is NFKC-folded (fullwidth, mathematical and circled
+// foldForMarkers returns a match-only copy of text in which invisible runes
+// (isIgnorable) are dropped, each other rune is NFKC-folded (fullwidth, mathematical and circled
 // forms, lookalike spaces), and the cross-script lookalikes in markerLookalikes
 // map to the ASCII letter they imitate. from[i] and to[i] give the byte range in
 // text of the rune that produced folded byte i, so a match on the copy maps back
@@ -73,8 +73,8 @@ func foldForMarkers(text string) (folded string, from, to []int) {
 		r, w := utf8.DecodeRuneInString(text[i:])
 		var f string
 		switch {
-		case unicode.Is(unicode.Cf, r):
-			// dropped: stripFormatRunes' class, invisible and display-harmless
+		case isIgnorable(r):
+			// dropped: invisible, and the same class the detector strips
 		case markerLookalikes[r] != 0:
 			f = string(markerLookalikes[r])
 		default:
