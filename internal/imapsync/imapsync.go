@@ -34,6 +34,20 @@ type Syncer struct {
 	logger     *slog.Logger   // structured logger; defaults to slog.Default(), injectable via SetLogger
 	audit      audit.AuditLog // retract audit sink for on-demand stale-mapping drops (#190); nil = no audit
 	assess     AssessHook     // injection assessment at ingest (ADR 0032); nil = off
+
+	// Label-write visibility (ADR 0020, 2026-09-26 amendment). A failed label
+	// removal is never reconciled, so each one is reported; the pending count is how
+	// many dirty records the last reconcile pass still could not write. nil = off.
+	onRemovalFailed func()
+	onLabelsPending func(n int)
+}
+
+// SetLabelHealth installs the label-write visibility hooks: onRemovalFailed runs
+// for every label write that fails while removing labels, which no later sync
+// repairs; onLabelsPending receives, after each reconcile pass, how many records
+// still carry an unwritten label change.
+func (s *Syncer) SetLabelHealth(onRemovalFailed func(), onLabelsPending func(n int)) {
+	s.onRemovalFailed, s.onLabelsPending = onRemovalFailed, onLabelsPending
 }
 
 // AssessHook, when set, runs the injection assessment on a message's fetched
@@ -526,6 +540,20 @@ func withheldIfHeld(m inbound.Message) inbound.Message {
 // both additions and removals (content + delete stay read-only). The local store
 // is canonical; a failure here is returned so the caller logs + reconciles later.
 func (s *Syncer) WriteKeywords(owner, inbox, id string, add, remove []string) error {
+	err := s.writeKeywords(owner, inbox, id, add, remove)
+	if err != nil && len(remove) > 0 {
+		// The reconcile pass re-applies the wanted set additively, so this removal is
+		// never retried: the label stays upstream. Say so and count it.
+		s.logger.Warn("label removal failed and will not be retried; the upstream keeps the label",
+			"id", id, "remove", remove, "err", err)
+		if s.onRemovalFailed != nil {
+			s.onRemovalFailed()
+		}
+	}
+	return err
+}
+
+func (s *Syncer) writeKeywords(owner, inbox, id string, add, remove []string) error {
 	if len(add) == 0 && len(remove) == 0 {
 		return nil
 	}
@@ -603,6 +631,12 @@ func (s *Syncer) reconcileKeywords() {
 		s.logger.Warn("keyword reconcile: list dirty failed", "err", err)
 		return
 	}
+	pending := 0
+	defer func() {
+		if s.onLabelsPending != nil {
+			s.onLabelsPending(pending)
+		}
+	}()
 	for _, m := range dirty {
 		// Additive re-apply: reconcile has the wanted set, not a delta, so a
 		// failed immediate label REMOVE is NOT reconciled (the label lingers
@@ -610,6 +644,7 @@ func (s *Syncer) reconcileKeywords() {
 		// the deferred convergent read-side / go-imap upstream swap cleans it up.
 		if err := s.WriteKeywords(s.owner, s.inbox, m.ID, m.Keywords, nil); err != nil {
 			s.logger.Warn("keyword reconcile deferred", "id", m.ID, "err", err)
+			pending++
 			continue
 		}
 		if err := s.store.ClearKeywordsDirty(s.owner, s.inbox, m.ID); err != nil {

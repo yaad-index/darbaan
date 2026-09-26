@@ -2,6 +2,7 @@ package imapsync_test
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/yaad-index/darbaan/internal/imapsync"
@@ -177,4 +179,40 @@ func TestWriteKeywordsIssuesStoreOnConfirmedMatchingValidity(t *testing.T) {
 
 	require.NoError(t, syncer.WriteKeywords("agent", inbound.DefaultInbox, id, []string{"handled"}, nil))
 	assert.True(t, f.sawCmd("STORE"), "a confirmed, matching-validity write issues the STORE")
+}
+
+// ADR 0020 (2026-09-26 amendment): a failed label REMOVAL is never retried, so each
+// is reported; a failed write that only adds is retried by the next sync and is
+// not counted as a removal.
+func TestWriteKeywordsReportsFailedRemovalsOnly(t *testing.T) {
+	store := newInbound(t)
+	id := seedRecord(t, store, 42, 4000)
+	syncer := imapsync.New(func() (*imapclient.Client, error) { return nil, fmt.Errorf("upstream down") },
+		"INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
+	removals := 0
+	syncer.SetLabelHealth(func() { removals++ }, nil)
+
+	require.Error(t, syncer.WriteKeywords("agent", inbound.DefaultInbox, id, []string{"handled"}, nil))
+	assert.Zero(t, removals, "an add-only failure is retried by the next sync, not a lost removal")
+
+	require.Error(t, syncer.WriteKeywords("agent", inbound.DefaultInbox, id, nil, []string{"handled"}))
+	assert.Equal(t, 1, removals, "a failed removal is counted")
+}
+
+// The reconcile pass reports how many dirty records it could not write.
+func TestReconcileReportsPendingLabelWrites(t *testing.T) {
+	// The sync itself succeeds against a real upstream; the dirty record's write is
+	// refused because its recorded validity is not the upstream's.
+	addr, _ := startUpstream(t)
+	store := newInbound(t)
+	id := seedRecord(t, store, 42, 4000)
+	_, err := store.SetKeywords("agent", inbound.DefaultInbox, id, []string{"handled"})
+	require.NoError(t, err)
+	syncer := imapsync.New(dialFor(addr), "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
+	pending := -1
+	syncer.SetLabelHealth(nil, func(n int) { pending = n })
+
+	_, err = syncer.Sync(context.Background())
+	require.NoError(t, err, "the sync itself succeeds, so the reconcile pass runs")
+	assert.Equal(t, 1, pending, "the dirty record could not be written this pass")
 }

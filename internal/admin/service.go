@@ -82,6 +82,11 @@ type SyncStatus struct {
 	WatermarkUID      uint32 `json:"watermark_uid"`
 	UIDValidity       uint32 `json:"uidvalidity"`
 	Stalled           bool   `json:"stalled"` // consecutive errors have crossed the stall threshold
+	// LabelRemovalsFailed counts label removals that failed since start; each leaves
+	// the label upstream, since no sync retries a removal (ADR 0020, 2026-09-26).
+	LabelRemovalsFailed int `json:"label_removals_failed"`
+	// LabelWritesPending is how many records the last reconcile pass could not write.
+	LabelWritesPending int `json:"label_writes_pending"`
 }
 
 // ReconcileReleaseResult is the outcome of releasing a latched inbox (ADR 0026).

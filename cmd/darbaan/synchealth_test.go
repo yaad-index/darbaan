@@ -83,3 +83,18 @@ func TestSyncHealthThresholdClampAndSort(t *testing.T) {
 	assert.Equal(t, "a", snap[0].Inbox, "snapshot is inbox-sorted")
 	assert.Equal(t, "b", snap[1].Inbox)
 }
+
+// ADR 0020 (2026-09-26 amendment): failed label removals and pending label writes
+// reach the operator's sync-status view.
+func TestSyncHealthReportsLabelWriteFailures(t *testing.T) {
+	h := newSyncHealth(3)
+	h.recordLabelRemovalFailure("work")
+	h.recordLabelRemovalFailure("work")
+	h.setLabelWritesPending("work", 4)
+	h.setLabelWritesPending("work", 1) // a later pass: the latest value, not a sum
+
+	st := h.snapshot()
+	require.Len(t, st, 1)
+	assert.Equal(t, 2, st[0].LabelRemovalsFailed, "each failed removal is counted")
+	assert.Equal(t, 1, st[0].LabelWritesPending, "pending is the last pass's count")
+}
