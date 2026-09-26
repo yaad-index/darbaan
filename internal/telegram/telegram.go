@@ -44,6 +44,8 @@ const (
 	// drop = keep hidden.
 	cbExpose = "expose:"
 	cbDrop   = "drop:"
+	// cbHeldFull is the hold card's "Full message" button (ADR 0036).
+	cbHeldFull = "heldfull:"
 	// Change-sender (ADR 0023 slice 5, #139): change opens the identity picker,
 	// approve_as approves-and-sends from a chosen inbox, back returns to Approve.
 	cbChange     = "change:"
@@ -138,6 +140,7 @@ func New(token string, operatorID int64, pollInterval time.Duration, adminClient
 	// Inbound hold-for-human decisions (ADR 0021).
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbExpose, bot.MatchTypePrefix, c.handleExpose)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbDrop, bot.MatchTypePrefix, c.handleDrop)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbHeldFull, bot.MatchTypePrefix, c.handleHeldFull)
 	// Change-sender picker (ADR 0023 slice 5). Prefixes are non-overlapping:
 	// "approve_as:" is not prefixed by "approve:", "chg_back:" not by "change:".
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbApproveAs, bot.MatchTypePrefix, c.handleApproveAs)

@@ -8,6 +8,8 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"errors"
+	"github.com/yaad-index/darbaan/internal/admin"
 	"github.com/yaad-index/darbaan/internal/assessor"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/mailtext"
@@ -48,9 +50,20 @@ func (c *Client) notifyHold(ctx context.Context, m inbound.Message) error {
 		c.logger.Warn("telegram hold content fetch failed", "id", m.ID, "err", err)
 		raw = nil
 	}
+	// The matched text for each fired factor (ADR 0036), re-run by the daemon at
+	// render time. Only asked for when the body was read, since without it there is
+	// no re-run to report; any failure leaves the evidence out rather than showing
+	// a disagreement nobody observed.
+	var ev []admin.FactorEvidence
+	if !fetchFailed && len(raw) > 0 && m.Assessment != nil && len(m.Assessment.Factors) > 0 {
+		if ev, err = c.admin.HeldEvidence(ctx, m.ID); err != nil {
+			c.logger.Warn("telegram hold evidence unavailable", "id", m.ID, "err", err)
+			ev = nil
+		}
+	}
 	_, err = c.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      c.operatorID,
-		Text:        formatHold(m, raw, fetchFailed),
+		Text:        formatHoldWithEvidence(m, raw, fetchFailed, ev),
 		ReplyMarkup: holdKeyboard(m.ID),
 	})
 	return err
@@ -75,6 +88,13 @@ func clampField(s string) string {
 }
 
 func formatHold(m inbound.Message, raw []byte, fetchFailed bool) string {
+	return formatHoldWithEvidence(m, raw, fetchFailed, nil)
+}
+
+// formatHoldWithEvidence renders the hold card. ev is the render-time re-run's
+// result (ADR 0036); nil means no re-run happened, and nothing is said about
+// matched text at all.
+func formatHoldWithEvidence(m inbound.Message, raw []byte, fetchFailed bool, ev []admin.FactorEvidence) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Held inbound message — expose to the agent?\nid: %s\nfrom: %s\nto: %s\nsubject: %s",
 		m.ID, clampField(m.From), clampField(m.To), clampField(displaySubject(m.Subject)))
@@ -106,15 +126,70 @@ func formatHold(m inbound.Message, raw []byte, fetchFailed bool) string {
 	// It is human-facing only and never enters an agent-consumed path. Budget the
 	// body in UTF-16 units (Telegram's cap unit, C45) so the whole message (header +
 	// fence framing) stays under the limit.
+	// The matched text goes before the body and takes the budget first: the body is
+	// recoverable in full on request, the span is not on the card anywhere else.
+	if ev != nil {
+		b.WriteString(evidenceSection(ev, telegramTextLimit-utf16Len(b.String())-fenceOverhead))
+	}
 	if len(raw) > 0 {
 		header := b.String()
 		budget := telegramTextLimit - utf16Len(header) - fenceOverhead
 		if body := fencedBody(raw, budget); body != "" {
 			b.WriteString("\n\n")
 			b.WriteString(body)
+		} else if ev != nil {
+			b.WriteString("\n\n(body not shown: no room left after the matched text)")
 		}
 	}
 	return b.String()
+}
+
+// evidenceSection renders the re-run's matched text per fired factor, within
+// budget UTF-16 units. For each factor it shows exactly one of: the spans, fenced
+// and labelled; that the current rules no longer match (the re-run found none);
+// or that the text was omitted for space. The last never borrows the disagreement
+// line, because running out of room observed no disagreement.
+func evidenceSection(ev []admin.FactorEvidence, budget int) string {
+	if len(ev) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	head := "\n\nmatched text (re-checked now, quoted as inert text):"
+	b.WriteString(head)
+	used := utf16Len(head)
+	for i, fe := range ev {
+		label := offLabel(riskscore.Factor(fe.Factor))
+		// Keep room for an "omitted" line for every factor still to come, so a later
+		// factor is never silently missing.
+		reserve := (len(ev) - i - 1) * utf16Len(omittedLine(label))
+		if len(fe.Spans) == 0 {
+			line := "\n- " + label + ": matched text not available: the current rules no longer match this message"
+			if used+utf16Len(line)+reserve > budget {
+				line = omittedLine(label)
+			}
+			b.WriteString(line)
+			used += utf16Len(line)
+			continue
+		}
+		var chunk strings.Builder
+		for _, sp := range fe.Spans {
+			chunk.WriteString("\n- " + label + " (" + sp.Source + "):\n")
+			chunk.WriteString(assessor.Fence("matched text", sp.Text))
+		}
+		if used+utf16Len(chunk.String())+reserve > budget {
+			line := omittedLine(label)
+			b.WriteString(line)
+			used += utf16Len(line)
+			continue
+		}
+		b.WriteString(chunk.String())
+		used += utf16Len(chunk.String())
+	}
+	return b.String()
+}
+
+func omittedLine(label string) string {
+	return "\n- " + label + ": matched text omitted for space"
 }
 
 // fenceOverhead is a conservative allowance for Fence's begin/end marker lines,
@@ -358,8 +433,74 @@ func holdKeyboard(id string) models.InlineKeyboardMarkup {
 				{Text: "Expose", CallbackData: cbExpose + id},
 				{Text: "Drop", CallbackData: cbDrop + id},
 			},
+			{
+				{Text: "Full message", CallbackData: cbHeldFull + id},
+			},
 		},
 	}
+}
+
+// handleHeldFull is the [Full message] button (ADR 0036): when a quoted span is
+// not enough to judge, upload the held message's complete decoded text as a
+// document threaded under its card. It is the only expansion of a held body, and
+// it terminates at the operator: the upload goes to the operator chat and nowhere
+// else, and no path reachable by an agent is offered on the card. The card and its
+// Expose/Drop buttons are left as they are, since the decision is still open.
+func (c *Client) handleHeldFull(ctx context.Context, b *bot.Bot, update *models.Update) {
+	cq := update.CallbackQuery
+	if !c.isOperator(cq) {
+		c.denyCallback(ctx, b, cq)
+		return
+	}
+	id := strings.TrimPrefix(cq.Data, cbHeldFull)
+	answer := "Full message sent below."
+	raw, err := c.admin.HeldContent(ctx, id)
+	switch {
+	case errors.Is(err, admin.ErrNotHeld):
+		answer = "No longer held: the decision has already been made."
+	case err != nil:
+		c.logger.Warn("telegram held full message fetch failed", "id", id, "err", err)
+		answer = "Could not fetch the message. Try again."
+	default:
+		text, ok := heldFullText(raw)
+		if !ok {
+			answer = "No text to upload, or too large to upload."
+			break
+		}
+		anchor := 0
+		if msg := cq.Message.Message; msg != nil {
+			anchor = msg.ID
+		}
+		c.sendFullBody(ctx, id, anchor, text)
+	}
+	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cq.ID, Text: answer})
+}
+
+// heldFullText is the complete decoded text of a held message for the Full
+// message upload: its body, then each attachment's extracted text under a marked
+// heading. Plain text, never the raw message, so nothing in it renders or fetches
+// anything on the operator's device. ok is false when there is nothing to upload or
+// it is over the upload limit, the same predicate the upload itself uses.
+func heldFullText(raw []byte) (string, bool) {
+	c, err := mailtext.Extract(raw, mailtext.DefaultLimits())
+	if err != nil && c.Body == "" && len(c.Attachments) == 0 {
+		return "", false
+	}
+	var b strings.Builder
+	b.WriteString(c.Body)
+	for _, a := range c.Attachments {
+		if a.Text == "" {
+			continue
+		}
+		name := a.Filename
+		if name == "" {
+			name = "(unnamed)"
+		}
+		b.WriteString("\n\n----- attachment text: " + name + " -----\n")
+		b.WriteString(a.Text)
+	}
+	text := b.String()
+	return text, fullBodyUploadable(len(text))
 }
 
 // handleExpose is the [Expose] button: verify the operator, confirm it's still
