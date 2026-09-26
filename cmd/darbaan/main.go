@@ -38,6 +38,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/assessor"
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
+	"github.com/yaad-index/darbaan/internal/bounce"
 	"github.com/yaad-index/darbaan/internal/bounceguard"
 	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/imapsync"
@@ -95,6 +96,7 @@ type CLI struct {
 	InboundIMAPMailbox      string        `name:"inbound-imap-mailbox" default:"INBOX" help:"Upstream mailbox to sync."`
 	InboundIMAPPollInterval time.Duration `name:"inbound-imap-poll-interval" default:"60s" help:"How often to poll the upstream mailbox for new mail."`
 	SyncStallThreshold      int           `name:"sync-stall-threshold" default:"3" help:"Consecutive failed sync cycles before an account is flagged stalled (loud ERROR + sync-status). Minimum 1."`
+	RetryCap                int           `name:"retry-cap" default:"3" help:"Resubmissions of a bounced message accepted before further ones are rejected permanently (ADR 0006). Counts only submissions threaded on the bounce. 0 accepts none."`
 	InboundSyncDB           string        `name:"inbound-sync-db" default:"darbaan-sync.db" help:"Path to the inbound sync-state (UIDVALIDITY + last UID) database." type:"path"`
 	InboundMaxAge           string        `name:"inbound-max-age" help:"Recency cutoff for the initial/full sync, e.g. 1y, 30d, 12h (ADR 0008). Empty = no cutoff (pull everything). Forward-only: widening it later needs a re-sync."`
 	InboundFilter           string        `name:"inbound-filter" help:"Path to the inbound filter rules (YAML, ADR 0021): serve-time allow/hide over synced mail. Empty = no filter (allow all)." type:"path"`
@@ -318,6 +320,9 @@ func (q *operatorBypassQueue) Enqueue(sub sluice.Submission) (sluice.Message, er
 	if err != nil {
 		return msg, err
 	}
+	if msg.Status != sluice.StatusPending {
+		return msg, nil // already decided (e.g. rejected by the retry cap): nothing to release
+	}
 	matched, ok := q.identities.AllMatch(msg.Rcpt)
 	if !ok {
 		return msg, nil // held under the existing rules
@@ -329,6 +334,44 @@ func (q *operatorBypassQueue) Enqueue(sub sluice.Submission) (sluice.Message, er
 		return msg, nil
 	}
 	return released, nil
+}
+
+// retryCapQueue enforces ADR 0006's retry cap (2026-09-26 amendment). A
+// submission threaded on one of Darbaan's bounces (its In-Reply-To or References
+// names the bounce's Message-ID) is a resubmission of the bounced message, counted
+// against that lineage's original. Past the limit it is rejected permanently,
+// through the ordinary reject path, so the agent gets a do-not-retry bounce and
+// the verdict is audited. A submission that references no bounce is not counted.
+type retryCapQueue struct {
+	sluice.MessageStore
+	domain string
+	limit  int
+	reject func(ctx context.Context, id, reason string) error
+}
+
+// Enqueue queues the submission, counting it when it is a resubmission, and
+// rejects it when it goes past the limit. A failed rejection is logged and the
+// message stays held: the operator still decides it.
+func (q *retryCapQueue) Enqueue(sub sluice.Submission) (sluice.Message, error) {
+	refs := bounce.ReferencedQueueIDs(sub.Raw, q.domain)
+	if len(refs) == 0 {
+		return q.MessageStore.Enqueue(sub)
+	}
+	msg, count, err := q.EnqueueResubmission(sub, refs[0])
+	if err != nil || count <= q.limit {
+		return msg, err
+	}
+	reason := fmt.Sprintf("retry cap reached: resubmission %d of message %s, and at most %d are accepted; do not resubmit it again",
+		count, msg.Lineage, q.limit)
+	if rerr := q.reject(context.Background(), msg.ID, reason); rerr != nil {
+		slog.Error("retry cap: rejecting the resubmission failed; it stays held for the operator",
+			"message_id", msg.ID, "lineage", msg.Lineage, "error", rerr)
+		return msg, nil
+	}
+	if rejected, gerr := q.Get(msg.ID); gerr == nil {
+		return rejected, nil
+	}
+	return msg, nil
 }
 
 // resolveInboxes resolves the configured inboxes (ADR 0023), or a single implicit
@@ -1587,11 +1630,21 @@ func (*ServeCmd) Run(cli *CLI) error {
 	if err != nil {
 		return fmt.Errorf("operator identities: %w", err)
 	}
-	var submitQueue listener.Enqueuer = q
+	// The retry cap (ADR 0006, 2026-09-26 amendment) sits innermost, so every
+	// submission is counted before anything else decides on it.
+	if cli.RetryCap < 0 {
+		return fmt.Errorf("retry-cap %d is invalid: must be 0 or more", cli.RetryCap)
+	}
+	capped := &retryCapQueue{MessageStore: q, domain: cli.ListenerDomain, limit: cli.RetryCap,
+		reject: func(ctx context.Context, id, reason string) error {
+			_, err := svc.RejectID(ctx, id, reason, false)
+			return err
+		}}
+	var submitQueue listener.Enqueuer = capped
 	if opIDs.Enabled() {
 		slog.Warn("operator-identity send bypass ENABLED (ADR 0034): a message whose EVERY recipient is a configured operator identity is sent without the approval hold",
 			"identities", opIDs.Len())
-		submitQueue = &operatorBypassQueue{MessageStore: q, identities: opIDs, release: svc.SendOperatorIdentityBypass}
+		submitQueue = &operatorBypassQueue{MessageStore: capped, identities: opIDs, release: svc.SendOperatorIdentityBypass}
 	} else {
 		slog.Info("operator-identity send bypass disabled (default): every outbound message is held")
 	}

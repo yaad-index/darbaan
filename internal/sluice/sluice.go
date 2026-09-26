@@ -77,6 +77,14 @@ type Message struct {
 	// so a re-send delivers what the operator approved rather than the original
 	// From. "" means the message was approved to send as-stamped.
 	AsInbox string `json:"as_inbox,omitempty"`
+
+	// Lineage is the queue id of the original message this one resubmits, resolved
+	// through any chain of resubmissions to its root (ADR 0006, 2026-09-26
+	// amendment). "" means it is not a resubmission.
+	Lineage string `json:"lineage,omitempty"`
+	// Resubmits counts the resubmissions whose lineage is this message; it is set on
+	// a lineage's original only.
+	Resubmits int `json:"resubmits,omitempty"`
 }
 
 // Meta is the listing view of a queued message: everything but the raw body.
@@ -118,6 +126,14 @@ func subjectFromRaw(raw []byte) string {
 type MessageStore interface {
 	// Enqueue durably traps a submission as a pending message.
 	Enqueue(Submission) (Message, error)
+	// EnqueueResubmission enqueues sub as a resubmission of the message whose bounce
+	// it references (referencedID), and counts it against that lineage's original,
+	// in one transaction so concurrent retries cannot both slip under a cap. It
+	// returns the new message and the original's resubmission count after this one.
+	// A reference to an unknown message, or to another agent's message, gives the
+	// submission no lineage and a count of 0: one agent cannot spend another's
+	// retries.
+	EnqueueResubmission(sub Submission, referencedID string) (Message, int, error)
 	// List returns the metadata of every held message in receive order.
 	List() ([]Meta, error)
 	// Get returns the full message (including the raw body), or ErrNotFound.

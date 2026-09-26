@@ -36,3 +36,20 @@ resubmitting a bounced message indefinitely, is real:
   configurable.
 
 The lineage field and the cap follow this amendment in code.
+
+## Amendment (2026-09-26): what the retry cap counts
+
+Scope of the amendment above; text above stays as written (ADR 0037).
+
+The lineage field is set by Darbaan, from the thread reference, not by the agent:
+every bounce carries a Message-ID Darbaan controls that names the rejected message's
+queue id, and a submission whose `In-Reply-To` or `References` names such a bounce is
+a resubmission of that message, counted against its lineage's original. A reference
+to an unknown message, or to another agent's message, gives no lineage, so one agent
+cannot spend another's retries.
+
+**The cap therefore bounds only resubmissions that reference the bounce.** A fresh,
+unthreaded message is not counted, even if it resends the same content. Catching
+those would need a heuristic key (same sender, recipients and subject within a
+window), which can misfire on a legitimate second message; that is a separate
+decision, to be taken if unthreaded loops are seen.

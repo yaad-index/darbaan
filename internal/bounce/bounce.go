@@ -61,6 +61,10 @@ func Generate(orig sluice.Message, reason string, retryable bool, domain string)
 	top.Set("Subject", subject)
 	top.Set("Date", time.Now().UTC().Format(time.RFC1123Z))
 	top.Set("Auto-Submitted", "auto-replied")
+	// A Message-ID Darbaan controls, naming the rejected message's queue id, so a
+	// reply or a resubmission threaded on this bounce carries it back in
+	// In-Reply-To/References and inherits the retry lineage (ADR 0006, 2026-09-26).
+	top.Set("Message-Id", MessageID(orig.ID, domain))
 	top.SetContentType("multipart/report", map[string]string{"report-type": "delivery-status"})
 
 	mw, err := message.CreateWriter(&buf, top)
@@ -150,4 +154,41 @@ func writeOriginal(mw *message.Writer, raw []byte) error {
 // lines into the DSN part.
 func sanitize(s string) string {
 	return strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+}
+
+// messageIDPrefix marks a Message-ID as a Darbaan bounce for a given queue id.
+const messageIDPrefix = "darbaan-bounce."
+
+// MessageID is the Message-ID of the bounce for queue message queueID.
+func MessageID(queueID, domain string) string {
+	return "<" + messageIDPrefix + queueID + "@" + domain + ">"
+}
+
+// ReferencedQueueIDs returns the queue ids of the Darbaan bounces that raw's
+// In-Reply-To and References headers name, in header order, without duplicates.
+// Only ids under domain are recognised. A header that cannot be parsed yields
+// nothing: a submission that references no bounce simply has no lineage.
+func ReferencedQueueIDs(raw []byte, domain string) []string {
+	ent, err := message.Read(bytes.NewReader(raw))
+	if err != nil || ent == nil {
+		return nil
+	}
+	suffix := "@" + strings.ToLower(domain) + ">"
+	seen := map[string]bool{}
+	var out []string
+	for _, field := range []string{"In-Reply-To", "References"} {
+		for _, tok := range strings.Fields(ent.Header.Get(field)) {
+			low := strings.ToLower(tok)
+			if !strings.HasPrefix(low, "<"+messageIDPrefix) || !strings.HasSuffix(low, suffix) {
+				continue
+			}
+			id := tok[len("<"+messageIDPrefix) : len(tok)-len(suffix)]
+			if id == "" || strings.ContainsAny(id, "<>@ \t") || seen[id] {
+				continue
+			}
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
 }

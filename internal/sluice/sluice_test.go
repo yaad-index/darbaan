@@ -358,3 +358,49 @@ func TestRejectAuditRecordsRetryableFlag(t *testing.T) {
 	// The enqueue row is not a reject: the flag does not apply and stays nil.
 	assert.Nil(t, cap.records[0].Retryable)
 }
+
+// ADR 0006 (2026-09-26 amendment): a resubmission takes its lineage's ORIGINAL,
+// through any chain, and is counted there.
+func TestEnqueueResubmissionCountsAgainstTheOriginal(t *testing.T) {
+	q, _ := newStore(t)
+	sub := sluice.Submission{Agent: "agent", From: "agent@x.test", Rcpt: []string{"r@y.test"}, Raw: []byte("Subject: s\r\n\r\nb")}
+	orig, err := q.Enqueue(sub)
+	require.NoError(t, err)
+
+	r1, n, err := q.EnqueueResubmission(sub, orig.ID)
+	require.NoError(t, err)
+	assert.Equal(t, orig.ID, r1.Lineage)
+	assert.Equal(t, 1, n)
+
+	// A resubmission threaded on the RESUBMISSION's bounce still counts against the original.
+	r2, n, err := q.EnqueueResubmission(sub, r1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, orig.ID, r2.Lineage, "the lineage resolves to the root, not the intermediate")
+	assert.Equal(t, 2, n)
+
+	root, err := q.Get(orig.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, root.Resubmits, "the counter lives on the original's record")
+}
+
+// A reference to an unknown message, or to another agent's, gives no lineage: one
+// agent cannot spend another's retries.
+func TestEnqueueResubmissionIgnoresForeignReferences(t *testing.T) {
+	q, _ := newStore(t)
+	theirs, err := q.Enqueue(sluice.Submission{Agent: "other", From: "o@x.test", Raw: []byte("Subject: s\r\n\r\nb")})
+	require.NoError(t, err)
+	sub := sluice.Submission{Agent: "agent", From: "agent@x.test", Raw: []byte("Subject: s\r\n\r\nb")}
+
+	m, n, err := q.EnqueueResubmission(sub, theirs.ID)
+	require.NoError(t, err)
+	assert.Empty(t, m.Lineage)
+	assert.Zero(t, n)
+	other, err := q.Get(theirs.ID)
+	require.NoError(t, err)
+	assert.Zero(t, other.Resubmits, "the other agent's count is untouched")
+
+	m, n, err = q.EnqueueResubmission(sub, "99999")
+	require.NoError(t, err)
+	assert.Empty(t, m.Lineage)
+	assert.Zero(t, n)
+}

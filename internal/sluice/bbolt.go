@@ -118,31 +118,88 @@ func (s *bboltStore) writeAudit(rec audit.Record) {
 	}
 }
 
+// enqueueTx writes one new pending message inside tx: the content blob first,
+// then the referencing metadata (ADR 0018), so a crash can only orphan a blob,
+// never dangle a metadata pointer.
+func (s *bboltStore) enqueueTx(tx *bbolt.Tx, sub Submission, lineage string) (Message, error) {
+	b := tx.Bucket(bucketMessages)
+	seq, err := b.NextSequence()
+	if err != nil {
+		return Message{}, err
+	}
+	msg := Message{
+		ID:         strconv.FormatUint(seq, 10),
+		Agent:      sub.Agent,
+		Inbox:      sub.Inbox,
+		From:       sub.From,
+		Rcpt:       append([]string(nil), sub.Rcpt...),
+		Raw:        sub.Raw,
+		ReceivedAt: time.Now().UTC(),
+		Status:     StatusPending,
+		Lineage:    lineage,
+	}
+	if err := s.blobs.Put(msg.ID, sub.Raw); err != nil {
+		return Message{}, fmt.Errorf("write content: %w", err)
+	}
+	return msg, putStored(tx, seqkey.Encode(seq), storedFrom(msg))
+}
+
+// EnqueueResubmission enqueues sub as a resubmission and counts it against its
+// lineage's original (see MessageStore.EnqueueResubmission).
+func (s *bboltStore) EnqueueResubmission(sub Submission, referencedID string) (Message, int, error) {
+	var (
+		msg   Message
+		count int
+	)
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		root, rootKey, ok := s.lineageRoot(tx, referencedID, sub.Agent)
+		if !ok {
+			var e error
+			msg, e = s.enqueueTx(tx, sub, "")
+			return e
+		}
+		root.Resubmits++
+		count = root.Resubmits
+		if err := putStored(tx, rootKey, root); err != nil {
+			return err
+		}
+		var e error
+		msg, e = s.enqueueTx(tx, sub, root.ID)
+		return e
+	})
+	if err != nil {
+		return Message{}, 0, fmt.Errorf("sluice: enqueue resubmission: %w", err)
+	}
+	s.writeAudit(audit.Record{Event: "enqueue", Agent: msg.Agent, Inbox: msg.Inbox, MessageID: msg.ID})
+	slog.Info("outbound message held", "message_id", msg.ID, "agent", msg.Agent, "inbox", msg.Inbox,
+		"rcpt_count", len(msg.Rcpt), "lineage", msg.Lineage, "resubmission", count)
+	return msg, count, nil
+}
+
+// lineageRoot resolves the original of the lineage that referencedID belongs to:
+// the referenced message itself, or the original it resubmits. It reports false
+// when the reference names no stored message or a message of another agent.
+func (s *bboltStore) lineageRoot(tx *bbolt.Tx, referencedID, agent string) (stored, []byte, bool) {
+	rec, key, err := loadStored(tx, referencedID)
+	if err != nil || rec.Agent != agent {
+		return stored{}, nil, false
+	}
+	if rec.Lineage == "" {
+		return rec, key, true
+	}
+	root, rootKey, err := loadStored(tx, rec.Lineage)
+	if err != nil || root.Agent != agent {
+		return rec, key, true // the recorded original is gone: count against the referenced one
+	}
+	return root, rootKey, true
+}
+
 func (s *bboltStore) Enqueue(sub Submission) (Message, error) {
 	var msg Message
 	err := s.db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketMessages)
-		seq, err := b.NextSequence()
-		if err != nil {
-			return err
-		}
-		msg = Message{
-			ID:         strconv.FormatUint(seq, 10),
-			Agent:      sub.Agent,
-			Inbox:      sub.Inbox,
-			From:       sub.From,
-			Rcpt:       append([]string(nil), sub.Rcpt...),
-			Raw:        sub.Raw,
-			ReceivedAt: time.Now().UTC(),
-			Status:     StatusPending,
-		}
-		// Content tier first: the blob is durable before the referencing metadata
-		// commits (ADR 0018), so a crash can only orphan a blob, never dangle a
-		// metadata pointer.
-		if err := s.blobs.Put(msg.ID, sub.Raw); err != nil {
-			return fmt.Errorf("write content: %w", err)
-		}
-		return putStored(tx, seqkey.Encode(seq), storedFrom(msg))
+		var e error
+		msg, e = s.enqueueTx(tx, sub, "")
+		return e
 	})
 	if err != nil {
 		return Message{}, fmt.Errorf("sluice: enqueue: %w", err)

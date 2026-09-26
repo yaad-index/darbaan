@@ -106,3 +106,23 @@ func TestDefaultDomain(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "MAILER-DAEMON@localhost", b.From)
 }
+
+// ADR 0006 (2026-09-26 amendment): the bounce carries a Message-ID Darbaan controls
+// that names the rejected message's queue id.
+func TestBounceMessageIDNamesTheQueueID(t *testing.T) {
+	b, err := bounce.Generate(sluice.Message{ID: "42", From: "agent@x.test", Rcpt: []string{"r@y.test"}, Raw: []byte("Subject: s\r\n\r\nb")}, "no", false, "darbaan.test")
+	require.NoError(t, err)
+	assert.Contains(t, string(b.Raw), "Message-Id: <darbaan-bounce.42@darbaan.test>")
+	assert.Equal(t, "<darbaan-bounce.42@darbaan.test>", bounce.MessageID("42", "darbaan.test"))
+}
+
+func TestReferencedQueueIDs(t *testing.T) {
+	raw := "In-Reply-To: <darbaan-bounce.7@darbaan.test>\r\n" +
+		"References: <other@x.test> <DARBAAN-BOUNCE.9@Darbaan.Test> <darbaan-bounce.7@darbaan.test> <darbaan-bounce.3@elsewhere.test>\r\n" +
+		"Subject: re\r\n\r\nbody"
+	assert.Equal(t, []string{"7", "9"}, bounce.ReferencedQueueIDs([]byte(raw), "darbaan.test"),
+		"In-Reply-To first, case-insensitive, deduplicated, other domains ignored")
+
+	assert.Empty(t, bounce.ReferencedQueueIDs([]byte("Subject: fresh\r\n\r\nbody"), "darbaan.test"), "an unthreaded message references nothing")
+	assert.Empty(t, bounce.ReferencedQueueIDs([]byte("References: <darbaan-bounce.@darbaan.test>\r\n\r\nb"), "darbaan.test"), "an empty id is not an id")
+}
