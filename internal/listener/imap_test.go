@@ -1078,3 +1078,71 @@ func TestIMAPServeStampAdvisoryHeaders(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(body, "X-Darbaan-Risk:"), "exactly one advisory header, not stacked")
 	assert.Contains(t, body, "body-keep", "body preserved")
 }
+
+// ADR 0021 (2026-09-26 amendment): a human hold decision outranks later rule
+// results for that message. Rules re-evaluate on every read, so the same store is
+// served under different rule sets here, the way an operator's rule edit would
+// change them.
+func TestIMAPHoldDecisionOutranksLaterRules(t *testing.T) {
+	store, err := inbound.New("bbolt", filepath.Join(t.TempDir(), "inbound.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	add := func(uid uint32, subject string) inbound.Message {
+		_, m, err := store.AddSyncedPending(inbound.Delivery{
+			Owner: "agent", Subject: subject, UpstreamUID: uid, UIDValidity: 1,
+			Envelope: &inbound.Envelope{Subject: subject}, Keywords: []string{"review"},
+		})
+		require.NoError(t, err)
+		return m
+	}
+	rejected := add(1, "rejected")
+	approved := add(2, "approved")
+	add(3, "undecided")
+	_, err = store.SetHoldDecision("agent", inbound.DefaultInbox, rejected.ID, inbound.HoldRejected)
+	require.NoError(t, err)
+	_, err = store.SetHoldDecision("agent", inbound.DefaultInbox, approved.ID, inbound.HoldApproved)
+	require.NoError(t, err)
+
+	subjects := func(flt *filter.Filter) []string {
+		c, err := imapclient.DialInsecure(startIMAPFull(t, store, nil, nil, flt), nil)
+		require.NoError(t, err)
+		defer func() { _ = c.Close() }()
+		require.NoError(t, c.Login("agent", "pw").Wait())
+		sel, err := c.Select("INBOX", nil).Wait()
+		require.NoError(t, err)
+		if sel.NumMessages == 0 {
+			return nil
+		}
+		var all imap.SeqSet // 1..N; SeqSetNum(1, N) would be the two numbers {1, N}, not a range
+		all.AddRange(1, sel.NumMessages)
+		msgs, err := c.Fetch(all, &imap.FetchOptions{Envelope: true}).Collect()
+		require.NoError(t, err)
+		var out []string
+		for _, m := range msgs {
+			out = append(out, m.Envelope.Subject)
+		}
+		return out
+	}
+	compile := func(y string) *filter.Filter {
+		f, err := filter.Compile([]byte(y))
+		require.NoError(t, err)
+		return f
+	}
+
+	// The urgent case: the rules would now allow everything, and the message the
+	// operator rejected must still not be served.
+	assert.ElementsMatch(t, []string{"approved", "undecided"}, subjects(nil), "no filter: the rejected message stays unserved")
+	assert.ElementsMatch(t, []string{"approved", "undecided"},
+		subjects(compile("rules: [{match: [{field: label, op: equals, value: review}], action: allow}]")),
+		"an allow rule does not serve a rejected message")
+
+	// The other direction: a new rule would hide the message the operator exposed.
+	assert.ElementsMatch(t, []string{"approved"},
+		subjects(compile("rules: [{match: [{field: label, op: equals, value: review}], action: hide}]")),
+		"a hide rule does not take back an exposure; the undecided message follows the rule")
+
+	// Undecided messages follow the rules exactly as before.
+	assert.ElementsMatch(t, []string{"approved"},
+		subjects(compile("rules: [{match: [{field: label, op: equals, value: review}], action: hold-for-human}]")),
+		"hold-for-human still hides an undecided message")
+}
