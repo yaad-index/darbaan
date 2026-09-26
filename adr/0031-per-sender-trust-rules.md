@@ -132,3 +132,37 @@ re-described:
    never granted on the more favourable of two readings.
 
 The header selection in code follows this amendment.
+
+## Amendment (2026-09-26): where the upstream's own results end
+
+Correction to the amendment above on item A1 of #237; text above stays as written
+(ADR 0037).
+
+Point 1 of that amendment reads only matching blocks that sit above the upstream's own
+`Received` header. Checked against real mail from the upstream this ADR names, Gmail
+places its `Authentication-Results` **below** the `Received` field for its own inbound
+hop, and adds further `Received` fields above both for its internal hops. Read as
+written, the gate never passes there: every sender would resolve to `unknown`.
+
+Point 1 is replaced by:
+
+1. **The gate reads the top run of matching blocks:** from the topmost
+   `Authentication-Results` block whose `authserv-id` matches, down to the next
+   `Received` header. The upstream prepends its results above everything the message
+   carried when it arrived, so its own block is the topmost one bearing its identity,
+   and the first `Received` below it is the sender's hop. Matching blocks from there
+   down are ignored. `Received` fields above the topmost match are the upstream's own
+   hops and do not end the run.
+
+Point 3 applies to that run: if blocks in it disagree, the gate fails closed. A block
+the sender placed directly under the upstream's own therefore can refuse trust but
+cannot grant it. An `Authentication-Results` field the gate cannot parse also fails it.
+
+Point 2's prerequisite is widened to match: the gate is as strong as the upstream
+**adding its own block** to every message and stripping spoofed blocks that claim its
+identity. If the upstream adds none, the topmost matching block is whatever the sender
+wrote.
+
+Within a run, the DMARC result for the `From` domain decides when present. The
+aligned `dkim=pass` fallback applies only to a block that carries no DMARC result for
+that domain, as the gate above describes it for an upstream that does not emit one.

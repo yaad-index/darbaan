@@ -61,7 +61,7 @@ func newBbolt(path string, resolve ProvenanceResolver) (InboundStore, error) {
 	if resolve == nil {
 		// No resolver wired → stamp the fail-safe unknown trust (no note), so the
 		// content-write chokepoint always stamps a valid value (ADR 0030).
-		resolve = func(string, string) provenance.Stamp { return provenance.Stamp{Trust: provenance.TrustUnknown} }
+		resolve = func(string, []byte) provenance.Stamp { return provenance.Stamp{Trust: provenance.TrustUnknown} }
 	}
 	db, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: time.Second})
 	if err != nil {
@@ -260,9 +260,10 @@ func (s *bboltStore) SetContentAssessed(owner, inbox, id string, raw []byte, a *
 // unknown).
 func (s *bboltStore) putBlob(inbox, id string, raw []byte, generated bool) ([]byte, error) {
 	// Trust is resolved from the authenticated inbox and the message's From
-	// (per-sender rules, ADR 0031). The From is read from the raw here; the trust
+	// (per-sender rules, ADR 0031). The resolver reads the From, and for an inbox
+	// with the gate the upstream's Authentication-Results, from the raw; the trust
 	// asymmetry keeps that safe (only `trusted` is gated on the upstream, slice 2).
-	stamp := s.resolve(inbox, provenance.From(raw))
+	stamp := s.resolve(inbox, raw)
 	if generated {
 		// Darbaan's own message: trusted by construction, and the resolver is not
 		// consulted, since it keys on the From header a sender could imitate (ADR
