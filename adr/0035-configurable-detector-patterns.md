@@ -1,6 +1,6 @@
 # ADR 0035: Operator-configurable detector patterns
 
-**Status:** Proposed (2026-09-25, pending operator sign-off)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status)
 
 ## Context
 
