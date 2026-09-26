@@ -2,9 +2,11 @@ package imapsync_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -128,4 +130,21 @@ func upstreamFlags(t *testing.T, addr string) []imap.Flag {
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
 	return msgs[0].Flags
+}
+
+// A dirty record with no Message-ID is retried on every pass; it must be refused
+// without opening an upstream session each time.
+func TestWriteKeywordsRefusesUnidentifiableRecordWithoutDialing(t *testing.T) {
+	dials := 0
+	store := newInbound(t)
+	syncer := imapsync.New(func() (*imapclient.Client, error) {
+		dials++
+		return nil, fmt.Errorf("must not dial")
+	}, "INBOX", "agent", inbound.DefaultInbox, store, newState(t), 0)
+	id := legacyPending(t, store, "")
+
+	err := syncer.WriteKeywords("agent", inbound.DefaultInbox, id, []string{"handled"}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no Message-ID")
+	assert.Zero(t, dials, "no session is opened only to refuse")
 }

@@ -64,8 +64,14 @@ func (s *Syncer) stampUnknownValidity(c *imapclient.Client, serverValidity uint3
 	if err != nil {
 		return m, err
 	}
-	s.logger.Info("stamped unknown uidvalidity from an identity-matched fetch",
-		"id", m.ID, "uid", m.UpstreamUID, "uidvalidity", stamped.UIDValidity)
+	// The store only fills an unknown value, so a validity another writer set in the
+	// meantime is kept. Log the stamp only when the stored value is the one this
+	// fetch established; a different known value is left for the caller's own
+	// validity check, which treats it like any other record.
+	if stamped.UIDValidity == serverValidity {
+		s.logger.Info("established unknown uidvalidity from an identity-matched fetch",
+			"id", m.ID, "uid", m.UpstreamUID, "uidvalidity", stamped.UIDValidity)
+	}
 	return stamped, nil
 }
 
@@ -117,6 +123,12 @@ func normalizeMessageID(id string) string {
 // UIDVALIDITY before a keyword or label write, which both need a known UID space.
 // The label writer uses a separate raw connection, so the stamp cannot ride on it.
 func (s *Syncer) stampForWrite(m inbound.Message) (inbound.Message, error) {
+	// A record with no Message-ID can never be identified, so refuse it before
+	// opening a session: a dirty record is retried on every pass, and a dial per
+	// pass only to refuse would be pure cost.
+	if storedMessageID(m) == "" {
+		return m, fmt.Errorf("%w: no Message-ID to identify the record by", errUnknownValidity)
+	}
 	c, err := s.dial()
 	if err != nil {
 		return m, fmt.Errorf("imapsync: connect: %w", err)
