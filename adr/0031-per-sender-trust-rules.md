@@ -109,3 +109,26 @@ not add `unknown` as a legal value. The example should read:
       require_authenticated: true
       authserv_id: mx.google.com
 ```
+
+## Amendment (2026-09-26): which Authentication-Results the gate may read
+
+Decision on item A1 of #237; text above stays as written (ADR 0037).
+
+The gate as written reads every `Authentication-Results` header whose `authserv-id`
+equals the configured value, and calls its input "unspoofable". It is not: a sender
+can add a header bearing that exact `authserv-id`, and it is ignored only if the
+upstream strips spoofed headers claiming its identity (RFC 8601 §5), which the weaker
+upstreams this gate is recommended for may not do. The gate is fixed rather than only
+re-described:
+
+1. **Only the topmost `Authentication-Results` block(s) whose `authserv-id` matches,
+   and that sit above the upstream's own `Received` header, are read.** A matching
+   block further down was present before the upstream received the message, so the
+   sender wrote it; it is ignored.
+2. **The prerequisite is stated rather than assumed:** the gate is as strong as the
+   upstream's stripping of spoofed headers that claim its identity. The "unspoofable"
+   wording above no longer holds; this paragraph replaces it.
+3. **Several matching blocks at the top that disagree fail the gate closed.** Trust is
+   never granted on the more favourable of two readings.
+
+The header selection in code follows this amendment.

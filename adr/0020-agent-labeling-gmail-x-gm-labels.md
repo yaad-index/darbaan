@@ -1,6 +1,6 @@
 # ADR 0020: Agent labeling via IMAP keywords (with Gmail X-GM-LABELS mapping)
 
-**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-27)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-27); amended 2026-09-26 (see the end)
 
 ## Context
 
@@ -86,3 +86,22 @@ first-class Gmail labels.
 - Structured inbound filter rules (ADR 0008).
 
 Relates to ADR 0001, 0002, 0009, 0016, 0019.
+
+## Amendment (2026-09-26): which failed label writes converge, and making the rest visible
+
+Decision on item A6 of #237; text above stays as written (ADR 0037).
+
+The text says a failed upstream label write "is logged and reconciled on the next
+sync". That holds for **additions** and not for **removals**:
+
+- A record whose label write fails stays dirty, and every sync re-applies its full
+  wanted label set until the write succeeds (`reconcileKeywords`). A failed addition
+  therefore converges.
+- The re-apply is additive: it applies the wanted set and removes nothing. A failed
+  **removal** is never retried, and the label stays upstream indefinitely while
+  Darbaan's own view no longer has it.
+
+The divergence from failed removals is acknowledged, and it **must not be silent**: a
+failed label removal is logged and **counted where an operator can see it**, as is a
+record that keeps failing to converge. A mechanism that also converges removals is
+left to a later ADR. The visible count follows this amendment in code.

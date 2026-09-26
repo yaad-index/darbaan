@@ -1,6 +1,6 @@
 # ADR 0006: Rejection modelled as an asynchronous DSN bounce
 
-**Status:** Accepted (2026-06-25)
+**Status:** Accepted (2026-06-25); amended 2026-09-26 (see the end)
 
 ## Context
 Approval is asynchronous; a human may take hours. You cannot hold an SMTP
@@ -19,3 +19,20 @@ the attacker's email text**.
 ## Consequences
 - The agent's existing read loop handles rejections; no custom protocol.
 - The correction loop closes naturally for transient rejections.
+
+## Amendment (2026-09-26): the retry cap's correlation key
+
+Decision on items A16 and C11 of #237; text above stays as written (ADR 0037).
+
+The retry cap above bounds fix-and-resubmit loops but names no way to tell that a
+submission is a retry, so as written it cannot be implemented, and it is not. It is
+implemented rather than removed, because the loop it guards against, an agent
+resubmitting a bounced message indefinitely, is real:
+
+- **The correlation key is the original message's queue id**, carried on the
+  resubmission as a lineage field set when a bounced message is resubmitted.
+- **The retry counter lives on the queue record** of that lineage.
+- **Past N resubmissions, a resubmission is auto-rejected.** N defaults to 3 and is
+  configurable.
+
+The lineage field and the cap follow this amendment in code.
