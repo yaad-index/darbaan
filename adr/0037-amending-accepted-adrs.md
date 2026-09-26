@@ -39,6 +39,11 @@ practice:
    2026-09-26.`
 4. **An amendment to an accepted ADR needs the same sign-off as an ADR** (the
    maintainer's approval), because it changes a recorded decision.
+5. **A Proposed ADR is a draft and may be edited freely; rules 1 to 3 apply from
+   the moment it is Accepted.** One caution: a Proposed ADR whose code has already
+   shipped is no longer only a draft, because that code was built against its text.
+   An edit to one is allowed, but it goes in a PR of its own that says what changed,
+   rather than riding along inside an unrelated change.
 
 The in-place edits named above stay as they are: undoing them would be another
 in-place edit. Git history records the original text of each.
