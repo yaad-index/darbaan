@@ -216,27 +216,48 @@ func (c *CLI) configBytes() ([]byte, error) {
 // the separate on/off toggle; this section only shapes the weights, bands, and
 // threshold once assessment runs.
 func (c *CLI) assessmentConfig() (riskscore.Config, error) {
-	data, err := c.configBytes()
+	section, err := c.assessmentSection()
 	if err != nil {
 		return riskscore.Config{}, err
 	}
-	if len(data) == 0 {
+	if section == nil {
 		return riskscore.DefaultConfig(), nil
+	}
+	return riskscore.Parse(section)
+}
+
+// detectorConfig resolves the operator's detector patterns (ADR 0035) from the
+// `detector:` key of the same `assessment:` section. An absent section or key
+// yields the zero config, which is the built-in detector.
+func (c *CLI) detectorConfig() (assessor.DetectorConfig, error) {
+	section, err := c.assessmentSection()
+	if err != nil || section == nil {
+		return assessor.DetectorConfig{}, err
+	}
+	return assessor.ParseDetectorConfig(section)
+}
+
+// assessmentSection returns the top-level `assessment:` section re-encoded as its
+// own document, or nil when the config file or the section is absent.
+func (c *CLI) assessmentSection() ([]byte, error) {
+	data, err := c.configBytes()
+	if err != nil || len(data) == 0 {
+		return nil, err
 	}
 	var wrapper struct {
 		Assessment yaml.Node `yaml:"assessment"`
 	}
 	if err := yaml.Unmarshal(data, &wrapper); err != nil {
-		return riskscore.Config{}, fmt.Errorf("parse assessment config: %w", err)
+		return nil, fmt.Errorf("parse assessment config: %w", err)
 	}
 	if wrapper.Assessment.IsZero() {
-		return riskscore.DefaultConfig(), nil
+		return nil, nil
 	}
 	section, err := yaml.Marshal(&wrapper.Assessment)
 	if err != nil {
-		return riskscore.Config{}, fmt.Errorf("assessment config: %w", err)
+		return nil, fmt.Errorf("assessment config: %w", err)
 	}
-	return riskscore.Parse(section)
+	return section, nil
 }
 
 // operatorIdentities resolves the operator-identity list (ADR 0034) from the
@@ -635,7 +656,16 @@ func (cli *CLI) buildAssessHook(inboxes []inboxcfg.Inbox, resolve inbound.Proven
 	if err != nil {
 		return nil, fmt.Errorf("assessment scorer: %w", err)
 	}
-	detector := assessor.NewHeuristicDetector()
+	// The operator's detector patterns (ADR 0035) are validated here on every start,
+	// assessment enabled or not, so a bad entry fails now rather than on the flip.
+	dcfg, err := cli.detectorConfig()
+	if err != nil {
+		return nil, fmt.Errorf("assessment detector config: %w", err)
+	}
+	detector, err := assessor.NewConfiguredDetector(dcfg)
+	if err != nil {
+		return nil, fmt.Errorf("assessment detector config: %w", err)
+	}
 	if err := assessor.ValidateAlignment(detector, scorer.Config()); err != nil {
 		return nil, fmt.Errorf("assessment detector/scorer misaligned: %w", err)
 	}
