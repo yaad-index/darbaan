@@ -106,19 +106,39 @@ func (s *Screener) Screen(ctx context.Context, raw []byte, trust string, recipie
 		// Extraction hard-failed on a part (unreadable/undecodable) or the MIME
 		// structure broke mid-stream (C19/C20): text the message carries never
 		// reached the assessor, so it cannot be cleared — fail-safe hold (ADR 0032
-		// Amendment 1). A benign cap (content.Truncated) is not a hard-fail and does
-		// not hold: the assessor saw real, bounded content.
+		// Amendment 1). A cap hit (content.Truncated) is handled below instead: the
+		// assessor saw real, bounded content, so it still runs and its factors are kept.
 		return Outcome{Result: riskscore.NotCleared("held: message content could not be fully decoded for assessment (a part was unreadable or the MIME structure was malformed)")}
 	}
 	assessment, err := s.assessor.Assess(ctx, content)
 	if err != nil {
 		return Outcome{Result: riskscore.NotCleared(fmt.Sprintf("held: assessment did not complete: %v", err))}
 	}
+	result := s.scorer.Compose(cheap, assessment.Factors)
+	if assessment.Truncated {
+		result = holdTruncated(result)
+	}
 	return Outcome{
-		Result:    s.scorer.Compose(cheap, assessment.Factors),
+		Result:    result,
 		Summary:   assessment.Summary,
 		Truncated: assessment.Truncated,
 	}
+}
+
+// holdTruncated routes a message whose extraction hit a cap (part count, nesting
+// depth, per-part or total text) to the human, whatever its score (#251). Content
+// beyond a cap was never assessed but is still served to the agent in full, so
+// passing it would leave unscanned text in front of the agent. The composed score,
+// band and factors are kept: they are real evidence about the part that was
+// assessed. It keys on the same Truncated value that is persisted, so the stored
+// flag the hold card renders from always agrees with the disposition.
+func holdTruncated(r riskscore.Result) riskscore.Result {
+	if r.Disposition == riskscore.DispositionHeld {
+		return r
+	}
+	r.Disposition = riskscore.DispositionHeld
+	r.Reason = "held: message exceeded the extraction limits, so part of it was never assessed"
+	return r
 }
 
 // ResolveRecipient returns the position the mailbox self held on a message with

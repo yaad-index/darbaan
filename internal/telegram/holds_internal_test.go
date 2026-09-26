@@ -126,6 +126,20 @@ func TestFormatHoldPreservesTruncationCaveat(t *testing.T) {
 // production and shown to change the output. The factor throughout is secrets_request,
 // which the heuristic detector actually emits, so the rest of the card renders and the
 // mutation exercises a real rendering path.
+// #251: a truncated message is held whatever its score, so a "low risk" card in the
+// held queue must say why it is there — the caveat carries the hold reason, not only
+// the trust qualifier.
+func TestFormatHoldTruncationStatesWhyHeld(t *testing.T) {
+	a := &inbound.Assessment{Disposition: inbound.AssessmentHeld, Score: 10, Band: "low", Truncated: boolPtr(true)}
+	line := holdAssessmentLine(a)
+	assert.Contains(t, line, "low risk (10)")
+	assert.Contains(t, line, "never assessed")
+	assert.Contains(t, line, "always held")
+
+	a.Truncated = boolPtr(false)
+	assert.NotContains(t, holdAssessmentLine(a), "always held", "an untruncated card carries no truncation hold reason")
+}
+
 func TestFormatHoldTruncationStructuralFlag(t *testing.T) {
 	const gloss = "asks the reader to send or confirm a credential" // secrets_request, emittable
 	card := func(a *inbound.Assessment) string {
