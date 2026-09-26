@@ -35,12 +35,13 @@ Extend `assessment:` with a `detector:` section:
 ```yaml
 assessment:
   detector:
-    instruction:
+    instruction_to_reader:
       mode: augment        # augment | replace
       patterns: ["...", "..."]
     secrets_request:
       mode: replace
       patterns: ["..."]
+      examples: ["..."]    # required for replace (see Fail-safe)
     hidden_directives:
       enabled: false
 ```

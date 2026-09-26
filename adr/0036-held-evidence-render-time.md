@@ -1,6 +1,6 @@
 # ADR 0036: Show the matched evidence on a held message, at render time only
 
-**Status:** Proposed (2026-09-26, pending operator sign-off). Decides #263.
+**Status:** Accepted (operator sign-off recorded by approval of the PR that added this ADR). Decides #263.
 
 ## Context
 
