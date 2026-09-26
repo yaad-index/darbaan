@@ -17,13 +17,17 @@ import (
 	"time"
 
 	"github.com/yaad-index/darbaan/internal/approver"
+	"github.com/yaad-index/darbaan/internal/assessor"
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/backend"
 	"github.com/yaad-index/darbaan/internal/bounce"
 	"github.com/yaad-index/darbaan/internal/bounceguard"
 	"github.com/yaad-index/darbaan/internal/filter"
 	"github.com/yaad-index/darbaan/internal/inbound"
+	"github.com/yaad-index/darbaan/internal/mailtext"
 	"github.com/yaad-index/darbaan/internal/policy"
+	"github.com/yaad-index/darbaan/internal/provenance"
+	"github.com/yaad-index/darbaan/internal/riskscore"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
@@ -41,11 +45,14 @@ type Service struct {
 	signer     Signer
 	router     *policy.Router
 	domain     string
-	filters    map[string]*filter.Filter // per-inbox filter for the hold-for-human queue (ADR 0021/0023)
-	mailOwner  func(inbox string) string // synced-mail owner key per inbox (ADR 0027); nil until wired
-	guard      *bounceguard.Guard        // inbound bounce-spoof guard (ADR 0024; nil = off)
-	holdSpoof  bool                      // on_spoof=hold-for-human → spoofs join the held queue
-	audit      audit.AuditLog            // inbound-verdict audit sink (ADR 0011; nil = not wired, e.g. in tests)
+	filters    map[string]*filter.Filter  // per-inbox filter for the hold-for-human queue (ADR 0021/0023)
+	mailOwner  func(inbox string) string  // synced-mail owner key per inbox (ADR 0027); nil until wired
+	guard      *bounceguard.Guard         // inbound bounce-spoof guard (ADR 0024; nil = off)
+	holdSpoof  bool                       // on_spoof=hold-for-human → spoofs join the held queue
+	audit      audit.AuditLog             // inbound-verdict audit sink (ADR 0011; nil = not wired, e.g. in tests)
+	evidence   EvidenceSource             // the ingest path's detector, for held-message evidence (ADR 0036; nil = off)
+	evLimits   mailtext.Limits            // the screener's extraction limits, so the re-run reads the text the score read
+	evStamp    inbound.ProvenanceResolver // the store's stamp, to strip Darbaan's own banner only where it is applied
 
 	// Reconcile controls (ADR 0026), wired by serve over its per-inbox syncers;
 	// nil when no inbox has an upstream (nothing to reconcile).
@@ -264,6 +271,100 @@ func (s *Service) HeldList() ([]inbound.Message, error) {
 		}
 	}
 	return held, nil
+}
+
+// EvidenceSource re-runs the detector over a held message's content to find the
+// text each fired factor matched (ADR 0036). serve injects the ingest path's own
+// detector, never a second one built for the admin side, so the re-run uses the
+// same rules the ingest path now scores with.
+type EvidenceSource interface {
+	Evidence(c mailtext.Content, factors []riskscore.Factor) map[riskscore.Factor][]assessor.Span
+}
+
+// SetEvidenceSource wires the held-evidence re-run: the detector ingest scores
+// with, the screener's extraction limits, and the store's provenance stamp.
+func (s *Service) SetEvidenceSource(e EvidenceSource, limits mailtext.Limits, stamp inbound.ProvenanceResolver) {
+	s.evidence, s.evLimits, s.evStamp = e, limits, stamp
+}
+
+// ErrEvidenceUnavailable means the re-run could not happen: no detector is wired,
+// or the held message has no stored body to match against. It is not a claim that
+// anything disagrees, and a caller must not render it as one.
+var ErrEvidenceUnavailable = errors.New("admin: held-message evidence unavailable")
+
+// FactorEvidence is the re-run's result for one factor the stored assessment
+// fired. Spans empty means the current rules no longer match this message for
+// that factor.
+type FactorEvidence struct {
+	Factor string          `json:"factor"`
+	Spans  []assessor.Span `json:"spans"`
+}
+
+// HeldEvidence returns, for each factor a held message's stored assessment fired,
+// the text the detector matches in it now (ADR 0036). It is transient and never
+// stored. Reachability is exactly HeldContent's: the same held-only lookup, the
+// same holds:read scope on its route, and nothing it returns is outside the body
+// HeldContent already serves.
+func (s *Service) HeldEvidence(id string) ([]FactorEvidence, error) {
+	if s.inbox == nil {
+		return nil, ErrHoldsUnavailable
+	}
+	if s.evidence == nil {
+		return nil, fmt.Errorf("%w: no detector wired", ErrEvidenceUnavailable)
+	}
+	m, err := s.heldMessage(id)
+	if err != nil {
+		return nil, err
+	}
+	out := []FactorEvidence{}
+	if m.Assessment == nil || len(m.Assessment.Factors) == 0 {
+		return out, nil
+	}
+	// Defensive: an assessment-held message is assessed on its fetched body and the
+	// content write always stores at least the provenance stamp, so this is not
+	// reachable through the store today. If it ever is, no re-run can happen, and
+	// that must not come back as an empty result a card would read as disagreement.
+	if len(m.Raw) == 0 {
+		return nil, fmt.Errorf("%w: no stored body", ErrEvidenceUnavailable)
+	}
+	content, err := mailtext.Extract(m.Raw, s.evLimits)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrEvidenceUnavailable, err)
+	}
+	// The stored body is the scored body after the store's stamp. Where the stamp
+	// adds a banner, the banner is Darbaan's text (the operator's note included), not
+	// the sender's, so it is removed before matching. Where it does not, a leading
+	// banner-shaped block is the sender's own text and stays searchable.
+	if s.evStamp != nil && s.evStamp(m.Inbox, provenance.From(m.Raw)).Banner {
+		content.Body = provenance.StripLeadingBanner(content.Body)
+	}
+	factors := make([]riskscore.Factor, len(m.Assessment.Factors))
+	for i, f := range m.Assessment.Factors {
+		factors[i] = riskscore.Factor(f)
+	}
+	ev := s.evidence.Evidence(content, factors)
+	for _, f := range factors {
+		spans := ev[f]
+		if spans == nil {
+			spans = []assessor.Span{}
+		}
+		out = append(out, FactorEvidence{Factor: string(f), Spans: spans})
+	}
+	return out, nil
+}
+
+// heldMessage returns the currently held message with this id, with its body.
+func (s *Service) heldMessage(id string) (inbound.Message, error) {
+	held, err := s.HeldList()
+	if err != nil {
+		return inbound.Message{}, err
+	}
+	for _, m := range held {
+		if m.ID == id {
+			return s.inbox.Get(m.Owner, m.Inbox, m.ID)
+		}
+	}
+	return inbound.Message{}, ErrNotHeld
 }
 
 // HeldContent returns a held message's stored raw body for the human hold

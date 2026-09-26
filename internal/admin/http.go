@@ -95,6 +95,7 @@ func NewServer(addr, token string, svc *Service) (*Server, error) {
 	// keep hidden.
 	s.register(mux, "GET /holds", s.handleHeldList)
 	s.register(mux, "GET /holds/{id}/content", s.handleHeldContent)
+	s.register(mux, "GET /holds/{id}/evidence", s.handleHeldEvidence)
 	s.register(mux, "POST /holds/{id}/expose", s.handleExpose)
 	s.register(mux, "POST /holds/{id}/drop", s.handleDrop)
 
@@ -309,6 +310,22 @@ func (s *Server) handleHeldContent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "message/rfc822")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
+}
+
+// handleHeldEvidence serves the re-run's matched spans for a held message's fired
+// factors (ADR 0036), under the same scope and held-only rule as its content.
+func (s *Server) handleHeldEvidence(w http.ResponseWriter, r *http.Request) {
+	ev, err := s.svc.HeldEvidence(r.PathValue("id"))
+	switch {
+	case errors.Is(err, ErrNotHeld):
+		writeErrWithCode(w, http.StatusNotFound, err, codeNotHeld)
+	case errors.Is(err, ErrHoldsUnavailable), errors.Is(err, ErrEvidenceUnavailable):
+		writeErr(w, http.StatusServiceUnavailable, err)
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, err)
+	default:
+		writeJSON(w, http.StatusOK, ev)
+	}
 }
 
 func (s *Server) handleExpose(w http.ResponseWriter, r *http.Request) {

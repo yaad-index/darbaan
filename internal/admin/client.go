@@ -284,6 +284,31 @@ func (c *Client) HeldContent(ctx context.Context, id string) ([]byte, error) {
 	return b, nil
 }
 
+// HeldEvidence returns the matched spans for a held message's fired factors (ADR
+// 0036). A 503 comes back as ErrEvidenceUnavailable: the re-run did not happen,
+// which a caller must not render as a disagreement.
+func (c *Client) HeldEvidence(ctx context.Context, id string) ([]FactorEvidence, error) {
+	resp, err := c.request(ctx, http.MethodGet, "/holds/"+url.PathEscape(id)+"/evidence", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return nil, notFoundFrom(resp, codeNotHeld, ErrNotHeld)
+	case http.StatusServiceUnavailable:
+		return nil, fmt.Errorf("%w: %w", ErrEvidenceUnavailable, errorFrom(resp))
+	default:
+		return nil, errorFrom(resp)
+	}
+	var out []FactorEvidence
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("admin: decode evidence %s: %w", id, err)
+	}
+	return out, nil
+}
+
 // Expose approves a held message for the agent to see (ADR 0021).
 func (c *Client) Expose(ctx context.Context, id string) (inbound.Message, error) {
 	return c.hold(ctx, "/holds/"+url.PathEscape(id)+"/expose")

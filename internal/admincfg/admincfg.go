@@ -62,6 +62,7 @@ var RouteScopes = map[string]string{
 	"POST /queue/{id}/reject":             ScopeQueueDecide,
 	"GET /holds":                          ScopeHoldsRead,
 	"GET /holds/{id}/content":             ScopeHoldsRead,
+	"GET /holds/{id}/evidence":            ScopeHoldsRead,
 	"POST /holds/{id}/expose":             ScopeHoldsDecide,
 	"POST /holds/{id}/drop":               ScopeHoldsDecide,
 	"GET /reconcile":                      ScopeReconcileRead,

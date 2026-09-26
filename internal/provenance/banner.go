@@ -262,3 +262,17 @@ func neutralizeBanners(body []byte) []byte {
 		}
 	}
 }
+
+// StripLeadingBanner removes Darbaan's own leading trust banner from a decoded
+// body, so a consumer re-examining stored content sees the text the message
+// carried rather than the text Darbaan added (ADR 0036). It is only correct where
+// the banner is applied: there the stamper has already removed any spoofed leading
+// block, so a leading banner is Darbaan's own. Where the banner is off, a leading
+// banner-shaped block is the sender's text and must not be stripped.
+func StripLeadingBanner(body string) string {
+	out := string(stripBanner([]byte(body)))
+	if len(out) != len(body) {
+		out = strings.TrimPrefix(out, "\n\n") // extraction may have normalized CRLF
+	}
+	return out
+}
