@@ -101,6 +101,12 @@ func decodeStrict(n *yaml.Node) (FactorConfig, error) {
 	return fc, nil
 }
 
+// BuiltinFactors returns the factors the built-in detector emits, sorted. A
+// consumer compares a recorded active set against it to name what was switched off.
+func BuiltinFactors() []riskscore.Factor {
+	return NewHeuristicDetector().Factors()
+}
+
 // builtinRules is the default ruleset, in rule order. Every factor a rule emits is
 // configurable; a factor with no rule (hidden_directives) is not, beyond disabling.
 func builtinRules() []rule {

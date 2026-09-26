@@ -11,6 +11,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/assessor"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/mailtext"
+	"github.com/yaad-index/darbaan/internal/riskscore"
 )
 
 // pollHolds lists the inbound hold-for-human queue (ADR 0021) and posts each new
@@ -164,10 +165,58 @@ func holdAssessmentLine(a *inbound.Assessment) string {
 	if assessmentTruncated(a) {
 		line += " — scored on partial content: the message exceeded the extraction limits, so part of it was never assessed, and such messages are always held"
 	}
+	// Also a trust qualifier, so it too goes ahead of the factor glosses: a factor
+	// the operator switched off could not have fired, and a clean score says nothing
+	// about it (ADR 0035).
+	if off := notCheckedClause(a); off != "" {
+		line += " — " + off
+	}
 	if reason := glossFactors(a.Factors); reason != "" {
 		line += " — " + reason
 	}
 	return line
+}
+
+// notCheckedClause names the built-in content factors that were switched off when
+// the message was assessed, from the recorded active set. It says nothing when
+// the set was not recorded (a record from before the field, or no content was
+// assessed), since then nothing is known either way.
+func notCheckedClause(a *inbound.Assessment) string {
+	if a.Active == nil {
+		return ""
+	}
+	on := make(map[string]bool, len(a.Active))
+	for _, f := range a.Active {
+		on[f] = true
+	}
+	var off []string
+	for _, f := range assessor.BuiltinFactors() {
+		if !on[string(f)] {
+			off = append(off, offLabel(f))
+		}
+	}
+	switch {
+	case len(off) == 0:
+		return ""
+	case len(on) == 0:
+		return "no content checks ran (detection is switched off)"
+	default:
+		return "not checked, switched off: " + strings.Join(off, ", ")
+	}
+}
+
+// offLabel names a content factor in operator terms for the not-checked clause.
+func offLabel(f riskscore.Factor) string {
+	switch f {
+	case riskscore.FactorInstruction:
+		return "instructions to the reader"
+	case riskscore.FactorSecretsRequest:
+		return "credential requests"
+	case riskscore.FactorAttachmentDirectives:
+		return "instructions in attachments"
+	default:
+		return string(f)
+	}
 }
 
 // assessmentTruncated reports whether the score was computed on partial content.

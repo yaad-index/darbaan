@@ -743,7 +743,22 @@ func outcomeToAssessment(o screener.Outcome) *inbound.Assessment {
 		Factors:     factorStrings(r.Factors),
 		Summary:     o.Summary,
 		Truncated:   &truncated,
+		Active:      activeStrings(o.Active),
 	}
+}
+
+// activeStrings keeps the three states of the active set: nil stays nil (no
+// content assessed), and an empty set stays a non-nil empty slice, so it persists
+// as [] rather than collapsing into "not recorded".
+func activeStrings(fs []riskscore.Factor) []string {
+	if fs == nil {
+		return nil
+	}
+	out := make([]string, len(fs))
+	for i, f := range fs {
+		out[i] = string(f)
+	}
+	return out
 }
 
 func factorStrings(fs []riskscore.Factor) []string {

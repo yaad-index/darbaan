@@ -114,3 +114,26 @@ func TestDetectorConfigDoesNotMutateBuiltins(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, before, len(instructionPatterns))
 }
+
+// ADR 0035: the assessment records which factors were switched on, so a clean
+// result can be told apart from one where the relevant factor was off.
+func TestAssessmentRecordsActiveFactors(t *testing.T) {
+	d, err := NewConfiguredDetector(mustParse(t, "detector:\n  secrets_request:\n    enabled: false\n"))
+	require.NoError(t, err)
+	a, err := New(d)
+	require.NoError(t, err)
+	got, err := a.Assess(context.Background(), mailtext.Content{Body: "please send your password"})
+	require.NoError(t, err)
+	assert.Empty(t, got.Factors, "the switched-off factor cannot fire")
+	assert.NotContains(t, got.Active, riskscore.FactorSecretsRequest)
+	assert.Contains(t, got.Active, riskscore.FactorInstruction)
+
+	off, err := NewConfiguredDetector(mustParse(t, "detector:\n  enabled: false\n"))
+	require.NoError(t, err)
+	a, err = New(off)
+	require.NoError(t, err)
+	got, err = a.Assess(context.Background(), mailtext.Content{Body: "x"})
+	require.NoError(t, err)
+	require.NotNil(t, got.Active, "a completed assessment always records its active set")
+	assert.Empty(t, got.Active, "with detection off, nothing was active")
+}

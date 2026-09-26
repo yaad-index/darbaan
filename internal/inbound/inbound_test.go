@@ -1,6 +1,7 @@
 package inbound_test
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -436,4 +437,29 @@ func TestStampUIDValidityRefusesZeroAndOtherOwners(t *testing.T) {
 	stored, err := s.Get("agent", "", m.ID)
 	require.NoError(t, err)
 	assert.Zero(t, stored.UIDValidity, "neither refused call wrote anything")
+}
+
+// ADR 0035: the active set has three states and the stored form must keep all three.
+func TestAssessmentActiveKeepsThreeStates(t *testing.T) {
+	for name, tc := range map[string]struct {
+		in   []string
+		want []string
+	}{
+		"not recorded":   {nil, nil},
+		"nothing active": {[]string{}, []string{}},
+		"some active":    {[]string{"secrets_request"}, []string{"secrets_request"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(inbound.Assessment{Disposition: inbound.AssessmentHeld, Active: tc.in})
+			require.NoError(t, err)
+			var back inbound.Assessment
+			require.NoError(t, json.Unmarshal(raw, &back))
+			assert.Equal(t, tc.want, back.Active)
+			assert.Equal(t, tc.want == nil, back.Active == nil, "nil and empty must not collapse")
+		})
+	}
+
+	var legacy inbound.Assessment
+	require.NoError(t, json.Unmarshal([]byte(`{"disposition":"held"}`), &legacy))
+	assert.Nil(t, legacy.Active, "a record from before the field reads as not recorded")
 }
