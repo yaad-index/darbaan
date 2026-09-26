@@ -237,6 +237,22 @@ func (c *CLI) detectorConfig() (assessor.DetectorConfig, error) {
 	return assessor.ParseDetectorConfig(section)
 }
 
+// switchedOffFactors lists the built-in detector factors the configured detector
+// does not declare, in order.
+func switchedOffFactors(det *assessor.HeuristicDetector) []string {
+	on := make(map[riskscore.Factor]bool)
+	for _, f := range det.Factors() {
+		on[f] = true
+	}
+	var off []string
+	for _, f := range assessor.NewHeuristicDetector().Factors() {
+		if !on[f] {
+			off = append(off, string(f))
+		}
+	}
+	return off
+}
+
 // assessmentSection returns the top-level `assessment:` section re-encoded as its
 // own document, or nil when the config file or the section is absent.
 func (c *CLI) assessmentSection() ([]byte, error) {
@@ -665,6 +681,13 @@ func (cli *CLI) buildAssessHook(inboxes []inboxcfg.Inbox, resolve inbound.Proven
 	detector, err := assessor.NewConfiguredDetector(dcfg)
 	if err != nil {
 		return nil, fmt.Errorf("assessment detector config: %w", err)
+	}
+	// A switched-off factor passes the alignment check trivially and can never
+	// fire, so every message scores clean on it. Say so at startup rather than
+	// leaving it to be discovered from a clean result.
+	if off := switchedOffFactors(detector); len(off) > 0 {
+		slog.Warn("injection assessment: detector factors switched off by config; they can never fire, so a clean score says nothing about them",
+			"off", off)
 	}
 	if err := assessor.ValidateAlignment(detector, scorer.Config()); err != nil {
 		return nil, fmt.Errorf("assessment detector/scorer misaligned: %w", err)

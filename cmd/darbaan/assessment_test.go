@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yaad-index/darbaan/internal/assessor"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/provenance"
 	"github.com/yaad-index/darbaan/internal/riskscore"
@@ -216,4 +217,20 @@ func TestAssessmentSectionCarriesScorerAndDetectorKeys(t *testing.T) {
 
 	_, err = cli.buildAssessHook(nil, nilResolver, cfg)
 	require.NoError(t, err)
+}
+
+// Switching factors off is visible at startup: they are named, and an untouched
+// detector names nothing.
+func TestSwitchedOffFactorsNamesThem(t *testing.T) {
+	cfg, err := assessor.ParseDetectorConfig([]byte("detector:\n  secrets_request:\n    enabled: false\n"))
+	require.NoError(t, err)
+	d, err := assessor.NewConfiguredDetector(cfg)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"secrets_request"}, switchedOffFactors(d))
+
+	all, err := assessor.NewConfiguredDetector(assessor.DetectorConfig{Disabled: true})
+	require.NoError(t, err)
+	assert.Len(t, switchedOffFactors(all), 3, "detection off names every built-in factor")
+
+	assert.Empty(t, switchedOffFactors(assessor.NewHeuristicDetector()))
 }
