@@ -101,7 +101,8 @@ func (d *HeuristicDetector) Detect(ctx context.Context, c mailtext.Content) ([]r
 }
 
 // stripFormatRunes removes every Unicode format (Cf) code point from s, for
-// match-only use (detector matching and fence-marker neutralization). The bypass
+// match-only use in detector matching. (The fence folds the same Cf class itself,
+// rune by rune, so it can map a match back to the original span.) The bypass
 // class is the whole Cf category \u2014 zero-width space/joiners, BOM, word joiner,
 // the LRM/RLM/ALM bidi marks, the embedding/override/isolate controls, the
 // invisible math operators, and the soft hyphen \u2014 not any fixed list, so matching
