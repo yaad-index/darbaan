@@ -94,12 +94,13 @@ func yamlFields(t reflect.Type) map[string]reflect.Type {
 }
 
 // rejectUnimplemented fails for any unknown key that names a setting ADR 0031
-// describes but no code implements, so that configuration fails loudly instead of
-// silently loading an unprotected setup.
+// describes but no code implements, anywhere under an inbox's trust (including
+// inside a per-sender rule), so that configuration fails loudly instead of silently
+// loading an unprotected setup.
 func rejectUnimplemented(unknown []string) error {
 	for _, p := range unknown {
 		key := p[strings.LastIndex(p, ".")+1:]
-		if unimplementedTrustKeys[key] && strings.HasSuffix(strings.TrimSuffix(p, "."+key), ".trust") {
+		if unimplementedTrustKeys[key] && strings.Contains(p+".", ".trust.") && strings.HasPrefix(p, "inboxes[") {
 			return fmt.Errorf("inboxcfg: %s: the Authentication-Results gate (ADR 0031) is not implemented yet, so this setting would do nothing; "+
 				"trusted elevation currently relies on the upstream's own sender authentication. Remove it", p)
 		}

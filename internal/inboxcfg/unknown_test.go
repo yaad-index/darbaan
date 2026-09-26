@@ -87,3 +87,11 @@ func TestConfigExampleInboxKeysAreAllKnown(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got, "a documented key is reported as unknown")
 }
+
+// They do nothing inside a per-sender rule either, so they fail there too.
+func TestParseRejectsGateSettingsInsideARule(t *testing.T) {
+	y := strings.Replace(knownInbox, "          level: untrusted\n", "          level: untrusted\n          require_authenticated: true\n", 1)
+	_, err := Parse([]byte(y))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "inboxes[0].trust.rules[0].require_authenticated")
+}
