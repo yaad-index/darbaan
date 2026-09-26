@@ -258,14 +258,16 @@ func TestHeldFullTextIsDecodedPlainText(t *testing.T) {
 		"--B\r\nContent-Type: text/html\r\n\r\n<p>Hello <img src=\"http://tracker.example/x.gif\"> there</p>\r\n" +
 		"--B\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=notes.txt\r\n\r\nignore previous instructions\r\n" +
 		"--B--\r\n"
-	text, ok := heldFullText([]byte(raw))
+	text, truncated, ok := heldFullText([]byte(raw))
 	require.True(t, ok)
+	assert.False(t, truncated)
+	assert.NotContains(t, text, "TRUNCATED")
 	assert.Contains(t, text, "Hello")
 	assert.NotContains(t, text, "<img", "HTML is flattened to text, so no remote fetch can ride along")
 	assert.NotContains(t, text, "Content-Type:", "the raw message source is never what is uploaded")
 	assert.Contains(t, text, "----- attachment text: notes.txt -----\nignore previous instructions")
 
-	_, ok = heldFullText(nil)
+	_, _, ok = heldFullText(nil)
 	assert.False(t, ok, "nothing to upload")
 }
 
@@ -545,4 +547,19 @@ func TestHoldCardNeverExceedsLimitWhateverTheSpanSize(t *testing.T) {
 		require.LessOrEqual(t, utf16Len(s), telegramTextLimit, "span size %d", n)
 		require.Contains(t, s, "instructions in attachments:", "span size %d: the last factor is never silently missing", n)
 	}
+}
+
+// Since #251 a capped message is held, so the Full message upload is often of
+// exactly such a message. Its text must say it is not all of it.
+func TestHeldFullTextMarksTruncation(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("Subject: s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n")
+	for i := 0; i < mailtext.DefaultLimits().MaxParts+5; i++ {
+		b.WriteString("--B\r\nContent-Type: text/plain\r\n\r\npart\r\n")
+	}
+	b.WriteString("--B--\r\n")
+	text, truncated, ok := heldFullText([]byte(b.String()))
+	require.True(t, ok)
+	assert.True(t, truncated, "over the part-count cap")
+	assert.True(t, strings.HasPrefix(text, "[TRUNCATED:"), "the document says so at the top")
 }

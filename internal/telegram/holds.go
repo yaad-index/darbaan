@@ -2,13 +2,13 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
-	"errors"
 	"github.com/yaad-index/darbaan/internal/admin"
 	"github.com/yaad-index/darbaan/internal/assessor"
 	"github.com/yaad-index/darbaan/internal/inbound"
@@ -462,7 +462,7 @@ func (c *Client) handleHeldFull(ctx context.Context, b *bot.Bot, update *models.
 		c.logger.Warn("telegram held full message fetch failed", "id", id, "err", err)
 		answer = "Could not fetch the message. Try again."
 	default:
-		text, ok := heldFullText(raw)
+		text, truncated, ok := heldFullText(raw)
 		if !ok {
 			answer = "No text to upload, or too large to upload."
 			break
@@ -472,21 +472,35 @@ func (c *Client) handleHeldFull(ctx context.Context, b *bot.Bot, update *models.
 			anchor = msg.ID
 		}
 		c.sendFullBody(ctx, id, anchor, text)
+		if truncated {
+			answer = "Sent below, but TRUNCATED: the message exceeded the extraction limits, so this is not all of it."
+		}
 	}
 	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cq.ID, Text: answer})
 }
 
-// heldFullText is the complete decoded text of a held message for the Full
-// message upload: its body, then each attachment's extracted text under a marked
-// heading. Plain text, never the raw message, so nothing in it renders or fetches
-// anything on the operator's device. ok is false when there is nothing to upload or
-// it is over the upload limit, the same predicate the upload itself uses.
-func heldFullText(raw []byte) (string, bool) {
+// heldFullText is the decoded text of a held message for the Full message upload:
+// its body, then each attachment's extracted text under a marked heading. Plain
+// text, never the raw message, so nothing in it renders or fetches anything on the
+// operator's device. truncated reports that extraction hit its limits, which since
+// #251 is itself a reason a message is held: the text then says so at the top, and
+// the caller says so in its answer, so a partial text is never presented as full.
+// ok is false when there is nothing to upload or it is over the upload limit, the
+// same predicate the upload itself uses.
+//
+// It extracts with the package default limits. The screener in serve uses the same
+// defaults (it is built without WithLimits), but this client is a separate binary
+// and cannot read the screener's value; if serve ever overrides the limits, this
+// must follow.
+func heldFullText(raw []byte) (text string, truncated, ok bool) {
 	c, err := mailtext.Extract(raw, mailtext.DefaultLimits())
 	if err != nil && c.Body == "" && len(c.Attachments) == 0 {
-		return "", false
+		return "", false, false
 	}
 	var b strings.Builder
+	if c.Truncated {
+		b.WriteString("[TRUNCATED: this message exceeded the extraction limits, so the text below is NOT all of it]\n\n")
+	}
 	b.WriteString(c.Body)
 	for _, a := range c.Attachments {
 		if a.Text == "" {
@@ -499,8 +513,8 @@ func heldFullText(raw []byte) (string, bool) {
 		b.WriteString("\n\n----- attachment text: " + name + " -----\n")
 		b.WriteString(a.Text)
 	}
-	text := b.String()
-	return text, fullBodyUploadable(len(text))
+	text = b.String()
+	return text, c.Truncated, fullBodyUploadable(len(text))
 }
 
 // handleExpose is the [Expose] button: verify the operator, confirm it's still
