@@ -1,6 +1,6 @@
 # ADR 0020: Agent labeling via IMAP keywords (with Gmail X-GM-LABELS mapping)
 
-**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-27)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-27); amended 2026-09-26 (see the end)
 
 ## Context
 
@@ -86,3 +86,14 @@ first-class Gmail labels.
 - Structured inbound filter rules (ADR 0008).
 
 Relates to ADR 0001, 0002, 0009, 0016, 0019.
+
+## Amendment (2026-09-26): failed label writes are not reconciled; they are made visible
+
+Decision on item A6 of #237; text above stays as written (ADR 0037).
+
+The text says a failed upstream label write "is logged and reconciled on the next
+sync". No ADR provides that reconciliation and the code does not perform it, so a
+failed write leaves Darbaan's labels and the upstream's diverged indefinitely. The
+divergence is acknowledged, and it **must not be silent**: a failed label write is
+logged and **counted where an operator can see it**. A reconciliation or retry
+mechanism is left to a later ADR. The visible count follows this amendment in code.

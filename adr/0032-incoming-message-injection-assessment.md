@@ -426,3 +426,23 @@ Consequences says "Scope here is the decision only (Proposed)" with implementati
 "Status: Proposed (pending operator sign-off)". The decision and Amendment 1 have both
 since shipped, and the Status line at the top is the authoritative record of their
 acceptance.
+
+## Amendment (2026-09-26): inbound order, and one meaning of "reject"
+
+Decision on item A7 of #237; text above stays as written (ADR 0037). Recorded in ADRs
+0021 and 0032, and applies with ADRs 0024 and 0030. The same text is appended to ADR 0021.
+
+**Order.** Spoof-guard, then **assessment at ingest, for every message**, then filter
+rules **at serve time**. Filter rules are evaluated when mail is read and can be edited
+at any time, so skipping assessment for mail a rule currently hides would let that mail
+become visible unassessed the moment the rule changes, which ADR 0032's core invariant
+forbids. The cost of assessing mail a rule hides is accepted.
+
+**Reject.** Rejecting a held message means one thing, whatever held it: **a
+tombstone.** The message's content is never served to the agent again; the agent sees
+that a message was received and reviewed out, with no attacker bytes; the metadata and
+the audit record of the verdict are kept. **The upstream mailbox copy is not touched**:
+upstream is read-only for message content (ADR 0019, as narrowed by ADR 0020).
+
+Today the read face tombstones a rejected assessment hold but simply hides a rejected
+filter hold. The unified tombstone follows this amendment in code.

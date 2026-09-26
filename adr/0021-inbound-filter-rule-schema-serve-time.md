@@ -1,6 +1,6 @@
 # ADR 0021: Inbound filter — rule schema, operators, and serve-time evaluation
 
-**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-27)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-27); amended 2026-09-26 (see the end)
 
 ## Context
 
@@ -106,3 +106,39 @@ deferred.
 - Hot-reload of rules.
 
 Relates to ADR 0001, 0003, 0004, 0008, 0016, 0017, 0019, 0020.
+
+## Amendment (2026-09-26): inbound order, and one meaning of "reject"
+
+Decision on item A7 of #237; text above stays as written (ADR 0037). Recorded in ADRs
+0021 and 0032, and applies with ADRs 0024 and 0030.
+
+**Order.** Spoof-guard, then **assessment at ingest, for every message**, then filter
+rules **at serve time**. Filter rules are evaluated when mail is read and can be edited
+at any time, so skipping assessment for mail a rule currently hides would let that mail
+become visible unassessed the moment the rule changes, which ADR 0032's core invariant
+forbids. The cost of assessing mail a rule hides is accepted.
+
+**Reject.** Rejecting a held message means one thing, whatever held it: **a
+tombstone.** The message's content is never served to the agent again; the agent sees
+that a message was received and reviewed out, with no attacker bytes; the metadata and
+the audit record of the verdict are kept. **The upstream mailbox copy is not touched**:
+upstream is read-only for message content (ADR 0019, as narrowed by ADR 0020).
+
+Today the read face tombstones a rejected assessment hold but simply hides a rejected
+filter hold. The unified tombstone follows this amendment in code.
+
+
+## Amendment (2026-09-26): a human hold decision outranks later rule results
+
+Decision on item A15 of #237; text above stays as written (ADR 0037).
+
+Rules are re-evaluated whenever mail is read, so a rule edit can change the result for
+a message a human has already decided. **For that message, the human decision wins**:
+once a message has a hold decision, that decision determines whether it is served,
+whatever the rules say later. An approved message stays served if a new rule would
+hide it; a rejected message stays a tombstone (see the order and reject amendment) if
+a new rule would allow it. Rules keep re-evaluating as today for every message without
+a decision; there is no arrival-time cut-off.
+
+Today a later rule result overrides the decision in both directions. Decision-wins
+follows this amendment in code.

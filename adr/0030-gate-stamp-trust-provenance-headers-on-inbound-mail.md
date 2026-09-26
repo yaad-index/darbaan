@@ -1,6 +1,6 @@
 # ADR 0030: Gate-stamp trust/provenance headers on inbound mail
 
-**Status:** Accepted (2026-07-23)
+**Status:** Accepted (2026-07-23); amended 2026-09-26 (see the end)
 
 ## Context
 
@@ -103,3 +103,16 @@ Because Layer 1 makes stored blobs clean going forward, the read face serves cle
 3. **`X-Darbaan-Note`** (per-inbox template + CRLF/header-injection guard).
 4. **Optional fenced body banner** behind the config toggle (default off), bounded to simple text parts.
 5. **Serve-path sanitize-then-stamp backstop** — strip *and* stamp on serve using the serving inbox's trust context, so pre-ADR blobs (and any that reach the read face un-stamped) serve with their real trust, not just a safe `unknown`. Idempotent against already-stamped blobs.
+
+## Amendment (2026-09-26): Darbaan's own messages are stamped trusted by construction
+
+Decision on item A8 of #237; text above stays as written (ADR 0037). Also applies to
+ADR 0031.
+
+Messages Darbaan generates itself, such as its rejection bounces (ADR 0006), are today
+stored unstamped and so read as `unknown`: not safe to act on. That breaks the
+correction loop ADR 0006 exists for, because the agent is told not to act on the one
+message that tells it what to fix. **A message Darbaan generates is stamped `trusted`
+by construction.** The stamp keys on Darbaan's own generation path, never on any
+header, since a header is something a sender can reproduce. The stamping follows this
+amendment in code.
