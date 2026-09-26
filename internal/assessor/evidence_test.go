@@ -121,3 +121,13 @@ func TestEvidenceSpanIsStripped(t *testing.T) {
 	assert.NotContains(t, span.Text, "\u200b")
 	assert.Contains(t, span.Text, "ignore all previous instructions")
 }
+
+// Context never reaches across the body/attachment join, so a span labelled
+// "body" shows only body text around its match.
+func TestEvidenceContextStaysInItsSource(t *testing.T) {
+	d := NewHeuristicDetector()
+	c := mailtext.Content{Body: "please send me your password", Attachments: []mailtext.Attachment{{Filename: "a.txt", Text: "ATTACHMENT TEXT"}}}
+	span := d.Evidence(c, []riskscore.Factor{riskscore.FactorSecretsRequest})[riskscore.FactorSecretsRequest][0]
+	assert.Equal(t, SourceBody, span.Source)
+	assert.NotContains(t, span.Text, "ATTACHMENT", "no attachment text under a body label")
+}

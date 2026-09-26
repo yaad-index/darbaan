@@ -26,6 +26,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/mailtext"
 	"github.com/yaad-index/darbaan/internal/policy"
+	"github.com/yaad-index/darbaan/internal/provenance"
 	"github.com/yaad-index/darbaan/internal/riskscore"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
@@ -44,12 +45,14 @@ type Service struct {
 	signer     Signer
 	router     *policy.Router
 	domain     string
-	filters    map[string]*filter.Filter // per-inbox filter for the hold-for-human queue (ADR 0021/0023)
-	mailOwner  func(inbox string) string // synced-mail owner key per inbox (ADR 0027); nil until wired
-	guard      *bounceguard.Guard        // inbound bounce-spoof guard (ADR 0024; nil = off)
-	holdSpoof  bool                      // on_spoof=hold-for-human → spoofs join the held queue
-	audit      audit.AuditLog            // inbound-verdict audit sink (ADR 0011; nil = not wired, e.g. in tests)
-	evidence   EvidenceSource            // the ingest path's detector, for held-message evidence (ADR 0036; nil = off)
+	filters    map[string]*filter.Filter  // per-inbox filter for the hold-for-human queue (ADR 0021/0023)
+	mailOwner  func(inbox string) string  // synced-mail owner key per inbox (ADR 0027); nil until wired
+	guard      *bounceguard.Guard         // inbound bounce-spoof guard (ADR 0024; nil = off)
+	holdSpoof  bool                       // on_spoof=hold-for-human → spoofs join the held queue
+	audit      audit.AuditLog             // inbound-verdict audit sink (ADR 0011; nil = not wired, e.g. in tests)
+	evidence   EvidenceSource             // the ingest path's detector, for held-message evidence (ADR 0036; nil = off)
+	evLimits   mailtext.Limits            // the screener's extraction limits, so the re-run reads the text the score read
+	evStamp    inbound.ProvenanceResolver // the store's stamp, to strip Darbaan's own banner only where it is applied
 
 	// Reconcile controls (ADR 0026), wired by serve over its per-inbox syncers;
 	// nil when no inbox has an upstream (nothing to reconcile).
@@ -278,8 +281,11 @@ type EvidenceSource interface {
 	Evidence(c mailtext.Content, factors []riskscore.Factor) map[riskscore.Factor][]assessor.Span
 }
 
-// SetEvidenceSource wires the detector the held-evidence route re-runs.
-func (s *Service) SetEvidenceSource(e EvidenceSource) { s.evidence = e }
+// SetEvidenceSource wires the held-evidence re-run: the detector ingest scores
+// with, the screener's extraction limits, and the store's provenance stamp.
+func (s *Service) SetEvidenceSource(e EvidenceSource, limits mailtext.Limits, stamp inbound.ProvenanceResolver) {
+	s.evidence, s.evLimits, s.evStamp = e, limits, stamp
+}
 
 // ErrEvidenceUnavailable means the re-run could not happen: no detector is wired,
 // or the held message has no stored body to match against. It is not a claim that
@@ -321,9 +327,16 @@ func (s *Service) HeldEvidence(id string) ([]FactorEvidence, error) {
 	if len(m.Raw) == 0 {
 		return nil, fmt.Errorf("%w: no stored body", ErrEvidenceUnavailable)
 	}
-	content, err := mailtext.Extract(m.Raw, mailtext.DefaultLimits())
+	content, err := mailtext.Extract(m.Raw, s.evLimits)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrEvidenceUnavailable, err)
+	}
+	// The stored body is the scored body after the store's stamp. Where the stamp
+	// adds a banner, the banner is Darbaan's text (the operator's note included), not
+	// the sender's, so it is removed before matching. Where it does not, a leading
+	// banner-shaped block is the sender's own text and stays searchable.
+	if s.evStamp != nil && s.evStamp(m.Inbox, provenance.From(m.Raw)).Banner {
+		content.Body = provenance.StripLeadingBanner(content.Body)
 	}
 	factors := make([]riskscore.Factor, len(m.Assessment.Factors))
 	for i, f := range m.Assessment.Factors {

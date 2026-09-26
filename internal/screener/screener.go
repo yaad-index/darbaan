@@ -66,6 +66,10 @@ type Option func(*Screener)
 // WithLimits sets the extraction limits (default mailtext.DefaultLimits).
 func WithLimits(l mailtext.Limits) Option { return func(s *Screener) { s.limits = l } }
 
+// Limits returns the extraction limits this screener scores with, so anything that
+// re-reads a message's text (ADR 0036 evidence) reads it with the same bounds.
+func (s *Screener) Limits() mailtext.Limits { return s.limits }
+
 // WithExtractor overrides the content extractor (default mailtext.Extract).
 func WithExtractor(fn ExtractFunc) Option { return func(s *Screener) { s.extract = fn } }
 

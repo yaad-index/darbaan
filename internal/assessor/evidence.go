@@ -117,28 +117,32 @@ func collectSpans(text string, segs []segment, patterns []*regexp.Regexp) []Span
 		if len(spans) == MaxSpansPerFactor {
 			break
 		}
-		spans = append(spans, Span{Source: sourceAt(segs, h.start), Text: snippet(text, h.start, h.end)})
+		seg := segmentAt(segs, h.start)
+		spans = append(spans, Span{Source: seg.source, Text: snippet(text, h.start, h.end, seg)})
 	}
 	return spans
 }
 
-func sourceAt(segs []segment, at int) string {
+// segmentAt returns the source segment a match starting at byte at belongs to.
+func segmentAt(segs []segment, at int) segment {
 	for _, s := range segs {
 		if at >= s.start && at < s.end {
-			return s.source
+			return s
 		}
 	}
 	if len(segs) > 0 {
-		return segs[len(segs)-1].source
+		return segs[len(segs)-1]
 	}
-	return SourceBody
+	return segment{source: SourceBody}
 }
 
 // snippet returns the match with up to spanContextRunes of context on each side,
 // bounded to MaxSpanRunes. The match itself is never cut for context: context is
 // dropped first, and only a match longer than the bound is shortened, with an
-// ellipsis marking the cut.
-func snippet(text string, start, end int) string {
+// ellipsis marking the cut. Context stays inside the match's own source, so text
+// from a neighbouring attachment never appears under this span's label; a match
+// that itself crosses the join is still shown whole.
+func snippet(text string, start, end int, seg segment) string {
 	match := text[start:end]
 	if utf8.RuneCountInString(match) >= MaxSpanRunes {
 		return truncateRunes(match, MaxSpanRunes-1) + "…"
@@ -148,7 +152,13 @@ func snippet(text string, start, end int) string {
 		room = spanContextRunes
 	}
 	lo := backRunes(text, start, room)
+	if lo < seg.start {
+		lo = seg.start
+	}
 	hi := forwardRunes(text, end, room)
+	if segEnd := seg.end; hi > segEnd && end <= segEnd {
+		hi = segEnd
+	}
 	s := text[lo:hi]
 	if lo > 0 {
 		s = "…" + s

@@ -686,20 +686,20 @@ func parseMaxAge(s string) (time.Duration, error) {
 // operator on flip. It returns the ingest hook only when assessment is enabled; a
 // nil hook means assessment is off and FetchContent is byte-identical to before
 // (ADR 0032).
-func (cli *CLI) buildAssessHook(inboxes []inboxcfg.Inbox, resolve inbound.ProvenanceResolver, cfg riskscore.Config) (imapsync.AssessHook, *assessor.HeuristicDetector, error) {
+func (cli *CLI) buildAssessHook(inboxes []inboxcfg.Inbox, resolve inbound.ProvenanceResolver, cfg riskscore.Config) (imapsync.AssessHook, assessEvidence, error) {
 	scorer, err := riskscore.New(cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("assessment scorer: %w", err)
+		return nil, assessEvidence{}, fmt.Errorf("assessment scorer: %w", err)
 	}
 	// The operator's detector patterns (ADR 0035) are validated here on every start,
 	// assessment enabled or not, so a bad entry fails now rather than on the flip.
 	dcfg, err := cli.detectorConfig()
 	if err != nil {
-		return nil, nil, fmt.Errorf("assessment detector config: %w", err)
+		return nil, assessEvidence{}, fmt.Errorf("assessment detector config: %w", err)
 	}
 	detector, err := assessor.NewConfiguredDetector(dcfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("assessment detector config: %w", err)
+		return nil, assessEvidence{}, fmt.Errorf("assessment detector config: %w", err)
 	}
 	// A switched-off factor passes the alignment check trivially and can never
 	// fire, so every message scores clean on it. Say so at startup rather than
@@ -709,19 +709,19 @@ func (cli *CLI) buildAssessHook(inboxes []inboxcfg.Inbox, resolve inbound.Proven
 			"off", off)
 	}
 	if err := assessor.ValidateAlignment(detector, scorer.Config()); err != nil {
-		return nil, nil, fmt.Errorf("assessment detector/scorer misaligned: %w", err)
+		return nil, assessEvidence{}, fmt.Errorf("assessment detector/scorer misaligned: %w", err)
 	}
 	asr, err := assessor.New(detector, assessor.WithTimeout(cli.AssessmentTimeout))
 	if err != nil {
-		return nil, nil, fmt.Errorf("assessment assessor: %w", err)
+		return nil, assessEvidence{}, fmt.Errorf("assessment assessor: %w", err)
 	}
 	scr, err := screener.New(scorer, asr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("assessment screener: %w", err)
+		return nil, assessEvidence{}, fmt.Errorf("assessment screener: %w", err)
 	}
 	if !cli.AssessmentEnabled {
 		slog.Info("injection assessment disabled (default); detector/scorer alignment verified")
-		return nil, detector, nil
+		return nil, assessEvidence{detector: detector, limits: scr.Limits()}, nil
 	}
 	slog.Warn("injection assessment ENABLED (ADR 0032): high-risk inbound mail is held for the operator")
 	identity := inboxIdentities(inboxes)
@@ -739,7 +739,14 @@ func (cli *CLI) buildAssessHook(inboxes []inboxcfg.Inbox, resolve inbound.Proven
 		}
 		rcpt := screener.ResolveRecipient(identity[inbound.NormInbox(inbox)], to, cc)
 		return outcomeToAssessment(scr.Screen(context.Background(), raw, trust, rcpt))
-	}, detector, nil
+	}, assessEvidence{detector: detector, limits: scr.Limits()}, nil
+}
+
+// assessEvidence is what the held-evidence re-run needs from the assessment
+// pipeline: the detector ingest scores with and the screener's extraction limits.
+type assessEvidence struct {
+	detector *assessor.HeuristicDetector
+	limits   mailtext.Limits
 }
 
 // outcomeToAssessment maps the screener Outcome to the persisted, stringly-typed
@@ -1604,13 +1611,15 @@ func (*ServeCmd) Run(cli *CLI) error {
 	if err != nil {
 		return fmt.Errorf("assessment config: %w", err)
 	}
-	assessHook, detector, err := cli.buildAssessHook(inboxes, provResolver, assessCfg)
+	assessHook, evidence, err := cli.buildAssessHook(inboxes, provResolver, assessCfg)
 	if err != nil {
 		return err
 	}
 	// The held-evidence route re-runs THIS detector, the one ingest scores with,
-	// never a second one built from another copy of the config (ADR 0036).
-	svc.SetEvidenceSource(detector)
+	// never a second one built from another copy of the config, reading the text
+	// with the screener's own limits, and stripping Darbaan's banner only where the
+	// store's stamp applies one (ADR 0036).
+	svc.SetEvidenceSource(evidence.detector, evidence.limits, provResolver)
 
 	// One inbound syncer per inbox with an upstream (ADR 0019/0023), built before
 	// the read face so per-inbox FetchContent serves pending bodies on demand. An

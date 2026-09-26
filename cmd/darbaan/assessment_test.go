@@ -264,8 +264,8 @@ func TestHoldsReadersNamesRootAndScopedClients(t *testing.T) {
 // with, so the admin side can re-run the same instance.
 func TestBuildAssessHookReturnsItsDetector(t *testing.T) {
 	cli := &CLI{AssessmentEnabled: false, AssessmentTimeout: time.Second}
-	_, det, err := cli.buildAssessHook(nil, nilResolver, riskscore.DefaultConfig())
+	_, ev, err := cli.buildAssessHook(nil, nilResolver, riskscore.DefaultConfig())
 	require.NoError(t, err)
-	require.NotNil(t, det, "returned even with assessment disabled")
-	assert.Equal(t, assessor.NewHeuristicDetector().Factors(), det.Factors())
+	require.NotNil(t, ev.detector, "returned even with assessment disabled")
+	assert.Equal(t, assessor.NewHeuristicDetector().Factors(), ev.detector.Factors())
 }
