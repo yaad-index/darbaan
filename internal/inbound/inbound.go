@@ -155,6 +155,13 @@ type Assessment struct {
 	// A consumer reads the flag when present and falls back to the prose only for the
 	// nil (legacy) cohort, so new records never depend on the summary wording (#280).
 	Truncated *bool `json:"truncated,omitempty"`
+	// Active is the set of content factors that were switched on when this message
+	// was assessed (ADR 0035). It has three states, which is why it carries no
+	// omitempty: nil (key absent, or null) means not recorded, either a record from
+	// before this field or a path where no content was assessed; an empty list means
+	// assessed with every factor switched off; otherwise the active factors. A
+	// consumer names what was NOT checked by comparing against the built-in set.
+	Active []string `json:"active"`
 }
 
 // Assessment disposition values. These mirror the scorer's disposition strings;

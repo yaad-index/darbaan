@@ -410,3 +410,21 @@ func manyPartMessage(textLen int) []byte {
 	b.WriteString("--bb--\r\n")
 	return []byte(b.String())
 }
+
+// ADR 0035: a switched-off factor could not have fired, so the card says what was
+// not checked; it says nothing when the active set was never recorded.
+func TestHoldCardNamesSwitchedOffFactors(t *testing.T) {
+	base := func(active []string) *inbound.Assessment {
+		return &inbound.Assessment{Disposition: inbound.AssessmentHeld, Score: 30, Band: "low", Truncated: boolPtr(false), Active: active}
+	}
+	all := []string{"attachment_directives", "instruction_to_reader", "secrets_request"}
+
+	assert.NotContains(t, holdAssessmentLine(base(all)), "not checked", "everything on, nothing to say")
+	assert.NotContains(t, holdAssessmentLine(base(nil)), "not checked", "not recorded, nothing is known")
+
+	partial := holdAssessmentLine(base([]string{"attachment_directives", "instruction_to_reader"}))
+	assert.Contains(t, partial, "not checked, switched off: credential requests")
+
+	none := holdAssessmentLine(base([]string{}))
+	assert.Contains(t, none, "no content checks ran")
+}

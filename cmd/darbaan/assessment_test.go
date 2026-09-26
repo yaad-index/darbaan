@@ -234,3 +234,13 @@ func TestSwitchedOffFactorsNamesThem(t *testing.T) {
 
 	assert.Empty(t, switchedOffFactors(assessor.NewHeuristicDetector()))
 }
+
+// The screener-to-store mapping keeps the active set's three states: an empty set
+// (detection off) must persist as empty, never collapse to "not recorded".
+func TestOutcomeToAssessmentKeepsActiveStates(t *testing.T) {
+	assert.Nil(t, outcomeToAssessment(screener.Outcome{}).Active, "no content assessed")
+	empty := outcomeToAssessment(screener.Outcome{Active: []riskscore.Factor{}}).Active
+	require.NotNil(t, empty)
+	assert.Empty(t, empty)
+	assert.Equal(t, []string{"secrets_request"}, outcomeToAssessment(screener.Outcome{Active: []riskscore.Factor{riskscore.FactorSecretsRequest}}).Active)
+}

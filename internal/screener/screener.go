@@ -46,6 +46,10 @@ type Outcome struct {
 	// content was scored on those paths. Carried structurally so the persisted
 	// assessment records the trust caveat as a value rather than in prose (#280).
 	Truncated bool
+	// Active is the set of factors the detector had switched on (ADR 0035). Like
+	// Summary it is set only when the assessor ran; nil otherwise, meaning no
+	// content factor was checked on that path.
+	Active []riskscore.Factor
 }
 
 // Screener orchestrates one message's assessment.
@@ -122,6 +126,7 @@ func (s *Screener) Screen(ctx context.Context, raw []byte, trust string, recipie
 		Result:    result,
 		Summary:   assessment.Summary,
 		Truncated: assessment.Truncated,
+		Active:    assessment.Active,
 	}
 }
 

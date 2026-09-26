@@ -46,6 +46,12 @@ type Assessment struct {
 	// input (mailtext.Content.Truncated), recorded here, never re-derived downstream.
 	Truncated bool
 	Summary   string
+	// Active is the set of factors the detector could emit for this assessment,
+	// after operator configuration (ADR 0035): a factor switched off is absent. It
+	// is never nil on a completed assessment, so "nothing was checked" (empty) stays
+	// distinct from "not recorded". Without it a clean result cannot be told apart
+	// from one where the relevant factor was switched off.
+	Active []riskscore.Factor
 }
 
 // Detector detects risk factors in extracted message content. Implementations
@@ -136,7 +142,17 @@ func (a *Assessor) Assess(ctx context.Context, c mailtext.Content) (Assessment, 
 	// cross the boundary" invariant.
 	factors = a.filterDeclared(factors)
 	factors = dedupeSort(factors)
-	return Assessment{Factors: factors, Truncated: c.Truncated, Summary: summarize(factors, c.Truncated)}, nil
+	return Assessment{Factors: factors, Truncated: c.Truncated, Summary: summarize(factors, c.Truncated), Active: a.activeFactors()}, nil
+}
+
+// activeFactors returns the declared factors, sorted, as a fresh non-nil slice.
+func (a *Assessor) activeFactors() []riskscore.Factor {
+	out := make([]riskscore.Factor, 0, len(a.declared))
+	for f := range a.declared {
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // filterDeclared drops any factor the detector did not declare at construction.
