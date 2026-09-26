@@ -344,6 +344,12 @@ func (c *CLI) resolveInboxes() ([]inboxcfg.Inbox, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The inbox config decoder is not strict: a key with no matching setting loads
+	// and does nothing. Name every such key at startup, so a typo or an unsupported
+	// setting is visible rather than silently ignored.
+	if unknown, uerr := inboxcfg.UnknownKeys(data); uerr == nil && len(unknown) > 0 {
+		slog.Warn("config keys under inboxes: that match no setting and are IGNORED", "keys", unknown)
+	}
 	implicit := inboxcfg.Inbox{
 		Name:       inbound.DefaultInbox,
 		Identity:   c.SMTPUsername,
