@@ -82,6 +82,9 @@ func (failingInbound) AddSyncedAssessed(inbound.Delivery, *inbound.Assessment) (
 func (failingInbound) AddSyncedPending(inbound.Delivery) (bool, inbound.Message, error) {
 	return false, inbound.Message{}, errors.New("inbound store down")
 }
+func (failingInbound) AddGenerated(inbound.Delivery) (inbound.Message, error) {
+	return inbound.Message{}, errors.New("inbound store down")
+}
 func (failingInbound) StampUIDValidity(string, string, string, uint32) (inbound.Message, error) {
 	return inbound.Message{}, errors.New("inbound store down")
 }
@@ -214,6 +217,9 @@ func TestRejectDeliversSignedBounce(t *testing.T) {
 	assert.Contains(t, string(bounce.Raw), "smells like exfiltration")
 	assert.Contains(t, string(bounce.Raw), "5.7.1")
 	assert.Contains(t, string(bounce.Raw), "DKIM-Signature:")
+	// ADR 0030 (2026-09-26 amendment): Darbaan's own bounce is stamped trusted, so the
+	// agent may act on the correction it carries; the default resolver would say unknown.
+	assert.Contains(t, string(bounce.Raw), "X-Darbaan-Trust: trusted")
 }
 
 func TestRejectBounceFailureDistinct(t *testing.T) {

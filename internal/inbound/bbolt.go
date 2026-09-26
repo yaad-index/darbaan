@@ -127,11 +127,26 @@ func (s *bboltStore) Add(d Delivery) (Message, error) {
 	var msg Message
 	err := s.db.Update(func(tx *bbolt.Tx) error {
 		var e error
-		msg, _, e = s.put(tx, d, false, nil)
+		msg, _, e = s.put(tx, d, false, nil, false)
 		return e
 	})
 	if err != nil {
 		return Message{}, fmt.Errorf("inbound: add: %w", err)
+	}
+	return msg, nil
+}
+
+// AddGenerated stores a message Darbaan generated itself, stamped trusted by
+// construction (see InboundStore.AddGenerated).
+func (s *bboltStore) AddGenerated(d Delivery) (Message, error) {
+	var msg Message
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		var e error
+		msg, _, e = s.put(tx, d, false, nil, true)
+		return e
+	})
+	if err != nil {
+		return Message{}, fmt.Errorf("inbound: add generated: %w", err)
 	}
 	return msg, nil
 }
@@ -180,7 +195,7 @@ func (s *bboltStore) addSynced(d Delivery, pending bool, a *Assessment) (bool, M
 			}
 			return nil
 		}
-		m, key, err := s.put(tx, d, pending, a)
+		m, key, err := s.put(tx, d, pending, a, false)
 		if err != nil {
 			return err
 		}
@@ -214,7 +229,7 @@ func (s *bboltStore) SetContentAssessed(owner, inbox, id string, raw []byte, a *
 			return ErrNotFound
 		}
 		// Content blob first, then the metadata flip (same ordering as Add).
-		clean, err := s.putBlob(inbox, id, raw)
+		clean, err := s.putBlob(inbox, id, raw, false)
 		if err != nil {
 			return err
 		}
@@ -243,11 +258,18 @@ func (s *bboltStore) SetContentAssessed(owner, inbox, id string, raw []byte, a *
 // is rejected rather than stored; an inert non-message blob (e.g. a
 // locally-generated bounce) passes through untouched (unstamped → read as
 // unknown).
-func (s *bboltStore) putBlob(inbox, id string, raw []byte) ([]byte, error) {
+func (s *bboltStore) putBlob(inbox, id string, raw []byte, generated bool) ([]byte, error) {
 	// Trust is resolved from the authenticated inbox and the message's From
 	// (per-sender rules, ADR 0031). The From is read from the raw here; the trust
 	// asymmetry keeps that safe (only `trusted` is gated on the upstream, slice 2).
-	clean, err := provenance.Sanitize(raw, s.resolve(inbox, provenance.From(raw)))
+	stamp := s.resolve(inbox, provenance.From(raw))
+	if generated {
+		// Darbaan's own message: trusted by construction, and the resolver is not
+		// consulted, since it keys on the From header a sender could imitate (ADR
+		// 0030, 2026-09-26 amendment). Only AddGenerated sets generated.
+		stamp = provenance.Stamp{Trust: provenance.TrustTrusted}
+	}
+	clean, err := provenance.Sanitize(raw, stamp)
 	if err != nil {
 		return nil, fmt.Errorf("sanitize content: %w", err)
 	}
@@ -260,7 +282,7 @@ func (s *bboltStore) putBlob(inbox, id string, raw []byte) ([]byte, error) {
 // put builds and persists a new message. For a present message it writes the
 // content blob first (ADR 0018 ordering); a pending message has no blob yet.
 // Returns the message and its bbolt key. The caller is inside a write txn.
-func (s *bboltStore) put(tx *bbolt.Tx, d Delivery, pending bool, a *Assessment) (Message, []byte, error) {
+func (s *bboltStore) put(tx *bbolt.Tx, d Delivery, pending bool, a *Assessment, generated bool) (Message, []byte, error) {
 	b := tx.Bucket(bucketInbound)
 	seq, err := b.NextSequence()
 	if err != nil {
@@ -286,7 +308,7 @@ func (s *bboltStore) put(tx *bbolt.Tx, d Delivery, pending bool, a *Assessment) 
 	key := seqkey.Encode(seq)
 	blobbed := false
 	if !pending {
-		clean, err := s.putBlob(msg.Inbox, msg.ID, d.Raw)
+		clean, err := s.putBlob(msg.Inbox, msg.ID, d.Raw, generated)
 		if err != nil {
 			return Message{}, nil, err
 		}

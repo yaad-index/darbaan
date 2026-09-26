@@ -195,8 +195,14 @@ func NormInbox(inbox string) string {
 // InboundStore is the agent's served mailbox. Implementations are selected by
 // config (inbound-type) and constructed through New.
 type InboundStore interface {
-	// Add stores a delivery and returns the stored message.
+	// Add stores a delivery and returns the stored message. Its trust stamp comes
+	// from the provenance resolver, like any other stored message.
 	Add(Delivery) (Message, error)
+	// AddGenerated stores a message Darbaan generated itself, such as a rejection
+	// bounce, stamped trusted by construction (ADR 0030, 2026-09-26 amendment). The
+	// trust keys on this method being the one called, never on anything in the
+	// message, so only a call site that generates the message can grant it.
+	AddGenerated(Delivery) (Message, error)
 	// AddSynced stores a message pulled from upstream, keyed for idempotency by
 	// its upstream (UIDValidity, UpstreamUID). If that upstream message is
 	// already stored it is a no-op returning added=false; otherwise it is stored
