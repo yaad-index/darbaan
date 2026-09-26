@@ -40,16 +40,19 @@ func TestUnknownKeysNamesEveryIgnoredKey(t *testing.T) {
 	assert.ElementsMatch(t, []string{"inboxes[0].identityy", "inboxes[0].trust.rules[0].levelx"}, got)
 }
 
-// #237 A1: the Authentication-Results gate's settings are described by ADR 0031
-// but not implemented, so they fail load instead of silently doing nothing.
-func TestParseRejectsUnimplementedGateSettings(t *testing.T) {
-	for _, key := range []string{"require_authenticated: true", "authserv_id: mx.google.com"} {
-		y := strings.Replace(knownInbox, "      level: trusted\n", "      level: trusted\n      "+key+"\n", 1)
-		_, err := Parse([]byte(y))
-		require.Error(t, err, key)
-		assert.Contains(t, err.Error(), "inboxes[0].trust.")
-		assert.Contains(t, err.Error(), "not implemented yet")
-	}
+// #237 A1: the gate's settings are real settings of an inbox's trust block, so
+// they are not reported as ignored there.
+func TestGateSettingsAreKnownUnderTrust(t *testing.T) {
+	y := strings.Replace(knownInbox, "      level: trusted\n",
+		"      level: trusted\n      require_authenticated: true\n      authserv_id: mx.example\n", 1)
+	got, err := UnknownKeys([]byte(y))
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	ins, err := Parse([]byte(y))
+	require.NoError(t, err)
+	require.Len(t, ins, 1)
+	assert.True(t, ins[0].Trust.RequireAuthenticated)
+	assert.Equal(t, "mx.example", ins[0].Trust.AuthservID)
 }
 
 // Only under trust: the same name elsewhere is an ordinary unknown key (logged,
@@ -88,10 +91,12 @@ func TestConfigExampleInboxKeysAreAllKnown(t *testing.T) {
 	assert.Empty(t, got, "a documented key is reported as unknown")
 }
 
-// They do nothing inside a per-sender rule either, so they fail there too.
+// A per-sender rule has no gate of its own, so a gate setting there would do
+// nothing; it fails load and says where the setting belongs.
 func TestParseRejectsGateSettingsInsideARule(t *testing.T) {
 	y := strings.Replace(knownInbox, "          level: untrusted\n", "          level: untrusted\n          require_authenticated: true\n", 1)
 	_, err := Parse([]byte(y))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "inboxes[0].trust.rules[0].require_authenticated")
+	assert.Contains(t, err.Error(), "as trust.require_authenticated")
 }

@@ -340,7 +340,7 @@ func TestHeldEvidenceStripsOnlyDarbaansOwnBanner(t *testing.T) {
 	require.NoError(t, err)
 	c := admin.NewClient(startServer(t, svc, "tok"), "tok")
 
-	bannerOn := func(string, string) provenance.Stamp {
+	bannerOn := func(string, []byte) provenance.Stamp {
 		return provenance.Stamp{Trust: provenance.TrustUnknown, Banner: true}
 	}
 	svc.SetEvidenceSource(assessor.NewHeuristicDetector(), mailtext.DefaultLimits(), bannerOn)
@@ -349,7 +349,7 @@ func TestHeldEvidenceStripsOnlyDarbaansOwnBanner(t *testing.T) {
 	require.Len(t, ev, 1)
 	assert.Empty(t, ev[0].Spans, "the banner's own text is not the sender's evidence")
 
-	bannerOff := func(string, string) provenance.Stamp { return provenance.Stamp{Trust: provenance.TrustUnknown} }
+	bannerOff := func(string, []byte) provenance.Stamp { return provenance.Stamp{Trust: provenance.TrustUnknown} }
 	svc.SetEvidenceSource(assessor.NewHeuristicDetector(), mailtext.DefaultLimits(), bannerOff)
 	ev, err = c.HeldEvidence(context.Background(), m.ID)
 	require.NoError(t, err)

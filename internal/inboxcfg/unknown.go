@@ -8,11 +8,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// unimplementedTrustKeys are settings ADR 0031 describes that no code implements
-// yet. The config decoder is not strict, so without this check they would load
-// and do nothing, and an operator who set them would believe trusted elevation is
-// gated on authentication when it is not (#237, A1).
-var unimplementedTrustKeys = map[string]bool{
+// gateKeys are the Authentication-Results gate's settings (ADR 0031). They are
+// settings of an inbox's trust block only, so anywhere else under trust, such as
+// inside a per-sender rule, the decoder drops them, and an operator who put them
+// there would believe that rule is gated when it is not (#237, A1).
+var gateKeys = map[string]bool{
 	"require_authenticated": true,
 	"authserv_id":           true,
 }
@@ -93,16 +93,16 @@ func yamlFields(t reflect.Type) map[string]reflect.Type {
 	return out
 }
 
-// rejectUnimplemented fails for any unknown key that names a setting ADR 0031
-// describes but no code implements, anywhere under an inbox's trust (including
-// inside a per-sender rule), so that configuration fails loudly instead of silently
-// loading an unprotected setup.
-func rejectUnimplemented(unknown []string) error {
+// rejectMisplacedGate fails for any unknown key that names a gate setting under
+// an inbox's trust, which can only be one the decoder drops (a per-sender rule has
+// no such setting), so that configuration fails loudly instead of silently loading
+// an ungated rule.
+func rejectMisplacedGate(unknown []string) error {
 	for _, p := range unknown {
 		key := p[strings.LastIndex(p, ".")+1:]
-		if unimplementedTrustKeys[key] && strings.Contains(p+".", ".trust.") && strings.HasPrefix(p, "inboxes[") {
-			return fmt.Errorf("inboxcfg: %s: the Authentication-Results gate (ADR 0031) is not implemented yet, so this setting would do nothing; "+
-				"trusted elevation currently relies on the upstream's own sender authentication. Remove it", p)
+		if gateKeys[key] && strings.Contains(p+".", ".trust.") && strings.HasPrefix(p, "inboxes[") {
+			return fmt.Errorf("inboxcfg: %s: the Authentication-Results gate (ADR 0031) is set per inbox, as trust.%s, "+
+				"and gates every trusted outcome of that inbox; here it would do nothing. Move it", p, key)
 		}
 	}
 	return nil
