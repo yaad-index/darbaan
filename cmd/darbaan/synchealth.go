@@ -28,6 +28,26 @@ type syncHealthRecord struct {
 	lastError    string
 	watermarkUID uint32
 	uidValidity  uint32
+
+	labelRemovalsFailed int // ADR 0020: failed label removals, never reconciled
+	labelWritesPending  int // records the last reconcile pass could not write
+}
+
+// recordLabelRemovalFailure counts a label removal that failed and will not be
+// retried, so the divergence it leaves upstream is visible (ADR 0020, 2026-09-26
+// amendment).
+func (h *syncHealth) recordLabelRemovalFailure(inbox string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.at(inbox).labelRemovalsFailed++
+}
+
+// setLabelWritesPending records how many records the last reconcile pass could
+// not write.
+func (h *syncHealth) setLabelWritesPending(inbox string, n int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.at(inbox).labelWritesPending = n
 }
 
 // newSyncHealth builds the registry. A threshold below 1 is clamped to 1 so a
@@ -90,12 +110,14 @@ func (h *syncHealth) snapshot() []admin.SyncStatus {
 	out := make([]admin.SyncStatus, 0, len(h.rec))
 	for inbox, r := range h.rec {
 		st := admin.SyncStatus{
-			Inbox:             inbox,
-			ConsecutiveErrors: r.consecErrors,
-			LastError:         r.lastError,
-			WatermarkUID:      r.watermarkUID,
-			UIDValidity:       r.uidValidity,
-			Stalled:           r.consecErrors >= h.threshold,
+			Inbox:               inbox,
+			ConsecutiveErrors:   r.consecErrors,
+			LastError:           r.lastError,
+			WatermarkUID:        r.watermarkUID,
+			UIDValidity:         r.uidValidity,
+			LabelRemovalsFailed: r.labelRemovalsFailed,
+			LabelWritesPending:  r.labelWritesPending,
+			Stalled:             r.consecErrors >= h.threshold,
 		}
 		if !r.lastSuccess.IsZero() {
 			st.LastSuccess = r.lastSuccess.UTC().Format(time.RFC3339)

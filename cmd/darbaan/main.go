@@ -1171,7 +1171,7 @@ func (*SyncStatusCmd) Run(cli *CLI) error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "INBOX\tSTATE\tLAST SUCCESS\tERRORS\tUIDVALIDITY\tWATERMARK\tLAST ERROR")
+	_, _ = fmt.Fprintln(w, "INBOX\tSTATE\tLAST SUCCESS\tERRORS\tUIDVALIDITY\tWATERMARK\tLABEL REMOVALS FAILED\tLABELS PENDING\tLAST ERROR")
 	for _, s := range st {
 		state := "ok"
 		switch {
@@ -1187,8 +1187,9 @@ func (*SyncStatusCmd) Run(cli *CLI) error {
 		// LastError carries the upstream IMAP server's response text verbatim, so it
 		// gets the same treatment as every other operator-table free-text field
 		// (C22): sanitize before truncate, so the rune budget counts cleaned text.
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\n",
 			s.Inbox, state, last, s.ConsecutiveErrors, s.UIDValidity, s.WatermarkUID,
+			s.LabelRemovalsFailed, s.LabelWritesPending,
 			truncate(sanitizeField(s.LastError), 40))
 	}
 	return w.Flush()
@@ -1688,6 +1689,14 @@ func (*ServeCmd) Run(cli *CLI) error {
 	// per-inbox sync loops spawned below.
 	health := newSyncHealth(cli.SyncStallThreshold)
 	svc.SetSyncStatusReader(health.snapshot)
+	// Failed label writes that no sync repairs are counted where the operator reads
+	// sync health (ADR 0020, 2026-09-26 amendment).
+	for name, syn := range syncers {
+		syn.SetLabelHealth(
+			func() { health.recordLabelRemovalFailure(name) },
+			func(n int) { health.setLabelWritesPending(name, n) },
+		)
+	}
 
 	// The inbound bounce-spoof guard (ADR 0024) runs ahead of the user filter on
 	// both faces, verifying with the bounce signer's own key. On by default; an
