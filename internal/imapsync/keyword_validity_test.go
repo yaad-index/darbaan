@@ -118,7 +118,10 @@ func seedRecord(t *testing.T, store inbound.InboundStore, uid, validity uint32) 
 		Inbox:       inbound.DefaultInbox,
 		UpstreamUID: uid,
 		UIDValidity: validity,
-		Raw:         []byte("Subject: x\r\n\r\ny"),
+		// A Message-ID, so a zero-validity record is identifiable and its refusal is
+		// decided after SELECT (#255); an unidentifiable one is refused before any
+		// session, which is covered separately.
+		Raw: []byte("Subject: x\r\nMessage-ID: <seed@x.test>\r\n\r\ny"),
 	})
 	require.NoError(t, err)
 	require.Equal(t, validity, m.UIDValidity, "the store must persist the validity verbatim, zero included")

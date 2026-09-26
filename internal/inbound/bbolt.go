@@ -524,6 +524,37 @@ func (s *bboltStore) ClearKeywordsDirty(owner, inbox, id string) error {
 	})
 }
 
+// StampUIDValidity records v as the message's UIDVALIDITY only when the stored
+// value is unknown (0); a known validity is left as it is (#255). v == 0 is
+// refused, since 0 is never a valid UIDVALIDITY and would stamp nothing.
+func (s *bboltStore) StampUIDValidity(owner, inbox, id string, v uint32) (Message, error) {
+	if v == 0 {
+		return Message{}, fmt.Errorf("inbound: stamp uidvalidity %s: refusing to stamp 0", id)
+	}
+	var msg Message
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		rec, key, err := loadStored(tx, id)
+		if err != nil {
+			return err
+		}
+		if !recScoped(rec, owner, inbox) {
+			return ErrNotFound
+		}
+		if rec.UIDValidity == 0 {
+			rec.UIDValidity = v
+			if err := putStored(tx, key, rec); err != nil {
+				return err
+			}
+		}
+		msg = rec.Message
+		return nil
+	})
+	if err != nil {
+		return Message{}, fmt.Errorf("inbound: stamp uidvalidity %s: %w", id, err)
+	}
+	return msg, nil
+}
+
 // SetHoldDecision persists the human's hold-for-human decision (ADR 0021) on the
 // owner's message (metadata only; the blob is untouched) and returns it.
 func (s *bboltStore) SetHoldDecision(owner, inbox, id, decision string) (Message, error) {

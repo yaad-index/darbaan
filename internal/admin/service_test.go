@@ -82,6 +82,9 @@ func (failingInbound) AddSyncedAssessed(inbound.Delivery, *inbound.Assessment) (
 func (failingInbound) AddSyncedPending(inbound.Delivery) (bool, inbound.Message, error) {
 	return false, inbound.Message{}, errors.New("inbound store down")
 }
+func (failingInbound) StampUIDValidity(string, string, string, uint32) (inbound.Message, error) {
+	return inbound.Message{}, errors.New("inbound store down")
+}
 func (failingInbound) SetContent(string, string, string, []byte) (inbound.Message, error) {
 	return inbound.Message{}, errors.New("inbound store down")
 }

@@ -400,3 +400,40 @@ func TestRekeyOwnersToInbox(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, n)
 }
+
+// #255: StampUIDValidity fills an UNKNOWN (0) validity and never overwrites a known
+// one, so a stamp racing a sync or a second stamp cannot replace a real value.
+func TestStampUIDValidityOnlyFillsUnknown(t *testing.T) {
+	s := newStore(t)
+	_, legacy, err := s.AddSynced(inbound.Delivery{Owner: "agent", UpstreamUID: 5, UIDValidity: 0, Raw: []byte("From: a@x\r\n\r\nx")})
+	require.NoError(t, err)
+	require.Zero(t, legacy.UIDValidity, "precondition: a record predating the field")
+
+	got, err := s.StampUIDValidity("agent", "", legacy.ID, 42)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(42), got.UIDValidity, "an unknown validity is stamped")
+
+	again, err := s.StampUIDValidity("agent", "", legacy.ID, 99)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(42), again.UIDValidity, "a known validity is never overwritten")
+
+	stored, err := s.Get("agent", "", legacy.ID)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(42), stored.UIDValidity, "the stamp is persisted")
+}
+
+func TestStampUIDValidityRefusesZeroAndOtherOwners(t *testing.T) {
+	s := newStore(t)
+	_, m, err := s.AddSynced(inbound.Delivery{Owner: "agent", UpstreamUID: 5, Raw: []byte("From: a@x\r\n\r\nx")})
+	require.NoError(t, err)
+
+	_, err = s.StampUIDValidity("agent", "", m.ID, 0)
+	require.Error(t, err, "0 is never a valid UIDVALIDITY")
+
+	_, err = s.StampUIDValidity("someone-else", "", m.ID, 42)
+	require.ErrorIs(t, err, inbound.ErrNotFound, "another owner cannot stamp this record")
+
+	stored, err := s.Get("agent", "", m.ID)
+	require.NoError(t, err)
+	assert.Zero(t, stored.UIDValidity, "neither refused call wrote anything")
+}
