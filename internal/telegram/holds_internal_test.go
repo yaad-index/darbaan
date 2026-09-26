@@ -119,13 +119,6 @@ func TestFormatHoldPreservesTruncationCaveat(t *testing.T) {
 	assert.NotContains(t, formatHold(m2, nil, false), "partial content")
 }
 
-// #280: the truncation caveat is now driven by the STRUCTURED flag, not the summary
-// prose. This pins the four states that matter, and demonstrates the mutation by its
-// effect on the EMITTED CARD (the caveat clause appears/disappears) rather than by an
-// assertion failing — a negative control is only a control if it is reachable in
-// production and shown to change the output. The factor throughout is secrets_request,
-// which the heuristic detector actually emits, so the rest of the card renders and the
-// mutation exercises a real rendering path.
 // #251: a truncated message is held whatever its score, so a "low risk" card in the
 // held queue must say why it is there — the caveat carries the hold reason, not only
 // the trust qualifier.
@@ -140,6 +133,13 @@ func TestFormatHoldTruncationStatesWhyHeld(t *testing.T) {
 	assert.NotContains(t, holdAssessmentLine(a), "always held", "an untruncated card carries no truncation hold reason")
 }
 
+// #280: the truncation caveat is now driven by the STRUCTURED flag, not the summary
+// prose. This pins the four states that matter, and demonstrates the mutation by its
+// effect on the EMITTED CARD (the caveat clause appears/disappears) rather than by an
+// assertion failing — a negative control is only a control if it is reachable in
+// production and shown to change the output. The factor throughout is secrets_request,
+// which the heuristic detector actually emits, so the rest of the card renders and the
+// mutation exercises a real rendering path.
 func TestFormatHoldTruncationStructuralFlag(t *testing.T) {
 	const gloss = "asks the reader to send or confirm a credential" // secrets_request, emittable
 	card := func(a *inbound.Assessment) string {

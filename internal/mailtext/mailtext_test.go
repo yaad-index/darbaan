@@ -28,7 +28,7 @@ func TestReadCappedErrorIsUndecodableNotCapped(t *testing.T) {
 	st := &walkState{lim: DefaultLimits()}
 	s, capped, failed := st.readCapped(&errReader{data: []byte("partial"), err: errors.New("boom")})
 	assert.Equal(t, "partial", s)
-	assert.False(t, capped, "a read error is not a benign cap hit")
+	assert.False(t, capped, "a read error is not a cap hit")
 	assert.True(t, failed, "a mid-part read error is an extraction hard-fail (C20)")
 }
 
@@ -36,7 +36,7 @@ func TestReadCappedCapHitIsCappedNotFailed(t *testing.T) {
 	st := &walkState{lim: Limits{MaxPartText: 4}}
 	s, capped, failed := st.readCapped(strings.NewReader("abcdefgh"))
 	assert.Equal(t, "abcd", s)
-	assert.True(t, capped, "exceeding the per-part cap is a benign truncation")
+	assert.True(t, capped, "exceeding the per-part cap is a truncation, not a read error")
 	assert.False(t, failed, "a cap hit is not an extraction failure")
 }
 
