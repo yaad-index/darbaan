@@ -600,7 +600,10 @@ func (s *imapSession) rawResolver(m inbound.Message) rawFunc {
 				// blob that can't be safely re-stamped serves empty rather than
 				// un-sanitized — real stored blobs are sanitized at write, so this is
 				// a near-dead edge.
-				if s.serveStamp != nil {
+				// A message Darbaan generated itself keeps its write-time stamp, trusted by
+				// construction; re-stamping it from the resolver would key on its From and
+				// undo that (ADR 0030, 2026-09-26 amendment).
+				if s.serveStamp != nil && !full.Generated {
 					// The agent-facing advisory (ADR 0032 §6) is resolved from the freshly
 					// fetched record's persisted assessment and stamped in the same
 					// sanitize pass, so the namespace strip clears any inbound X-Darbaan-Risk

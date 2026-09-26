@@ -983,7 +983,9 @@ func (s *Service) deliverBounce(m sluice.Message, reason string, retryable bool)
 	if err != nil {
 		return fmt.Errorf("sign: %w", err)
 	}
-	if _, err := s.inbox.Add(inbound.Delivery{
+	// A bounce is Darbaan's own message, so it is stored as generated: stamped
+	// trusted, so the agent may act on the correction it carries (ADR 0006/0030).
+	if _, err := s.inbox.AddGenerated(inbound.Delivery{
 		Owner: b.Owner, Inbox: b.Inbox, From: b.From, To: b.To, Subject: b.Subject, Raw: signed,
 	}); err != nil {
 		return fmt.Errorf("store: %w", err)
