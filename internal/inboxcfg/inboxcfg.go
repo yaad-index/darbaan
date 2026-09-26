@@ -142,10 +142,20 @@ type fileConfig struct {
 // Parse reads the `inboxes:` list from a config document. An absent or empty
 // `inboxes:` yields nil — the caller substitutes the implicit default via
 // Resolve.
+//
+// A trust setting that ADR 0031 describes but no code implements fails here, since
+// the decoder would otherwise drop it and leave the operator believing it applies.
 func Parse(data []byte) ([]Inbox, error) {
 	var fc fileConfig
 	if err := yaml.Unmarshal(data, &fc); err != nil {
 		return nil, fmt.Errorf("inboxcfg: parse: %w", err)
+	}
+	unknown, err := UnknownKeys(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := rejectUnimplemented(unknown); err != nil {
+		return nil, err
 	}
 	return fc.Inboxes, nil
 }
