@@ -49,3 +49,4 @@ incoming-message injection assessment.
 | [0034](0034-operator-identity-send-without-approval.md) | Sending without approval when every recipient is an operator identity |
 | [0035](0035-configurable-detector-patterns.md) | Operator-configurable detector patterns |
 | [0036](0036-held-evidence-render-time.md) | Show the matched evidence on a held message, at render time only |
+| [0037](0037-amending-accepted-adrs.md) | Amending accepted ADRs: dated, append-only amendments; the Status line lists them |

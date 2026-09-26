@@ -1,6 +1,6 @@
 # ADR 0000: Record architecture decisions
 
-**Status:** Accepted (2026-06-25)
+**Status:** Accepted (2026-06-25). Its immutability sentence is superseded by [ADR 0037](0037-amending-accepted-adrs.md), which allows dated, append-only amendments.
 
 ## Context
 Darbaan is a security-sensitive project whose design was worked out in
