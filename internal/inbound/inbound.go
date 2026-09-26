@@ -124,6 +124,12 @@ type Message struct {
 	// approval.
 	HoldDecision string `json:"hold_decision,omitempty"`
 
+	// Generated marks a message Darbaan generated itself (AddGenerated), such as a
+	// rejection bounce. Its trust is fixed at write time as trusted (ADR 0030,
+	// 2026-09-26 amendment), so the serve path does not re-stamp it from the
+	// resolver, which would key on its From and undo that.
+	Generated bool `json:"generated,omitempty"`
+
 	// Assessment is the persisted injection-assessment disposition (ADR 0032),
 	// computed once at ingest. Nil means the message was not assessed (assessment
 	// disabled, or a pre-feature record) → normal flow, never held.
