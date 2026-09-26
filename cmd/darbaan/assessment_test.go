@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/yaad-index/darbaan/internal/admin"
 )
 
 func nilResolver(string, string) provenance.Stamp {
@@ -132,7 +133,7 @@ func TestAssessmentConfigRejectsInvalidSection(t *testing.T) {
 
 func TestBuildAssessHookDisabledIsCleanNoop(t *testing.T) {
 	cli := &CLI{AssessmentEnabled: false, AssessmentTimeout: time.Second}
-	hook, err := cli.buildAssessHook(nil, nilResolver, riskscore.DefaultConfig())
+	hook, _, err := cli.buildAssessHook(nil, nilResolver, riskscore.DefaultConfig())
 	require.NoError(t, err)
 	assert.Nil(t, hook, "disabled → no hook installed (FetchContent unchanged)")
 }
@@ -143,14 +144,14 @@ func TestBuildAssessHookAbortsOnMisalignmentWhenDisabled(t *testing.T) {
 	cli := &CLI{AssessmentEnabled: false, AssessmentTimeout: time.Second}
 	bad := riskscore.DefaultConfig()
 	delete(bad.FactorPoints, riskscore.FactorInstruction) // the heuristic emits it; table now lacks it
-	_, err := cli.buildAssessHook(nil, nilResolver, bad)
+	_, _, err := cli.buildAssessHook(nil, nilResolver, bad)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "misaligned")
 }
 
 func TestBuildAssessHookEnabledProducesHeldAssessment(t *testing.T) {
 	cli := &CLI{AssessmentEnabled: true, AssessmentTimeout: time.Second}
-	hook, err := cli.buildAssessHook(nil, nilResolver, riskscore.DefaultConfig())
+	hook, _, err := cli.buildAssessHook(nil, nilResolver, riskscore.DefaultConfig())
 	require.NoError(t, err)
 	require.NotNil(t, hook)
 
@@ -171,7 +172,7 @@ func TestBuildAssessHookResolvesTrustFromRawAddress(t *testing.T) {
 		gotAddr = from
 		return provenance.Stamp{Trust: provenance.TrustTrusted}
 	}
-	hook, err := cli.buildAssessHook(nil, resolve, riskscore.DefaultConfig())
+	hook, _, err := cli.buildAssessHook(nil, resolve, riskscore.DefaultConfig())
 	require.NoError(t, err)
 	require.NotNil(t, hook)
 
@@ -188,7 +189,7 @@ func TestBuildAssessHookAbortsOnBadDetectorConfigWhenDisabled(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte("assessment:\n  detector:\n    instruction:\n      patterns: [\"x\"]\n"), 0o600))
 	cli := &CLI{Config: path, AssessmentEnabled: false, AssessmentTimeout: time.Second}
-	_, err := cli.buildAssessHook(nil, nilResolver, riskscore.DefaultConfig())
+	_, _, err := cli.buildAssessHook(nil, nilResolver, riskscore.DefaultConfig())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `unknown factor "instruction"`)
 }
@@ -215,7 +216,7 @@ func TestAssessmentSectionCarriesScorerAndDetectorKeys(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, dcfg.Factors, riskscore.FactorSecretsRequest)
 
-	_, err = cli.buildAssessHook(nil, nilResolver, cfg)
+	_, _, err = cli.buildAssessHook(nil, nilResolver, cfg)
 	require.NoError(t, err)
 }
 
@@ -243,4 +244,28 @@ func TestOutcomeToAssessmentKeepsActiveStates(t *testing.T) {
 	require.NotNil(t, empty)
 	assert.Empty(t, empty)
 	assert.Equal(t, []string{"secrets_request"}, outcomeToAssessment(screener.Outcome{Active: []riskscore.Factor{riskscore.FactorSecretsRequest}}).Active)
+}
+
+// ADR 0036: the startup line names every credential that can read held bodies,
+// including the root token, which is the whole list when no admin_clients exist.
+func TestHoldsReadersNamesRootAndScopedClients(t *testing.T) {
+	assert.Equal(t, []string{"root token (DARBAAN_ADMIN_TOKEN, full scope)"}, holdsReaders(nil, true),
+		"no admin_clients: the root token is the only reader, and it must still be named")
+	assert.Empty(t, holdsReaders(nil, false))
+
+	clients := []admin.ScopedClient{
+		{Name: "telegram", Scopes: []string{"queue:read", "holds:read", "holds:decide"}},
+		{Name: "pre-screener", Scopes: []string{"queue:read"}},
+	}
+	assert.Equal(t, []string{"root token (DARBAAN_ADMIN_TOKEN, full scope)", "telegram"}, holdsReaders(clients, true))
+}
+
+// The detector buildAssessHook returns is the one it validated and would score
+// with, so the admin side can re-run the same instance.
+func TestBuildAssessHookReturnsItsDetector(t *testing.T) {
+	cli := &CLI{AssessmentEnabled: false, AssessmentTimeout: time.Second}
+	_, det, err := cli.buildAssessHook(nil, nilResolver, riskscore.DefaultConfig())
+	require.NoError(t, err)
+	require.NotNil(t, det, "returned even with assessment disabled")
+	assert.Equal(t, assessor.NewHeuristicDetector().Factors(), det.Factors())
 }

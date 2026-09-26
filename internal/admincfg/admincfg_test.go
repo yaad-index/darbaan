@@ -91,6 +91,7 @@ func TestRouteScopesComplete(t *testing.T) {
 		"POST /queue/{id}/reject",
 		"GET /holds",
 		"GET /holds/{id}/content",
+		"GET /holds/{id}/evidence", // ADR 0036: same scope as content
 		"POST /holds/{id}/expose",
 		"POST /holds/{id}/drop",
 		"GET /reconcile",
