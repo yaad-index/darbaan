@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.2](https://github.com/yaad-index/darbaan/compare/v0.21.1...v0.21.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* **assessor:** keep the host in the URL placeholder ([#356](https://github.com/yaad-index/darbaan/issues/356)) ([812cf84](https://github.com/yaad-index/darbaan/commit/812cf84867bf3d003579ea68557f3290a07a4f07))
+
 ## [0.21.1](https://github.com/yaad-index/darbaan/compare/v0.21.0...v0.21.1) (2026-09-28)
 
 
