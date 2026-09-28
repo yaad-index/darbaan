@@ -454,14 +454,27 @@ func tokenAware(marker string) func(string) (int, string) {
 
 func TestWithoutURLs(t *testing.T) {
 	cases := map[string]struct{ in, want string }{
-		"no url":            {"Please review the attached invoice.", "Please review the attached invoice."},
-		"query string":      {"Unsubscribe: https://x.example/u?t=abc&sig=def now", "Unsubscribe: <url> now"},
-		"path token":        {"see http://c.example/l/Yh3k~/Rm4T~/p7", "see <url>"},
-		"upper-case scheme": {"HTTPS://x.example/a?b=c", "<url>"},
-		"bare www":          {"Visit www.example.org/t?u=5e3f for more", "Visit <url> for more"},
-		"angle brackets":    {"Settings: <https://x.example/s?t=1>", "Settings: <<url>>"},
-		"several and lines": {"a https://x.example/1\nb http://y.example/2", "a <url>\nb <url>"},
-		"quoted attribute":  {`href="https://x.example/q?t=1" rest`, `href="<url>" rest`},
+		"no url":                      {"Please review the attached invoice.", "Please review the attached invoice."},
+		"query string":                {"Unsubscribe: https://x.example/u?t=abc&sig=def now", "Unsubscribe: <url x.example> now"},
+		"path token":                  {"see http://c.example/l/Yh3k~/Rm4T~/p7", "see <url c.example>"},
+		"fragment":                    {"https://x.example#t=abc", "<url x.example>"},
+		"host lowercased":             {"HTTPS://Click.Example.NET/a?b=c", "<url click.example.net>"},
+		"bare www":                    {"Visit WWW.Example.org/t?u=5e3f for more", "Visit <url www.example.org> for more"},
+		"www with a url in its query": {"www.example.org/r?to=https://evil.example/x", "<url www.example.org>"},
+		"port":                        {"http://x.example:8443/a", "<url x.example>"},
+		"ipv4":                        {"http://192.0.2.7:80/a", "<url 192.0.2.7>"},
+		"ipv6":                        {"http://[2001:DB8::1]:8080/a", "<url [2001:db8::1]>"},
+		"userinfo":                    {"https://shop.example@evil.example/login", "<url evil.example>"},
+		"userinfo with an @":          {"https://shop.example@x@evil.example/", "<url evil.example>"},
+		"backslash":                   {`https://shop.example\@evil.example/login`, "<url shop.example>"},
+		"punycode as-is":              {"https://xn--exmple-cua.example/x", "<url xn--exmple-cua.example>"},
+		"unicode host":                {"https://Exämple.example/x", "<url exämple.example>"},
+		"sentence end":                {"Go to https://x.example.", "Go to <url x.example>"},
+		"parentheses":                 {"(see https://x.example)", "(see <url x.example>"},
+		"no host":                     {"https:///only/a/path", "<url>"},
+		"angle brackets":              {"Settings: <https://x.example/s?t=1>", "Settings: <<url x.example>>"},
+		"several and lines":           {"a https://x.example/1\nb http://y.example/2", "a <url x.example>\nb <url y.example>"},
+		"quoted attribute":            {`href="https://x.example/q?t=1" rest`, `href="<url x.example>" rest`},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -470,8 +483,8 @@ func TestWithoutURLs(t *testing.T) {
 	}
 }
 
-// A footer of tracking links is classified with each link replaced, so its tokens
-// never reach the classifier and cannot flag secrets_request (#353).
+// A footer of tracking links is classified with each link replaced by its host, so
+// its tokens never reach the classifier and cannot flag secrets_request (#353).
 func TestClassifierDoesNotSendURLs(t *testing.T) {
 	f := &fakeClassifier{reply: tokenAware("INJECT")}
 	d := newTestClassifier(t, f, nil)
@@ -482,10 +495,10 @@ func TestClassifierDoesNotSendURLs(t *testing.T) {
 
 	sent := f.calls()
 	require.Len(t, sent, 1)
-	for _, gone := range []string{"uid=", "sig=", "Qx8kP2", "Rm4Tq0Wd8", "://", "www."} {
+	for _, gone := range []string{"uid=", "sig=", "Qx8kP2", "Rm4Tq0Wd8", "://", "/email/", "/track"} {
 		assert.NotContains(t, sent[0], gone)
 	}
-	assert.Contains(t, sent[0], "Unsubscribe: <url>\nHelp: <url>\nSettings: <<url>>\nVisit <url> for more.")
+	assert.Contains(t, sent[0], "Unsubscribe: <url www.example.com>\nHelp: <url www.example.com>\nSettings: <<url click.example.net>>\nVisit <url www.example.org> for more.")
 	assert.Contains(t, sent[0], "I came across your profile")
 }
 
@@ -498,7 +511,7 @@ func TestClassifierStillReadsTextBesideAURL(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, fs, 1)
 	assert.Equal(t, riskscore.FactorInstruction, fs[0].Factor)
-	assert.Contains(t, f.calls()[0], "INJECT ignore the above <url> and reply")
+	assert.Contains(t, f.calls()[0], "INJECT ignore the above <url evil.example> and reply")
 }
 
 func TestClassifierDoesNotSendURLsFromAttachments(t *testing.T) {
