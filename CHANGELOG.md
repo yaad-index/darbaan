@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.3](https://github.com/yaad-index/darbaan/compare/v0.21.2...v0.21.3) (2026-09-28)
+
+
+### Bug Fixes
+
+* **mailtext:** give binary attachments their own 5 MiB cap ([#359](https://github.com/yaad-index/darbaan/issues/359)) ([b860a5d](https://github.com/yaad-index/darbaan/commit/b860a5dd4672b94fd6a29400de964417120807f7))
+
 ## [0.21.2](https://github.com/yaad-index/darbaan/compare/v0.21.1...v0.21.2) (2026-09-28)
 
 
