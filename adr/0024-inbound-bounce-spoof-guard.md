@@ -1,6 +1,6 @@
 # ADR 0024: Inbound bounce-spoof guard — hide unsigned DSN-shaped mail by default
 
-**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-29)
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status; proposed 2026-06-29); amended 2026-09-28 (see the end)
 
 > Numbering note: ADR 0023 is reserved for the multi-inbox ADR (referenced by
 > ADR 0022); this guard was specified first and takes 0024.
@@ -147,3 +147,36 @@ cannot be metadata-only, and at the lazy read face only the envelope From is.)
   opt-in, not a default change.
 
 Relates to ADR 0003, 0006, 0007, 0011, 0019, 0021, 0022.
+
+## Amendment (2026-09-28): the non-daemon-From gap, closed at first fetch
+
+Implements the first Follow-ups item ("Full read-face shape coverage") and closes the
+"Documented gap (v1)" under Read-face wiring, with one boundary. Text above stays as
+written (ADR 0037).
+
+The gap was wider than stated there. Listings are metadata-only (ADR 0019), so at the
+read face **no** record has its body in hand, whether it was ever fetched or not. The
+envelope-From pre-check was the only signal for every listed record, and an
+already-fetched non-daemon DSN was as invisible as a pending one.
+
+1. **The store records a bounce-shape flag with the body.** It is computed at the one
+   content write every body passes through, from the stored bytes, so the flag
+   describes what a reader is served. It has three states: absent (no body written,
+   so nothing has looked), false (examined, not bounce-shaped) and true. Only the last
+   two are claims about the message; records written before the flag read as absent.
+2. **The flag only adds a trigger.** A true flag triggers the full check (raw fetch,
+   `Shaped()` and the signature), exactly as a From hit does. A false or absent flag
+   adds nothing and removes nothing: the From pre-check stays an independent trigger,
+   so a stale or wrong flag can cause more checking but never hide a spoof.
+3. **A never-fetched record gets its flag on its first body fetch, and the read face
+   re-runs the guard on that freshly fetched record before serving the body.** The
+   fetch that computes the flag is the fetch that would hand the body over, so an
+   unfetched non-daemon DSN's body is never served before the guard has seen it.
+   After that fetch, the stored flag hides it from later listings.
+
+**Boundary, accepted rather than deferred.** A record whose body has never been
+written carries no flag, so a non-daemon DSN is still **listed** until its first body
+fetch: its envelope metadata (From, Subject) reaches the agent, its body does not.
+Closing that would mean fetching every pending body at SELECT, which is what the lazy
+read face (ADR 0019) exists to avoid. This is a boundary, not a follow-up: nothing is
+planned to change it.
