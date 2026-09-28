@@ -94,14 +94,13 @@ factor only the classifier flagged; the recorded label and confidence are what t
 shows for those factors instead. They are metadata about the classification, never text from
 the message, so they carry no attacker content across the boundary.
 
-### 5. Scope: open question for the maintainer
+### 5. Scope stays injection defense (maintainer decision, 2026-09-28)
 
-ADR 0032 set spam and importance aside and scoped assessment to injection. As written, this
-ADR keeps that scope: the classifier's labels map onto the **same named factors** the
-pattern detector flags. **Whether to add spam or phishing as factors is left to the
-maintainer's review of this ADR**, because it changes what a high score *means* and who acts
-on it. If accepted, it is one added paragraph here plus new entries in the point-table; the
-mechanism above does not change.
+ADR 0032 set spam and importance aside and scoped assessment to injection. This ADR keeps
+that scope, by the maintainer's decision in review: the classifier's labels map onto the
+**same named factors** the pattern detector flags. Spam or phishing factors are not added,
+because they would change what a high score *means* and who acts on it. Adding them later is
+a new ADR or an amendment; the mechanism above would not change.
 
 ## Fail-safe
 
@@ -126,6 +125,6 @@ mechanism above does not change.
 
 - Not decided here: which classifier, its size, or the deployment unit. That is an
   implementation and operations choice behind the endpoint.
-- Left to review: spam or phishing factors (see section 5).
+- Not added: spam or phishing factors (see section 5).
 - Not changed: scoring, bands, thresholds, sender baselines, recipient adjustment, or the
   isolation rules of ADR 0032.
