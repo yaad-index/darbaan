@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.1](https://github.com/yaad-index/darbaan/compare/v0.21.0...v0.21.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* **assessor:** replace URLs with a placeholder before classifying ([#354](https://github.com/yaad-index/darbaan/issues/354)) ([0f350c8](https://github.com/yaad-index/darbaan/commit/0f350c8125d8a6e25861f748e3638eb8796dc3ee))
+
 ## [0.21.0](https://github.com/yaad-index/darbaan/compare/v0.20.0...v0.21.0) (2026-09-28)
 
 
