@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -287,21 +288,23 @@ func (d *ClassifierDetector) Detect(ctx context.Context, c mailtext.Content) ([]
 //   - Each extracted attachment text (#350), under its own window cap. A label
 //     flags there only when it names an attachment_factor.
 //
-// Each source is covered in overlapping windows, taking the highest confidence
-// per label. Any failure, including a source too long for its window cap, is
-// returned wrapped in ErrClassifierUnavailable.
+// Every URL in a source is replaced with a placeholder before it is classified
+// (#353), so a link's tracking tokens are not read as a key being asked for.
+// Each source is then covered in overlapping windows, taking the highest
+// confidence per label. Any failure, including a source too long for its window
+// cap, is returned wrapped in ErrClassifierUnavailable.
 func (d *ClassifierDetector) DetectFindings(ctx context.Context, c mailtext.Content) ([]Finding, error) {
 	ctx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
 	var out []Finding
-	if body := distinctTexts(bodyTexts(c)); len(body) > 0 {
+	if body := distinctTexts(withoutURLs(bodyTexts(c))); len(body) > 0 {
 		best, err := d.classifyTexts(ctx, body, d.maxWindows, "max_windows")
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, d.flag(best, SourceBody)...)
 	}
-	if att := distinctTexts(attachmentTexts(c)); len(att) > 0 && d.readsAttachments() {
+	if att := distinctTexts(withoutURLs(attachmentTexts(c))); len(att) > 0 && d.readsAttachments() {
 		best, err := d.classifyTexts(ctx, att, d.maxAttachmentWindows, "max_attachment_windows")
 		if err != nil {
 			return nil, err
@@ -409,6 +412,26 @@ func attachmentTexts(c mailtext.Content) []string {
 		if a.Extracted {
 			out = append(out, a.Text)
 		}
+	}
+	return out
+}
+
+// urlPlaceholder stands in for every URL in a text the classifier reads.
+const urlPlaceholder = "<url>"
+
+// urlRe matches a URL written out in text: a scheme followed by "://", or a bare
+// "www." host, running to the next whitespace or to a character a URL cannot
+// contain.
+var urlRe = regexp.MustCompile(`(?i)\b(?:[a-z][a-z0-9+.-]*://|www\.)[^\s<>"]+`)
+
+// withoutURLs replaces every URL in each text with urlPlaceholder. Nothing of the
+// URL is kept: tracking links carry their tokens in the path as well as the query
+// string. Text inside a URL is therefore not read by the classifier; the pattern
+// detector still reads it.
+func withoutURLs(texts []string) []string {
+	out := make([]string, len(texts))
+	for i, t := range texts {
+		out[i] = urlRe.ReplaceAllLiteralString(t, urlPlaceholder)
 	}
 	return out
 }
