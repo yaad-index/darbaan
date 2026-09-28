@@ -271,7 +271,9 @@ assessment-timeout: 5s
 #       max_windows: 32
 #       # The body's variants (plain text, flattened HTML) are read separately, and a
 #       # variant that is an exact copy of one already read (ignoring whitespace) is
-#       # skipped. Text attachments are read too, under their own cap.
+#       # skipped. Text attachments are read too, under their own cap. Every URL is
+#       # replaced with <url> before a text is sent, so link tracking tokens are
+#       # neither sent nor read as a secrets request.
 #       max_attachment_windows: 16
 #       # Label -> factor, flagged at or above the threshold. A label not listed
 #       # flags nothing. attachment_factor is the factor the label flags in
