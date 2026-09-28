@@ -1,6 +1,6 @@
 # ADR 0038: A pluggable classifier detector beside the pattern detector
 
-**Status:** Proposed
+**Status:** Accepted (operator sign-off recorded by approval of the PR that sets this status)
 
 ## Context
 
