@@ -623,3 +623,16 @@ func TestHoldCardClassifierOutageSaysSo(t *testing.T) {
 		Summary: "the classifier did not answer, so this message was not fully assessed"}
 	assert.Equal(t, "could not be assessed — the classifier did not answer, so this message was not fully assessed", holdAssessmentLine(a))
 }
+
+// #350: a classifier finding read in attachment text says so, and names no file:
+// a filename is the sender's text and is not stored with the assessment.
+func TestHoldCardSaysAClassifierFindingWasInAnAttachment(t *testing.T) {
+	m := classifierHold([]inbound.Finding{
+		{Factor: "secrets_request", Detector: "classifier", Label: "secrets_request", Confidence: 0.91, Source: "attachment"},
+		{Factor: "instruction_to_reader", Detector: "classifier", Label: "instruction_to_reader", Confidence: 0.95, Source: "body"},
+	})
+	s := formatHoldWithEvidence(m, nil, true, nil)
+	assert.Contains(t, s, "credential requests in an attachment (label secrets_request, confidence 0.91)")
+	assert.Contains(t, s, "instructions to the reader (label instruction_to_reader, confidence 0.95)")
+	assert.NotContains(t, s, "instructions to the reader in an attachment")
+}

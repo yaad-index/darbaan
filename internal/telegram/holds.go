@@ -318,7 +318,11 @@ func classifierLine(a *inbound.Assessment) string {
 		if f.Detector != assessor.DetectorClassifier {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%s (label %s, confidence %.2f)", offLabel(riskscore.Factor(f.Factor)), f.Label, f.Confidence))
+		where := ""
+		if f.Source == assessor.SourceAttachment {
+			where = " in an attachment" // never the filename: that is the sender's text
+		}
+		parts = append(parts, fmt.Sprintf("%s%s (label %s, confidence %.2f)", offLabel(riskscore.Factor(f.Factor)), where, f.Label, f.Confidence))
 	}
 	return strings.Join(parts, "; ")
 }

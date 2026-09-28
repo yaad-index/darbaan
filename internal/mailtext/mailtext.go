@@ -38,6 +38,11 @@ type Content struct {
 	// Body is the concatenated decoded text of the message's body parts
 	// (text/plain kept as-is, text/html flattened to text), all variants included.
 	Body string
+	// BodyParts holds the same text one body part at a time, in order, after the
+	// same budget: Body is these joined by a blank line. A reader that wants to
+	// treat the variants of a multipart/alternative separately uses this; every
+	// part is here, so nothing Body carries is lost.
+	BodyParts []string
 	// Attachments describes each attachment part: its metadata and, for text-typed
 	// attachments within the limits, the extracted inert text (a named injection
 	// vector). Binary attachments (e.g. PDF, images) carry metadata only in v1;
@@ -128,6 +133,7 @@ func Extract(raw []byte, lim Limits) (Content, error) {
 	st.walk(ent, 0)
 	return Content{
 		Body:        strings.TrimSpace(st.body.String()),
+		BodyParts:   st.bodyParts,
 		Attachments: st.atts,
 		Truncated:   st.truncated,
 		Undecodable: st.undecodable,
@@ -141,6 +147,7 @@ type walkState struct {
 	truncated   bool
 	undecodable bool
 	body        strings.Builder
+	bodyParts   []string
 	atts        []Attachment
 }
 
@@ -266,6 +273,7 @@ func (st *walkState) appendBody(text string) {
 		st.body.WriteString("\n\n")
 	}
 	st.body.WriteString(text)
+	st.bodyParts = append(st.bodyParts, text)
 }
 
 // budgetText trims text to the remaining total-text budget, tracks the spend,

@@ -202,6 +202,9 @@ type Finding struct {
 	Detector   string  `json:"detector"`
 	Label      string  `json:"label,omitempty"`
 	Confidence float64 `json:"confidence,omitempty"`
+	// Source is where a classifier finding was read: "body" or "attachment". It
+	// never holds a filename, which is the sender's text.
+	Source string `json:"source,omitempty"`
 }
 
 // Assessment disposition values. These mirror the scorer's disposition strings;

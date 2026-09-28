@@ -103,13 +103,13 @@ func TestClassifierFlagsMappedLabelsAtThreshold(t *testing.T) {
 
 	got, err := d.DetectFindings(context.Background(), body("please do the thing"))
 	require.NoError(t, err)
-	assert.Equal(t, []Finding{{Factor: riskscore.FactorInstruction, Detector: DetectorClassifier, Label: "instruction_to_reader", Confidence: 0.9}}, got)
+	assert.Equal(t, []Finding{{Factor: riskscore.FactorInstruction, Detector: DetectorClassifier, Label: "instruction_to_reader", Confidence: 0.9, Source: SourceBody}}, got)
 
 	require.Len(t, f.calls(), 1)
 	assert.Equal(t, "please do the thing", f.calls()[0], "the request carries exactly the body text")
 	assert.Equal(t, "Bearer tok-123", f.auth[0], "the classifier's token goes to the classifier")
-	assert.ElementsMatch(t, []riskscore.Factor{riskscore.FactorInstruction, riskscore.FactorSecretsRequest}, d.Factors(),
-		"the default map flags only the two mapped factors")
+	assert.ElementsMatch(t, []riskscore.Factor{riskscore.FactorInstruction, riskscore.FactorSecretsRequest, riskscore.FactorAttachmentDirectives}, d.Factors(),
+		"the default map flags the two mapped factors, and attachment_directives for an instruction in an attachment")
 }
 
 func TestClassifierRequestIsTextOnly(t *testing.T) {

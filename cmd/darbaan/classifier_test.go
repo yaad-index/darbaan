@@ -64,7 +64,7 @@ func TestBuildAssessHookWithClassifierStoresItsFindings(t *testing.T) {
 	a := hook(inbound.DefaultInbox, "x@example.com", raw, &inbound.Envelope{})
 	require.NotNil(t, a)
 	assert.Contains(t, a.Factors, "instruction_to_reader")
-	assert.Contains(t, a.Findings, inbound.Finding{Factor: "instruction_to_reader", Detector: "classifier", Label: "instruction_to_reader", Confidence: 0.96})
+	assert.Contains(t, a.Findings, inbound.Finding{Factor: "instruction_to_reader", Detector: "classifier", Label: "instruction_to_reader", Confidence: 0.96, Source: "body"})
 	assert.Equal(t, "Bearer cls-token", gotAuth, "the token comes from DARBAAN_CLASSIFIER_TOKEN")
 
 	// Control: the same message without the phrase is not flagged by either detector.
