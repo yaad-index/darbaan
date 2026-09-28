@@ -67,17 +67,21 @@ type Content struct {
 type Attachment struct {
 	Filename    string
 	ContentType string
-	Size        int64  // decoded bytes seen, bounded by the per-part cap
+	Size        int64  // decoded bytes seen, bounded by MaxPartText or MaxAttachmentBytes
 	Text        string // extracted inert text (text-typed attachments only)
 	Extracted   bool   // whether Text was populated
 }
 
 // Limits bounds extraction. Zero fields take DefaultLimits values.
 type Limits struct {
-	MaxPartText  int // max decoded bytes read from any single part
+	MaxPartText  int // max decoded bytes read from any single part whose text is kept
 	MaxTotalText int // max total extracted text bytes kept across the message
 	MaxParts     int // max leaf parts to process
 	MaxDepth     int // max multipart nesting depth to descend
+	// MaxAttachmentBytes is the max decoded bytes read from an attachment whose text
+	// is not extracted (a binary attachment, metadata only). Its bytes are counted,
+	// not kept, so it can be far larger than MaxPartText.
+	MaxAttachmentBytes int
 }
 
 // DefaultLimits are the v1 extraction bounds.
@@ -87,6 +91,8 @@ func DefaultLimits() Limits {
 		MaxTotalText: 1024 * 1024,
 		MaxParts:     200,
 		MaxDepth:     20,
+
+		MaxAttachmentBytes: 5 << 20,
 	}
 }
 
@@ -103,6 +109,9 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxDepth <= 0 {
 		l.MaxDepth = d.MaxDepth
+	}
+	if l.MaxAttachmentBytes <= 0 {
+		l.MaxAttachmentBytes = d.MaxAttachmentBytes
 	}
 	return l
 }
@@ -240,6 +249,25 @@ func (st *walkState) leaf(ent *gomessage.Entity, depth int) {
 		return
 	}
 
+	a := Attachment{
+		Filename:    attachmentDisplayName(filename),
+		ContentType: attachmentContentType(ct),
+	}
+	if !strings.HasPrefix(ct, "text/") {
+		// No detector reads a binary attachment's bytes, so its text cap does not
+		// apply: it is counted up to MaxAttachmentBytes, and only past that is the
+		// message truncated.
+		n, capped, failed := st.countCapped(ent.Body)
+		if capped {
+			st.truncated = true
+		}
+		if failed {
+			st.undecodable = true // an attachment that would not decode never reached the assessor (C20)
+		}
+		a.Size = n
+		st.atts = append(st.atts, a)
+		return
+	}
 	raw, capped, failed := st.readCapped(ent.Body)
 	if capped {
 		st.truncated = true
@@ -247,19 +275,13 @@ func (st *walkState) leaf(ent *gomessage.Entity, depth int) {
 	if failed {
 		st.undecodable = true // an attachment that would not decode never reached the assessor (C20)
 	}
-	a := Attachment{
-		Filename:    attachmentDisplayName(filename),
-		ContentType: attachmentContentType(ct),
-		Size:        int64(len(raw)),
+	a.Size = int64(len(raw))
+	text := raw
+	if ct == "text/html" {
+		text = htmlToText(raw)
 	}
-	if strings.HasPrefix(ct, "text/") {
-		text := raw
-		if ct == "text/html" {
-			text = htmlToText(raw)
-		}
-		a.Text = st.budgetText(text)
-		a.Extracted = true
-	}
+	a.Text = st.budgetText(text)
+	a.Extracted = true
 	st.atts = append(st.atts, a)
 }
 
@@ -308,6 +330,14 @@ func (st *walkState) readCapped(r io.Reader) (text string, capped, failed bool) 
 	// limit+1 bytes AND a non-nil error in one call, so collapsing them on the cap
 	// path would drop a genuine decode failure that happened at the same read.
 	return string(b[:min(len(b), limit)]), len(b) > limit, err != nil
+}
+
+// countCapped reads at most MaxAttachmentBytes from a part body without keeping
+// them and returns how many it read, with capped and failed as for readCapped.
+func (st *walkState) countCapped(r io.Reader) (n int64, capped, failed bool) {
+	limit := int64(st.lim.MaxAttachmentBytes)
+	n, err := io.Copy(io.Discard, io.LimitReader(r, limit+1))
+	return min(n, limit), n > limit, err != nil
 }
 
 func attachmentFilename(dispParams, ctParams map[string]string) string {

@@ -1,6 +1,8 @@
 package mailtext
 
 import (
+	"bytes"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
@@ -246,6 +248,113 @@ func TestExtractBinaryAttachmentMetadataOnly(t *testing.T) {
 	assert.False(t, a.Extracted, "binary attachments carry metadata only in v1")
 	assert.Empty(t, a.Text)
 	assert.Positive(t, a.Size)
+}
+
+// withBinaryAttachment builds a message with a short body and one base64
+// application/pdf attachment of n decoded bytes.
+func withBinaryAttachment(n int) []byte {
+	enc := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("%PDF"), n/4))
+	var lines []string
+	for len(enc) > 76 {
+		lines = append(lines, enc[:76])
+		enc = enc[76:]
+	}
+	lines = append(lines, enc)
+	return crlf(append([]string{
+		"From: sender@example.com",
+		"Content-Type: multipart/mixed; boundary=M",
+		"",
+		"--M",
+		"Content-Type: text/plain",
+		"",
+		"the document is attached",
+		"--M",
+		"Content-Type: application/pdf",
+		`Content-Disposition: attachment; filename="document.pdf"`,
+		"Content-Transfer-Encoding: base64",
+		"",
+	}, append(lines, "--M--")...)...)
+}
+
+func TestExtractBinaryAttachmentOverTextCapNotTruncated(t *testing.T) {
+	c, err := Extract(withBinaryAttachment(300<<10), DefaultLimits())
+	require.NoError(t, err)
+
+	require.Len(t, c.Attachments, 1)
+	assert.False(t, c.Truncated, "no detector reads a binary attachment, so the 256 KiB text cap does not apply to it")
+	assert.False(t, c.Undecodable)
+	assert.Equal(t, int64(300<<10), c.Attachments[0].Size, "the whole attachment is counted")
+	assert.False(t, c.Attachments[0].Extracted)
+	assert.Equal(t, "the document is attached", c.Body)
+}
+
+func TestExtractBinaryAttachmentOverItsCapTruncates(t *testing.T) {
+	c, err := Extract(withBinaryAttachment(4096), Limits{MaxAttachmentBytes: 1000})
+	require.NoError(t, err)
+
+	require.Len(t, c.Attachments, 1)
+	assert.True(t, c.Truncated, "past MaxAttachmentBytes the message is still held as truncated")
+	assert.Equal(t, int64(1000), c.Attachments[0].Size, "size is bounded by the cap")
+}
+
+func TestExtractBinaryAttachmentAtItsCapNotTruncated(t *testing.T) {
+	c, err := Extract(withBinaryAttachment(1000), Limits{MaxAttachmentBytes: 1000})
+	require.NoError(t, err)
+
+	assert.False(t, c.Truncated, "an attachment of exactly MaxAttachmentBytes is read whole")
+	assert.Equal(t, int64(1000), c.Attachments[0].Size)
+}
+
+func TestExtractTextAttachmentOverTextCapTruncates(t *testing.T) {
+	raw := crlf(
+		"Content-Type: multipart/mixed; boundary=M",
+		"",
+		"--M",
+		"Content-Type: text/plain",
+		"",
+		"see attached",
+		"--M",
+		"Content-Type: text/plain",
+		`Content-Disposition: attachment; filename="notes.txt"`,
+		"",
+		strings.Repeat("z", 5000),
+		"--M--",
+	)
+	c, err := Extract(raw, Limits{MaxPartText: 50, MaxAttachmentBytes: 1 << 20})
+	require.NoError(t, err)
+
+	assert.True(t, c.Truncated, "a text attachment is scanned, so its text cap still truncates")
+	require.Len(t, c.Attachments, 1)
+	assert.True(t, c.Attachments[0].Extracted)
+}
+
+func TestExtractBinaryAttachmentDecodeFailureIsUndecodable(t *testing.T) {
+	raw := crlf(
+		"Content-Type: multipart/mixed; boundary=M",
+		"",
+		"--M",
+		"Content-Type: text/plain",
+		"",
+		"see attached",
+		"--M",
+		"Content-Type: application/pdf",
+		`Content-Disposition: attachment; filename="document.pdf"`,
+		"Content-Transfer-Encoding: base64",
+		"",
+		"JVBERi0x!!!!not-base64!!!!",
+		"--M--",
+	)
+	c, err := Extract(raw, DefaultLimits())
+	require.NoError(t, err)
+
+	assert.True(t, c.Undecodable, "a binary attachment that fails to decode still flags Undecodable")
+	assert.False(t, c.Truncated)
+}
+
+func TestLimitsDefaultAttachmentBytes(t *testing.T) {
+	assert.Equal(t, 5<<20, DefaultLimits().MaxAttachmentBytes)
+	assert.Equal(t, 5<<20, Limits{}.withDefaults().MaxAttachmentBytes, "an unset cap takes the default")
+	assert.Equal(t, 7, Limits{MaxAttachmentBytes: 7}.withDefaults().MaxAttachmentBytes)
 }
 
 func TestExtractHTMLAttachmentStripped(t *testing.T) {
