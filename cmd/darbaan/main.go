@@ -832,7 +832,7 @@ func findingRecords(fs []assessor.Finding) []inbound.Finding {
 	}
 	out := make([]inbound.Finding, len(fs))
 	for i, f := range fs {
-		out[i] = inbound.Finding{Factor: string(f.Factor), Detector: f.Detector, Label: f.Label, Confidence: f.Confidence}
+		out[i] = inbound.Finding{Factor: string(f.Factor), Detector: f.Detector, Label: f.Label, Confidence: f.Confidence, Source: f.Source}
 	}
 	return out
 }

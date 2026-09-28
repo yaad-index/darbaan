@@ -269,13 +269,19 @@ assessment-timeout: 5s
 #       window_runes: 1000
 #       overlap_runes: 200
 #       max_windows: 32
+#       # The body's variants (plain text, flattened HTML) are read separately, and a
+#       # variant that is an exact copy of one already read (ignoring whitespace) is
+#       # skipped. Text attachments are read too, under their own cap.
+#       max_attachment_windows: 16
 #       # Label -> factor, flagged at or above the threshold. A label not listed
-#       # flags nothing. Omit `labels` for the default below; hidden_directives is
-#       # left unmapped by default, as it showed no signal on the first model tried.
-#       # The thresholds are a starting point, not a tuned value: set your own.
+#       # flags nothing. attachment_factor is the factor the label flags in
+#       # attachment text; without it the label is not applied to attachments.
+#       # Omit `labels` for the default below; hidden_directives is left unmapped
+#       # by default, as it showed no signal on the first model tried. The
+#       # thresholds are a starting point, not a tuned value: set your own.
 #       labels:
-#         instruction_to_reader: { factor: instruction_to_reader, threshold: 0.9 }
-#         secrets_request: { factor: secrets_request, threshold: 0.8 }
+#         instruction_to_reader: { factor: instruction_to_reader, attachment_factor: attachment_directives, threshold: 0.9 }
+#         secrets_request: { factor: secrets_request, attachment_factor: secrets_request, threshold: 0.8 }
 
 # --- Multi-inbox + multi-agent (optional; ADR 0023 / ADR 0027) ---------------
 # The flat fields above define ONE inbox and ONE implicit agent. To front several

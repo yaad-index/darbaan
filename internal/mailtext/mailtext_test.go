@@ -407,3 +407,18 @@ func TestHTMLToTextInlineKept(t *testing.T) {
 	got := htmlToText("a <b>bold</b> and <i>italic</i> word")
 	assert.Equal(t, "a bold and italic word", got)
 }
+
+// BodyParts is Body one part at a time: every variant is there, in order, and
+// joined they are Body. A reader treating variants separately loses nothing.
+func TestBodyPartsAreBodyOnePartAtATime(t *testing.T) {
+	raw := "Content-Type: multipart/alternative; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Type: text/plain\r\n\r\nplain text\r\n" +
+		"--b\r\nContent-Type: text/html\r\n\r\n<p>html <span style=\"display:none\">hidden</span> text</p>\r\n" +
+		"--b--\r\n"
+	c, err := Extract([]byte(raw), Limits{})
+	require.NoError(t, err)
+	require.Len(t, c.BodyParts, 2)
+	assert.Contains(t, c.BodyParts[0], "plain text")
+	assert.Contains(t, c.BodyParts[1], "hidden", "the hidden HTML text is in its part, as in Body")
+	assert.Equal(t, c.Body, strings.TrimSpace(strings.Join(c.BodyParts, "\n\n")))
+}

@@ -42,6 +42,7 @@ const (
 	defaultWindowRunes       = 1000
 	defaultOverlapRunes      = 200
 	defaultMaxWindows        = 32
+	defaultMaxAttachWindows  = 16
 	minSplitRunes            = 64
 	maxReplyBytes            = 64 << 10
 )
@@ -67,42 +68,51 @@ type ClassifierConfig struct {
 	WindowRunes  int `yaml:"window_runes"`
 	OverlapRunes int `yaml:"overlap_runes"`
 	MaxWindows   int `yaml:"max_windows"`
+	// MaxAttachmentWindows caps the windows for all attachment text together,
+	// separately from the body's MaxWindows (#350). Past it the message is held.
+	MaxAttachmentWindows int `yaml:"max_attachment_windows"`
 	// Labels maps each classifier label to the factor it flags and the confidence
 	// at or above which it does. A label the classifier returns that is not listed
 	// here flags nothing. Empty selects DefaultClassifierLabels.
 	Labels map[string]LabelConfig `yaml:"labels"`
 }
 
-// LabelConfig maps one classifier label to a factor.
+// LabelConfig maps one classifier label to the factor it flags in the body and,
+// optionally, the factor it flags in attachment text (#350). With no
+// attachment_factor the label is not applied to attachments.
 type LabelConfig struct {
-	Factor    riskscore.Factor `yaml:"factor"`
-	Threshold float64          `yaml:"threshold"`
+	Factor           riskscore.Factor `yaml:"factor"`
+	AttachmentFactor riskscore.Factor `yaml:"attachment_factor"`
+	Threshold        float64          `yaml:"threshold"`
 }
 
 // DefaultClassifierLabels is the map used when the operator gives none. It leaves
 // hidden_directives unmapped: in the 2026-09-28 smoke test of the first model it
-// separated nothing, so mapping it would only add noise to scores.
+// separated nothing, so mapping it would only add noise to scores. In attachment
+// text an instruction flags attachment_directives, as the pattern detector does,
+// and a credentials request stays secrets_request.
 func DefaultClassifierLabels() map[string]LabelConfig {
 	return map[string]LabelConfig{
-		"instruction_to_reader": {Factor: riskscore.FactorInstruction, Threshold: 0.9},
-		"secrets_request":       {Factor: riskscore.FactorSecretsRequest, Threshold: 0.8},
+		"instruction_to_reader": {Factor: riskscore.FactorInstruction, AttachmentFactor: riskscore.FactorAttachmentDirectives, Threshold: 0.9},
+		"secrets_request":       {Factor: riskscore.FactorSecretsRequest, AttachmentFactor: riskscore.FactorSecretsRequest, Threshold: 0.8},
 	}
 }
 
 // ClassifierDetector sends a message's body text to a classification endpoint
 // and flags factors from the labels it returns (ADR 0038 sections 2 and 3).
 type ClassifierDetector struct {
-	endpoint     *url.URL
-	token        string
-	timeout      time.Duration
-	window       int
-	overlap      int
-	maxWindows   int
-	labels       map[string]LabelConfig
-	client       *http.Client
-	policy       addrPolicy
-	allowRemote  bool
-	resolvedHost []netip.Addr
+	endpoint             *url.URL
+	token                string
+	timeout              time.Duration
+	window               int
+	overlap              int
+	maxWindows           int
+	maxAttachmentWindows int
+	labels               map[string]LabelConfig
+	client               *http.Client
+	policy               addrPolicy
+	allowRemote          bool
+	resolvedHost         []netip.Addr
 }
 
 // NewClassifierDetector validates cfg and builds the detector. It resolves the
@@ -146,7 +156,7 @@ func NewClassifierDetector(ctx context.Context, cfg ClassifierConfig, token stri
 	}
 	return &ClassifierDetector{
 		endpoint: u, token: token, timeout: cfg.Timeout,
-		window: cfg.WindowRunes, overlap: cfg.OverlapRunes, maxWindows: cfg.MaxWindows,
+		window: cfg.WindowRunes, overlap: cfg.OverlapRunes, maxWindows: cfg.MaxWindows, maxAttachmentWindows: cfg.MaxAttachmentWindows,
 		labels: cfg.Labels, client: client, policy: policy, allowRemote: cfg.AllowRemote, resolvedHost: addrs,
 	}, nil
 }
@@ -190,6 +200,9 @@ func normalizeClassifier(cfg ClassifierConfig) (ClassifierConfig, error) {
 	if cfg.MaxWindows == 0 {
 		cfg.MaxWindows = defaultMaxWindows
 	}
+	if cfg.MaxAttachmentWindows == 0 {
+		cfg.MaxAttachmentWindows = defaultMaxAttachWindows
+	}
 	if cfg.WindowRunes < 2*minSplitRunes {
 		return cfg, fmt.Errorf("assessor: classifier.window_runes must be at least %d", 2*minSplitRunes)
 	}
@@ -198,6 +211,9 @@ func normalizeClassifier(cfg ClassifierConfig) (ClassifierConfig, error) {
 	}
 	if cfg.MaxWindows < 1 {
 		return cfg, fmt.Errorf("assessor: classifier.max_windows must be at least 1")
+	}
+	if cfg.MaxAttachmentWindows < 1 {
+		return cfg, fmt.Errorf("assessor: classifier.max_attachment_windows must be at least 1")
 	}
 	if len(cfg.Labels) == 0 {
 		cfg.Labels = DefaultClassifierLabels()
@@ -221,6 +237,9 @@ func (d *ClassifierDetector) Factors() []riskscore.Factor {
 	seen := make(map[riskscore.Factor]struct{}, len(d.labels))
 	for _, lc := range d.labels {
 		seen[lc.Factor] = struct{}{}
+		if lc.AttachmentFactor != "" {
+			seen[lc.AttachmentFactor] = struct{}{}
+		}
 	}
 	out := make([]riskscore.Factor, 0, len(seen))
 	for f := range seen {
@@ -257,32 +276,69 @@ func (d *ClassifierDetector) Detect(ctx context.Context, c mailtext.Content) ([]
 	return out, nil
 }
 
-// DetectFindings classifies the whole body, window by window, and flags each
-// configured label whose highest confidence across the windows reaches its
-// threshold. Any failure, including a body too long for max_windows, is returned
-// wrapped in ErrClassifierUnavailable. The body only: attachment text stays with
-// the pattern detector.
+// DetectFindings classifies the message's text and flags each configured label
+// whose highest confidence reaches its threshold. It reads two kinds of source:
+//
+//   - The body, one variant at a time (#351). A variant is skipped only when its
+//     text, with whitespace collapsed, is exactly a variant already classified:
+//     the plain and HTML copies of the same newsletter are read once, while
+//     variants that differ in any way, invisible runes included, are all read, so
+//     a directive in one variant is never skipped for its sibling's sake.
+//   - Each extracted attachment text (#350), under its own window cap. A label
+//     flags there only when it names an attachment_factor.
+//
+// Each source is covered in overlapping windows, taking the highest confidence
+// per label. Any failure, including a source too long for its window cap, is
+// returned wrapped in ErrClassifierUnavailable.
 func (d *ClassifierDetector) DetectFindings(ctx context.Context, c mailtext.Content) ([]Finding, error) {
 	ctx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
-	text := []rune(c.Body)
-	if strings.TrimSpace(c.Body) == "" {
-		return nil, nil
+	var out []Finding
+	if body := distinctTexts(bodyTexts(c)); len(body) > 0 {
+		best, err := d.classifyTexts(ctx, body, d.maxWindows, "max_windows")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d.flag(best, SourceBody)...)
 	}
-	windows := splitWindows(len(text), d.window, d.overlap)
-	if len(windows) > d.maxWindows {
-		return nil, fmt.Errorf("%w: the body needs %d windows, more than max_windows %d", ErrClassifierUnavailable, len(windows), d.maxWindows)
+	if att := distinctTexts(attachmentTexts(c)); len(att) > 0 && d.readsAttachments() {
+		best, err := d.classifyTexts(ctx, att, d.maxAttachmentWindows, "max_attachment_windows")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d.flag(best, SourceAttachment)...)
+	}
+	return out, nil
+}
+
+// classifyTexts covers every text in windows and returns the highest confidence
+// per label across all of them. The windows needed, splits included, may not
+// exceed limit; past it the source is not classified in part but fails.
+func (d *ClassifierDetector) classifyTexts(ctx context.Context, texts []string, limit int, limitName string) (map[string]float64, error) {
+	type job struct {
+		text []rune
+		w    window
+	}
+	var jobs []job
+	for _, t := range texts {
+		r := []rune(t)
+		for _, w := range splitWindows(len(r), d.window, d.overlap) {
+			jobs = append(jobs, job{r, w})
+		}
+	}
+	if len(jobs) > limit {
+		return nil, fmt.Errorf("%w: the text needs %d windows, more than %s %d", ErrClassifierUnavailable, len(jobs), limitName, limit)
 	}
 	best := make(map[string]float64, len(d.labels))
 	calls := 0
-	for len(windows) > 0 {
-		w := windows[0]
-		windows = windows[1:]
+	for len(jobs) > 0 {
+		j := jobs[0]
+		jobs = jobs[1:]
 		calls++
-		if calls > d.maxWindows {
-			return nil, fmt.Errorf("%w: covering the body took more than max_windows %d calls", ErrClassifierUnavailable, d.maxWindows)
+		if calls > limit {
+			return nil, fmt.Errorf("%w: covering the text took more than %s %d calls", ErrClassifierUnavailable, limitName, limit)
 		}
-		got, truncated, err := d.classify(ctx, string(text[w.start:w.end]))
+		got, truncated, err := d.classify(ctx, string(j.text[j.w.start:j.w.end]))
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrClassifierUnavailable, err)
 		}
@@ -290,11 +346,15 @@ func (d *ClassifierDetector) DetectFindings(ctx context.Context, c mailtext.Cont
 			// The classifier read only part of this window, so its scores do not
 			// cover it. Split it and classify both halves instead; the halves
 			// overlap so nothing straddling the cut is lost.
-			if w.end-w.start < 2*minSplitRunes {
-				return nil, fmt.Errorf("%w: the classifier cannot read even a %d-rune window whole", ErrClassifierUnavailable, w.end-w.start)
+			n := j.w.end - j.w.start
+			if n < 2*minSplitRunes {
+				return nil, fmt.Errorf("%w: the classifier cannot read even a %d-rune window whole", ErrClassifierUnavailable, n)
 			}
-			n := w.end - w.start
-			windows = append(splitWindows(n, (n+1)/2+d.overlap/2, d.overlap/2).offset(w.start), windows...)
+			var halves []job
+			for _, h := range splitWindows(n, (n+1)/2+d.overlap/2, d.overlap/2).offset(j.w.start) {
+				halves = append(halves, job{j.text, h})
+			}
+			jobs = append(halves, jobs...)
 			continue
 		}
 		for label, p := range got {
@@ -303,14 +363,71 @@ func (d *ClassifierDetector) DetectFindings(ctx context.Context, c mailtext.Cont
 			}
 		}
 	}
+	return best, nil
+}
+
+// flag turns the best confidence per label into findings for one kind of source.
+func (d *ClassifierDetector) flag(best map[string]float64, source string) []Finding {
 	var out []Finding
 	for label, lc := range d.labels {
+		factor := lc.Factor
+		if source == SourceAttachment {
+			factor = lc.AttachmentFactor
+		}
+		if factor == "" {
+			continue
+		}
 		if p := best[label]; p >= lc.Threshold {
-			out = append(out, Finding{Factor: lc.Factor, Detector: DetectorClassifier, Label: label, Confidence: p})
+			out = append(out, Finding{Factor: factor, Detector: DetectorClassifier, Label: label, Confidence: p, Source: source})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
-	return out, nil
+	return out
+}
+
+func (d *ClassifierDetector) readsAttachments() bool {
+	for _, lc := range d.labels {
+		if lc.AttachmentFactor != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// bodyTexts returns the body's parts, or the whole body for content built without
+// them.
+func bodyTexts(c mailtext.Content) []string {
+	if len(c.BodyParts) > 0 {
+		return c.BodyParts
+	}
+	return []string{c.Body}
+}
+
+func attachmentTexts(c mailtext.Content) []string {
+	var out []string
+	for _, a := range c.Attachments {
+		if a.Extracted {
+			out = append(out, a.Text)
+		}
+	}
+	return out
+}
+
+// distinctTexts drops empty texts and any text that is exactly one already kept
+// once whitespace is collapsed. Only whitespace is normalised: a zero-width or
+// other invisible rune is not whitespace, so a copy that differs by one is kept.
+func distinctTexts(texts []string) []string {
+	seen := make(map[string]bool, len(texts))
+	var out []string
+	for _, t := range texts {
+		key := strings.Join(strings.Fields(t), " ")
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, t)
+	}
+	return out
 }
 
 // classifyReply is the part of the endpoint's reply the detector reads.

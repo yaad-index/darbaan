@@ -188,7 +188,7 @@ func (a *Assessor) filterDeclaredFindings(fs []Finding) []Finding {
 	return out
 }
 
-// dedupeFindings keeps one finding per (factor, detector), the most confident, in
+// dedupeFindings keeps one finding per (factor, detector, source), the most confident, in
 // a stable order.
 func dedupeFindings(fs []Finding) []Finding {
 	if len(fs) == 0 {
@@ -197,10 +197,11 @@ func dedupeFindings(fs []Finding) []Finding {
 	type key struct {
 		f riskscore.Factor
 		d string
+		s string
 	}
 	best := make(map[key]Finding, len(fs))
 	for _, f := range fs {
-		k := key{f.Factor, f.Detector}
+		k := key{f.Factor, f.Detector, f.Source}
 		if cur, ok := best[k]; !ok || f.Confidence > cur.Confidence {
 			best[k] = f
 		}
@@ -213,7 +214,10 @@ func dedupeFindings(fs []Finding) []Finding {
 		if out[i].Factor != out[j].Factor {
 			return out[i].Factor < out[j].Factor
 		}
-		return out[i].Detector < out[j].Detector
+		if out[i].Detector != out[j].Detector {
+			return out[i].Detector < out[j].Detector
+		}
+		return out[i].Source < out[j].Source
 	})
 	return out
 }

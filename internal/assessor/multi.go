@@ -25,7 +25,14 @@ type Finding struct {
 	Detector   string
 	Label      string
 	Confidence float64
+	// Source is where the classifier read it: SourceBody or SourceAttachment.
+	// Never a filename, which is the sender's text. Empty for pattern findings.
+	Source string
 }
+
+// SourceAttachment marks a classifier finding read in attachment text (#350). It
+// stands for every attachment: the filename is the sender's and is not recorded.
+const SourceAttachment = "attachment"
 
 // FindingDetector is a Detector that also says, per flagged factor, what flagged
 // it. A detector that is only a Detector has its factors recorded as findings
