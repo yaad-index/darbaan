@@ -57,22 +57,27 @@ The label-to-factor mapping and the thresholds are **configuration**, in the sam
 A general-purpose language model behind a prompt is explicitly **not** this detector: it
 reintroduces the instruction-following surface the assessor exists to avoid.
 
-### 3. The classifier sits behind a backend adapter; local is the default, hosted is opt-in
+### 3. The classifier sits behind a backend adapter; off-box endpoints are opt-in
 
 The detector talks to the classifier through a **backend adapter**, selected in configuration.
-The first adapters are a **local classifier server** (an open-weight classifier on the
-operator's own machine) and **hosted classifier APIs** (for example an OpenRouter-style
-endpoint or a vendor's hosted classifier). The adapter only translates "text in, labels
-with confidences out"; everything in sections 1, 2 and 4 is the same whichever backend runs.
+Every adapter implements the same **classification contract: message text in, labels with
+confidences out, and no prompt or instruction field of any kind**, so no backend can turn the
+detector into the prompted language model section 2 excludes. The first adapters are a
+**self-hosted classifier server** and a **hosted classification API**. Everything in sections
+1, 2 and 4 is the same whichever backend runs.
 
 Whatever the backend, the classifier holds no mail credentials, no store access and no send
-path, which is ADR 0032 section 2 applied to a new component.
+path, which is ADR 0032 section 2 applied to a new component. A hosted API's credential lives
+in the classifier adapter's own configuration, **scoped to the classifier only**, and is never
+shared with the mail backends or the admin API.
 
-**A hosted backend requires an explicit `allow_remote: true`.** With a hosted adapter
-configured and that setting absent or false, Darbaan refuses to start rather than silently
-sending mail to a third party. The setting exists so that shipping every incoming message
-body to someone else's service is a decision an operator wrote down, never a default they
-inherited.
+**Sending text off the box requires an explicit `allow_remote: true`, decided by where the
+text goes, not by which adapter is chosen.** Any endpoint that is not loopback, and not on an
+operator-configured list of private hosts, counts as remote, whatever adapter points at it:
+a self-hosted adapter aimed at another machine is remote too. With a remote endpoint and
+`allow_remote` absent or false, Darbaan refuses to start rather than silently sending mail
+elsewhere. The setting exists so that shipping every incoming message body to another host is
+a decision an operator wrote down, never a default they inherited.
 
 ### 3b. The classifier is optional, and Darbaan says so loudly when it is on
 
@@ -81,7 +86,7 @@ indefinitely, and that remains a fully supported configuration.
 
 When a classifier **is** configured, Darbaan logs a **warning at every startup** stating
 plainly that the classifier reads the full text of every incoming message it assesses, and
-naming the backend and, for a hosted backend, the remote host the text is sent to. The
+naming the backend and the **resolved host** the text is sent to, so a remote endpoint is never described as local. The
 warning is repeated on every start, not shown once, so an operator reading the logs later
 cannot miss what the deployment is doing with their mail.
 
@@ -121,7 +126,7 @@ a new ADR or an amendment; the mechanism above would not change.
 ## Fail-safe
 
 - No classifier configured: identical to today, and fully supported (section 3b).
-- Hosted backend configured without `allow_remote: true`: Darbaan does not start.
+- Remote endpoint (any adapter) configured without `allow_remote: true`: Darbaan does not start.
 - Classifier configured and healthy: flags can only be added, never removed.
 - Classifier configured and failing: the assessment fails and the message is held, the same
   outcome ADR 0032 already gives an assessor failure.
@@ -136,7 +141,8 @@ a new ADR or an amendment; the mechanism above would not change.
   threshold and the existing point-table are the tuning levers.
 - An operator can tell a pattern hit from a classifier hit when tuning (section 4b).
 - A classifier outage holds every incoming message it would have assessed, so the classifier
-  server needs the same monitoring as the gate itself.
+  server needs the same monitoring as the gate itself. With a hosted backend this means a
+  third party's outage holds all incoming mail (section 4).
 
 ## Boundaries
 
