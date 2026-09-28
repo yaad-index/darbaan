@@ -17,7 +17,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/admin"
 )
 
-func nilResolver(string, string) provenance.Stamp {
+func nilResolver(string, []byte) provenance.Stamp {
 	return provenance.Stamp{Trust: provenance.TrustUnknown}
 }
 
@@ -168,8 +168,8 @@ func TestBuildAssessHookEnabledProducesHeldAssessment(t *testing.T) {
 func TestBuildAssessHookResolvesTrustFromRawAddress(t *testing.T) {
 	cli := &CLI{AssessmentEnabled: true, AssessmentTimeout: time.Second}
 	var gotAddr string
-	resolve := func(inbox, from string) provenance.Stamp {
-		gotAddr = from
+	resolve := func(inbox string, raw []byte) provenance.Stamp {
+		gotAddr = provenance.From(raw)
 		return provenance.Stamp{Trust: provenance.TrustTrusted}
 	}
 	hook, _, err := cli.buildAssessHook(nil, resolve, riskscore.DefaultConfig())

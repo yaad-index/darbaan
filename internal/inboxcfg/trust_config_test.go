@@ -55,6 +55,13 @@ func TestValidateTrust(t *testing.T) {
 	assert.Error(t, ok(inboxcfg.Trust{Note: strings.Repeat("x", 513)}), "over-long note rejected")
 	assert.Error(t, ok(inboxcfg.Trust{Note: "inject\r\nX-Evil: 1"}), "CR/LF in note rejected (header injection)")
 	assert.Error(t, ok(inboxcfg.Trust{Note: "tab\tinside"}), "control char in note rejected")
+
+	assert.NoError(t, ok(inboxcfg.Trust{RequireAuthenticated: true, AuthservID: "mx.example"}))
+	assert.ErrorContains(t, ok(inboxcfg.Trust{RequireAuthenticated: true}), "needs trust.authserv_id",
+		"the gate has no default identity")
+	assert.ErrorContains(t, ok(inboxcfg.Trust{RequireAuthenticated: true, AuthservID: "  "}), "needs trust.authserv_id")
+	assert.ErrorContains(t, ok(inboxcfg.Trust{AuthservID: "mx.example"}), "would do nothing",
+		"an identity with the gate off is a mistake, not a setting")
 }
 
 // SenderStamp resolves per-sender rules (ADR 0031): most-specific rule (exact

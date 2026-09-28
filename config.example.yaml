@@ -277,6 +277,13 @@ assessment-timeout: 5s
 #   - name: inbox-b
 #     identity: b@inbox-b.example
 #     backend: { imap_host: "imap.example:993", imap_username: "b@inbox-b.example" }
+#     trust:                           # provenance stamp (ADR 0030/0031)
+#       # level omitted: the unknown default
+#       require_authenticated: true    # trusted only on the upstream's DMARC or
+#       authserv_id: mx.example        # aligned DKIM pass; the upstream's own
+#                                      # Authentication-Results identity, required
+#       rules:
+#         - { from: ops@example.com, level: trusted, note: "operator address" }
 #
 # agents:
 #   - name: agent-a

@@ -99,6 +99,15 @@ type Trust struct {
 	// the inbox Level default. Matched on From only (v1); a `trusted` rule is sound
 	// only under the upstream-authentication boundary (the README caution).
 	Rules []TrustRule `yaml:"rules"`
+	// RequireAuthenticated gates every `trusted` outcome for this inbox on the
+	// upstream's own Authentication-Results (ADR 0031 slice 2, as amended
+	// 2026-09-26): trusted only when the upstream reports DMARC pass, or an aligned
+	// DKIM pass, for the From domain. On failure the message is stamped unknown.
+	RequireAuthenticated bool `yaml:"require_authenticated"`
+	// AuthservID is the upstream MTA's Authentication-Results identity, such as
+	// mx.google.com. Required when RequireAuthenticated is set: there is no default
+	// that trusts any identity.
+	AuthservID string `yaml:"authserv_id"`
 }
 
 // TrustRule maps a sender to a trust level + optional note (ADR 0031). Exactly
@@ -143,7 +152,7 @@ type fileConfig struct {
 // `inboxes:` yields nil — the caller substitutes the implicit default via
 // Resolve.
 //
-// A trust setting that ADR 0031 describes but no code implements fails here, since
+// A gate setting placed where no such setting exists under trust fails here, since
 // the decoder would otherwise drop it and leave the operator believing it applies.
 func Parse(data []byte) ([]Inbox, error) {
 	var fc fileConfig
@@ -154,7 +163,7 @@ func Parse(data []byte) ([]Inbox, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectUnimplemented(unknown); err != nil {
+	if err := rejectMisplacedGate(unknown); err != nil {
 		return nil, err
 	}
 	return fc.Inboxes, nil
@@ -258,6 +267,12 @@ func (in Inbox) validateTrust() error {
 	if err := validateNote(in.Trust.Note); err != nil {
 		return fmt.Errorf("trust.note: %w", err)
 	}
+	if in.Trust.RequireAuthenticated && strings.TrimSpace(in.Trust.AuthservID) == "" {
+		return fmt.Errorf("trust.require_authenticated needs trust.authserv_id, the upstream's Authentication-Results identity (there is no default that trusts any identity)")
+	}
+	if !in.Trust.RequireAuthenticated && in.Trust.AuthservID != "" {
+		return fmt.Errorf("trust.authserv_id is set but trust.require_authenticated is not, so it would do nothing")
+	}
 	return validateRules(in.Trust.Rules)
 }
 
@@ -332,6 +347,23 @@ func (in Inbox) SenderStamp(from string) provenance.Stamp {
 		}
 	}
 	return provenance.Stamp{Trust: trust, Note: note, Banner: in.Trust.BodyBanner}
+}
+
+// Stamp is the provenance stamp for raw arriving in this inbox: the per-sender
+// rule or inbox default for its From (SenderStamp), with every trusted outcome
+// gated on the upstream's own Authentication-Results when the inbox requires it
+// (ADR 0031 slice 2, as amended 2026-09-26). A trusted outcome that fails the gate
+// is stamped unknown, and its note is dropped with it, since the note belongs to
+// the trusted outcome.
+func (in Inbox) Stamp(raw []byte) provenance.Stamp {
+	from := provenance.From(raw)
+	st := in.SenderStamp(from)
+	if st.Trust == provenance.TrustTrusted && in.Trust.RequireAuthenticated &&
+		!authenticated(raw, in.Trust.AuthservID, domainOf(from)) {
+		st.Trust = provenance.TrustUnknown
+		st.Note = ""
+	}
+	return st
 }
 
 // matchRule returns the most-specific rule matching from: an exact-address rule
