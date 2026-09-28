@@ -57,17 +57,33 @@ The label-to-factor mapping and the thresholds are **configuration**, in the sam
 A general-purpose language model behind a prompt is explicitly **not** this detector: it
 reintroduces the instruction-following surface the assessor exists to avoid.
 
-### 3. The classifier runs behind a local endpoint, and is never the privileged process
+### 3. The classifier sits behind a backend adapter; local is the default, hosted is opt-in
 
-The detector calls a classifier server over a local HTTP endpoint (operator-configured
-URL). The classifier runs in its own process with no mail credentials, no store access and
-no send path, which is ADR 0032 section 2 applied to a new component. The first supported
-backend is a local open-weight classifier; the endpoint shape does not tie the detector to
-one.
+The detector talks to the classifier through a **backend adapter**, selected in configuration.
+The first adapters are a **local classifier server** (an open-weight classifier on the
+operator's own machine) and **hosted classifier APIs** (for example an OpenRouter-style
+endpoint or a vendor's hosted classifier). The adapter only translates "text in, labels
+with confidences out"; everything in sections 1, 2 and 4 is the same whichever backend runs.
 
-**Mail content is never sent to a third-party hosted classifier by default.** A hosted
-endpoint is possible in principle, but it would move untrusted and private content off the
-operator's machines, so it needs an explicit operator setting and is not the default.
+Whatever the backend, the classifier holds no mail credentials, no store access and no send
+path, which is ADR 0032 section 2 applied to a new component.
+
+**A hosted backend requires an explicit `allow_remote: true`.** With a hosted adapter
+configured and that setting absent or false, Darbaan refuses to start rather than silently
+sending mail to a third party. The setting exists so that shipping every incoming message
+body to someone else's service is a decision an operator wrote down, never a default they
+inherited.
+
+### 3b. The classifier is optional, and Darbaan says so loudly when it is on
+
+The classifier is **never mandatory**: a deployment can stay on the pattern detector alone
+indefinitely, and that remains a fully supported configuration.
+
+When a classifier **is** configured, Darbaan logs a **warning at every startup** stating
+plainly that the classifier reads the full text of every incoming message it assesses, and
+naming the backend and, for a hosted backend, the remote host the text is sent to. The
+warning is repeated on every start, not shown once, so an operator reading the logs later
+cannot miss what the deployment is doing with their mail.
 
 ### 4. A classifier failure holds the message, exactly as an assessor failure does today
 
@@ -104,7 +120,8 @@ a new ADR or an amendment; the mechanism above would not change.
 
 ## Fail-safe
 
-- No classifier configured: identical to today.
+- No classifier configured: identical to today, and fully supported (section 3b).
+- Hosted backend configured without `allow_remote: true`: Darbaan does not start.
 - Classifier configured and healthy: flags can only be added, never removed.
 - Classifier configured and failing: the assessment fails and the message is held, the same
   outcome ADR 0032 already gives an assessor failure.
