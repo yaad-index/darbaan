@@ -78,3 +78,13 @@ func TestConfigExampleWarningsHold(t *testing.T) {
 	assert.Contains(t, detectWith(t, d, mailtext.Content{Body: withZWNJ}), riskscore.FactorInstruction,
 		"a ZWNJ in the mail text is removed before matching, so a pattern written without it still fires")
 }
+
+// The documented classifier block must validate as written and must ship OFF: an
+// operator who copies the example must not start sending mail text anywhere.
+func TestConfigExampleClassifierBlockValidatesAndIsOff(t *testing.T) {
+	cfg := mustParse(t, exampleAssessmentSection(t))
+	require.NotNil(t, cfg.Classifier, "the example must document the classifier, or this test proves nothing")
+	require.NoError(t, ValidateClassifierConfig(*cfg.Classifier))
+	assert.False(t, cfg.Classifier.Enabled, "the documented classifier ships disabled")
+	assert.Equal(t, DefaultClassifierLabels(), cfg.Classifier.Labels, "the documented labels are the defaults")
+}

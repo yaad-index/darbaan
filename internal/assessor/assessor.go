@@ -5,8 +5,11 @@
 // It is the deliberate inverse of the privileged agent: the agent has access but
 // must not read raw attacker bytes as trusted; the assessor reads the bytes but
 // holds nothing worth hijacking. Structurally it has no mail credentials, no send
-// path, no store access, and makes no network calls — an injected payload has
-// nothing to seize. This is the load-bearing property of ADR 0032: the gate's
+// path and no store access, so an injected payload has nothing to seize. The
+// pattern detector makes no network calls. The optional classifier detector (ADR
+// 0038) does: it sends the message text to a classification endpoint and gets back
+// only confidences for labels the operator configured, and its one credential is
+// scoped to that endpoint. This is the load-bearing property of ADR 0032: the gate's
 // safety does not depend on the assessor being uncompromised, because even a
 // fully-injected assessor can only misreport which factors it saw. Its output is
 // filtered to the detector's declared factor vocabulary (see Assessor.declared),
@@ -14,11 +17,12 @@
 // arbitrary bytes; and it can never assert a magnitude (the scorer composes that)
 // or take an action.
 //
-// The v1 detector is a heuristic pattern ruleset (see HeuristicDetector):
+// The base detector is a heuristic pattern ruleset (see HeuristicDetector):
 // best-effort and defense-in-depth, NOT the gate. It will miss novel phrasing;
 // the human send-gate and the sender-baseline term of the score remain the real
-// backstops. A model-backed detector is a fast-follow behind the same Detector
-// contract, behind the isolation this package proves out.
+// backstops. A classifier detector (ClassifierDetector, ADR 0038) can run beside
+// it; Multi composes them and reports the union, so a classifier can only add
+// factors.
 package assessor
 
 import (
@@ -52,6 +56,10 @@ type Assessment struct {
 	// distinct from "not recorded". Without it a clean result cannot be told apart
 	// from one where the relevant factor was switched off.
 	Active []riskscore.Factor
+	// Findings says, per flagged factor, which detector flagged it and, for a
+	// classifier, the label and confidence (ADR 0038 section 4b). Every finding's
+	// factor is in Factors.
+	Findings []Finding
 }
 
 // Detector detects risk factors in extracted message content. Implementations
@@ -128,7 +136,7 @@ func (a *Assessor) Assess(ctx context.Context, c mailtext.Content) (Assessment, 
 	if err := ctx.Err(); err != nil {
 		return Assessment{}, fmt.Errorf("assessor: context before assess: %w", err)
 	}
-	factors, err := a.det.Detect(ctx, c)
+	findings, err := a.detect(ctx, c)
 	if err != nil {
 		return Assessment{}, fmt.Errorf("assessor: detect: %w", err)
 	}
@@ -140,9 +148,74 @@ func (a *Assessor) Assess(ctx context.Context, c mailtext.Content) (Assessment, 
 	// bytes) has it dropped here, so only system-defined names ever reach the
 	// summary or the scorer. This is the structural form of the "no attacker bytes
 	// cross the boundary" invariant.
-	factors = a.filterDeclared(factors)
+	findings = a.filterDeclaredFindings(findings)
+	factors := make([]riskscore.Factor, 0, len(findings))
+	for _, f := range findings {
+		factors = append(factors, f.Factor)
+	}
 	factors = dedupeSort(factors)
-	return Assessment{Factors: factors, Truncated: c.Truncated, Summary: summarize(factors, c.Truncated), Active: a.activeFactors()}, nil
+	return Assessment{Factors: factors, Truncated: c.Truncated, Summary: summarize(factors, c.Truncated),
+		Active: a.activeFactors(), Findings: dedupeFindings(findings)}, nil
+}
+
+// detect runs the detector and returns its findings. A detector that reports only
+// factors has them recorded under the pattern detector's name, since that is the
+// only such detector.
+func (a *Assessor) detect(ctx context.Context, c mailtext.Content) ([]Finding, error) {
+	if fd, ok := a.det.(FindingDetector); ok {
+		return fd.DetectFindings(ctx, c)
+	}
+	factors, err := a.det.Detect(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Finding, 0, len(factors))
+	for _, f := range factors {
+		out = append(out, Finding{Factor: f, Detector: DetectorPattern})
+	}
+	return out, nil
+}
+
+// filterDeclaredFindings drops any finding whose factor the detector did not
+// declare, so the findings obey the same boundary as the factors.
+func (a *Assessor) filterDeclaredFindings(fs []Finding) []Finding {
+	out := fs[:0:0]
+	for _, f := range fs {
+		if _, ok := a.declared[f.Factor]; ok {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// dedupeFindings keeps one finding per (factor, detector), the most confident, in
+// a stable order.
+func dedupeFindings(fs []Finding) []Finding {
+	if len(fs) == 0 {
+		return nil
+	}
+	type key struct {
+		f riskscore.Factor
+		d string
+	}
+	best := make(map[key]Finding, len(fs))
+	for _, f := range fs {
+		k := key{f.Factor, f.Detector}
+		if cur, ok := best[k]; !ok || f.Confidence > cur.Confidence {
+			best[k] = f
+		}
+	}
+	out := make([]Finding, 0, len(best))
+	for _, f := range best {
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Factor != out[j].Factor {
+			return out[i].Factor < out[j].Factor
+		}
+		return out[i].Detector < out[j].Detector
+	})
+	return out
 }
 
 // activeFactors returns the declared factors, sorted, as a fresh non-nil slice.
@@ -152,17 +225,6 @@ func (a *Assessor) activeFactors() []riskscore.Factor {
 		out = append(out, f)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
-}
-
-// filterDeclared drops any factor the detector did not declare at construction.
-func (a *Assessor) filterDeclared(factors []riskscore.Factor) []riskscore.Factor {
-	out := factors[:0:0]
-	for _, f := range factors {
-		if _, ok := a.declared[f]; ok {
-			out = append(out, f)
-		}
-	}
 	return out
 }
 
