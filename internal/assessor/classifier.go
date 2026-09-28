@@ -288,8 +288,9 @@ func (d *ClassifierDetector) Detect(ctx context.Context, c mailtext.Content) ([]
 //   - Each extracted attachment text (#350), under its own window cap. A label
 //     flags there only when it names an attachment_factor.
 //
-// Every URL in a source is replaced with a placeholder before it is classified
-// (#353), so a link's tracking tokens are not read as a key being asked for.
+// Every URL in a source is replaced with a placeholder naming its host before it
+// is classified (#353), so a link's tracking tokens are not read as a key being
+// asked for.
 // Each source is then covered in overlapping windows, taking the highest
 // confidence per label. Any failure, including a source too long for its window
 // cap, is returned wrapped in ErrClassifierUnavailable.
@@ -416,24 +417,50 @@ func attachmentTexts(c mailtext.Content) []string {
 	return out
 }
 
-// urlPlaceholder stands in for every URL in a text the classifier reads.
-const urlPlaceholder = "<url>"
-
 // urlRe matches a URL written out in text: a scheme followed by "://", or a bare
 // "www." host, running to the next whitespace or to a character a URL cannot
 // contain.
 var urlRe = regexp.MustCompile(`(?i)\b(?:[a-z][a-z0-9+.-]*://|www\.)[^\s<>"]+`)
 
-// withoutURLs replaces every URL in each text with urlPlaceholder. Nothing of the
-// URL is kept: tracking links carry their tokens in the path as well as the query
-// string. Text inside a URL is therefore not read by the classifier; the pattern
-// detector still reads it.
+// urlHostRe matches the host at the start of a URL's authority: a bracketed IPv6
+// literal, or a run of letters, digits, dots and hyphens.
+var urlHostRe = regexp.MustCompile(`^(?:\[[0-9A-Fa-f:.]+\]|[\p{L}\p{N}.-]+)`)
+
+// withoutURLs replaces every URL in each text with a placeholder naming only its
+// host (#353): "<url example.com>". The path, query string and fragment go, since
+// tracking links carry their tokens there; the host is kept so a look-alike domain
+// stays visible. Text elsewhere in a URL is therefore not read by the classifier;
+// the pattern detector still reads it.
 func withoutURLs(texts []string) []string {
 	out := make([]string, len(texts))
 	for i, t := range texts {
-		out[i] = urlRe.ReplaceAllLiteralString(t, urlPlaceholder)
+		out[i] = urlRe.ReplaceAllStringFunc(t, urlPlaceholder)
 	}
 	return out
+}
+
+// urlPlaceholder returns "<url HOST>" for a URL urlRe matched: its host,
+// lowercased, without userinfo or port, and with punycode left as it is. When no
+// host can be read it returns "<url>".
+func urlPlaceholder(u string) string {
+	rest := u
+	if !strings.HasPrefix(strings.ToLower(u), "www.") {
+		rest = u[strings.Index(u, "://")+len("://"):]
+	}
+	// The authority ends at the path, query or fragment. A backslash ends it too,
+	// as a browser reads one as a slash, so "https://a.example\@b.example" is
+	// shown as a.example, the host it would open.
+	if i := strings.IndexAny(rest, `/?#\`); i >= 0 {
+		rest = rest[:i]
+	}
+	if i := strings.LastIndexByte(rest, '@'); i >= 0 {
+		rest = rest[i+1:]
+	}
+	host := strings.TrimRight(urlHostRe.FindString(rest), ".")
+	if host == "" {
+		return "<url>"
+	}
+	return "<url " + strings.ToLower(host) + ">"
 }
 
 // distinctTexts drops empty texts and any text that is exactly one already kept
