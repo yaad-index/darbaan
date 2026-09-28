@@ -245,6 +245,37 @@ assessment-timeout: 5s
 #     # hidden_directives has no detector rule yet, so only this is accepted:
 #     hidden_directives:
 #       enabled: false
+#     # Optional classifier detector beside the patterns (ADR 0038). OFF unless
+#     # enabled. When on, it SENDS THE FULL BODY TEXT OF EVERY ASSESSED MESSAGE to
+#     # the endpoint, and darbaan logs a warning saying so on every start. It can
+#     # only ADD factors, and if it fails or times out the message is HELD, so an
+#     # outage of the classifier holds all incoming mail: monitor it like the gate.
+#     classifier:
+#       enabled: false
+#       backend: http                  # POST {"text": "..."} -> {"labels": [{"label", "confidence"}], "truncated"}
+#       endpoint: "http://192.0.2.10:8790/v1/classify"
+#       timeout: 3s                    # must be shorter than --assessment-timeout
+#       # The check is on the ADDRESS CONNECTED TO, whatever the backend: loopback is
+#       # always allowed, these IPs/CIDRs are treated as your own machines, and any
+#       # other address needs allow_remote: true or darbaan refuses to start (and
+#       # refuses the connection later if a name starts resolving elsewhere).
+#       private_hosts: ["192.0.2.10"]
+#       allow_remote: false
+#       # The bearer token, if the endpoint wants one, comes from the environment
+#       # variable DARBAAN_CLASSIFIER_TOKEN and is sent to this endpoint only.
+#       # Long bodies are covered in overlapping windows and the highest confidence
+#       # per label is taken; a body needing more than max_windows is HELD, never
+#       # classified in part.
+#       window_runes: 1000
+#       overlap_runes: 200
+#       max_windows: 32
+#       # Label -> factor, flagged at or above the threshold. A label not listed
+#       # flags nothing. Omit `labels` for the default below; hidden_directives is
+#       # left unmapped by default, as it showed no signal on the first model tried.
+#       # The thresholds are a starting point, not a tuned value: set your own.
+#       labels:
+#         instruction_to_reader: { factor: instruction_to_reader, threshold: 0.9 }
+#         secrets_request: { factor: secrets_request, threshold: 0.8 }
 
 # --- Multi-inbox + multi-agent (optional; ADR 0023 / ADR 0027) ---------------
 # The flat fields above define ONE inbox and ONE implicit agent. To front several

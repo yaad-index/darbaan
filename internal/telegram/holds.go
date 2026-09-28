@@ -105,6 +105,12 @@ func formatHoldWithEvidence(m inbound.Message, raw []byte, fetchFailed bool, ev 
 	if line := holdAssessmentLine(m.Assessment); line != "" {
 		fmt.Fprintf(&b, "\nwhy: %s", clampField(line))
 	}
+	// ADR 0038 section 4b: a classifier finding has no matched text for the re-run
+	// below to find, so what flagged it is said here, from the stored findings. It
+	// sits in the header, so it survives the degraded cards that return early.
+	if line := classifierLine(m.Assessment); line != "" {
+		fmt.Fprintf(&b, "\nflagged by the classifier: %s", clampField(line))
+	}
 	// C46: the stored body could not be read (HeldContent failed). Say so explicitly
 	// rather than degrading silently to a metadata-only card the operator can't
 	// distinguish from "no body yet" — and on this surface the body is often the whole
@@ -129,7 +135,7 @@ func formatHoldWithEvidence(m inbound.Message, raw []byte, fetchFailed bool, ev 
 	// The matched text goes before the body and takes the budget first: the body is
 	// recoverable in full on request, the span is not on the card anywhere else.
 	if ev != nil {
-		b.WriteString(evidenceSection(ev, telegramTextLimit-utf16Len(b.String())-fenceOverhead))
+		b.WriteString(evidenceSection(ev, classifierOnly(m.Assessment), telegramTextLimit-utf16Len(b.String())-fenceOverhead))
 	}
 	if len(raw) > 0 {
 		header := b.String()
@@ -147,9 +153,12 @@ func formatHoldWithEvidence(m inbound.Message, raw []byte, fetchFailed bool, ev 
 // evidenceSection renders the re-run's matched text per fired factor, within
 // budget UTF-16 units. For each factor it shows exactly one of: the spans, fenced
 // and labelled; that the current rules no longer match (the re-run found none);
-// or that the text was omitted for space. The last never borrows the disagreement
-// line, because running out of room observed no disagreement.
-func evidenceSection(ev []admin.FactorEvidence, budget int) string {
+// that only the classifier flagged it, so there is no matched text to find; or
+// that the text was omitted for space. The last never borrows the disagreement
+// line, because running out of room observed no disagreement. clsOnly names the
+// factors no pattern flagged at ingest: for those an empty re-run is expected, not
+// a disagreement.
+func evidenceSection(ev []admin.FactorEvidence, clsOnly map[string]bool, budget int) string {
 	if len(ev) == 0 {
 		return ""
 	}
@@ -164,6 +173,9 @@ func evidenceSection(ev []admin.FactorEvidence, budget int) string {
 		reserve := (len(ev) - i - 1) * utf16Len(omittedLine(label))
 		if len(fe.Spans) == 0 {
 			line := "\n- " + label + ": matched text not available: the current rules no longer match this message"
+			if clsOnly[fe.Factor] {
+				line = "\n- " + label + ": no matched text: only the classifier flagged this, and a classifier does not point at text"
+			}
 			if used+utf16Len(line)+reserve > budget {
 				line = omittedLine(label)
 			}
@@ -292,6 +304,48 @@ func offLabel(f riskscore.Factor) string {
 	default:
 		return string(f)
 	}
+}
+
+// classifierLine names each factor the classifier flagged, with the configured
+// label and its confidence (ADR 0038 section 4b). Nothing in it comes from the
+// message: the label is the operator's configuration and the confidence a number.
+func classifierLine(a *inbound.Assessment) string {
+	if a == nil {
+		return ""
+	}
+	var parts []string
+	for _, f := range a.Findings {
+		if f.Detector != assessor.DetectorClassifier {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s (label %s, confidence %.2f)", offLabel(riskscore.Factor(f.Factor)), f.Label, f.Confidence))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// classifierOnly returns the factors the classifier flagged and no pattern did. A
+// record without findings (written before them) yields none, so its card keeps
+// the old wording.
+func classifierOnly(a *inbound.Assessment) map[string]bool {
+	if a == nil || len(a.Findings) == 0 {
+		return nil
+	}
+	cls, pat := map[string]bool{}, map[string]bool{}
+	for _, f := range a.Findings {
+		switch f.Detector {
+		case assessor.DetectorClassifier:
+			cls[f.Factor] = true
+		default:
+			pat[f.Factor] = true
+		}
+	}
+	out := map[string]bool{}
+	for f := range cls {
+		if !pat[f] {
+			out[f] = true
+		}
+	}
+	return out
 }
 
 // assessmentTruncated reports whether the score was computed on partial content.

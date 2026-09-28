@@ -714,10 +714,14 @@ func (cli *CLI) buildAssessHook(inboxes []inboxcfg.Inbox, resolve inbound.Proven
 		slog.Warn("injection assessment: detector factors switched off by config; they can never fire, so a clean score says nothing about them",
 			"off", off)
 	}
-	if err := assessor.ValidateAlignment(detector, scorer.Config()); err != nil {
+	assessDet, err := cli.composeDetectors(detector, dcfg.Classifier)
+	if err != nil {
+		return nil, assessEvidence{}, err
+	}
+	if err := assessor.ValidateAlignment(assessDet, scorer.Config()); err != nil {
 		return nil, assessEvidence{}, fmt.Errorf("assessment detector/scorer misaligned: %w", err)
 	}
-	asr, err := assessor.New(detector, assessor.WithTimeout(cli.AssessmentTimeout))
+	asr, err := assessor.New(assessDet, assessor.WithTimeout(cli.AssessmentTimeout))
 	if err != nil {
 		return nil, assessEvidence{}, fmt.Errorf("assessment assessor: %w", err)
 	}
@@ -748,6 +752,47 @@ func (cli *CLI) buildAssessHook(inboxes []inboxcfg.Inbox, resolve inbound.Proven
 	}, assessEvidence{detector: detector, limits: scr.Limits()}, nil
 }
 
+// composeDetectors returns the detector ingest assesses with: the pattern detector
+// alone, or the pattern detector and a classifier composed by union (ADR 0038). The
+// classifier section is validated on every start, enabled or not. An enabled
+// classifier is built even while assessment is off, so an endpoint that would send
+// mail text off the box without allow_remote stops startup before the flip, not on
+// it.
+func (cli *CLI) composeDetectors(pattern *assessor.HeuristicDetector, cc *assessor.ClassifierConfig) (assessor.Detector, error) {
+	if cc == nil {
+		return pattern, nil
+	}
+	if err := assessor.ValidateClassifierConfig(*cc); err != nil {
+		return nil, fmt.Errorf("assessment detector config: %w", err)
+	}
+	if !cc.Enabled {
+		return pattern, nil
+	}
+	cls, err := assessor.NewClassifierDetector(context.Background(), *cc, os.Getenv(assessor.ClassifierTokenEnv))
+	if err != nil {
+		return nil, fmt.Errorf("assessment detector config: %w", err)
+	}
+	// The classifier's own bound sits inside the assessor's, so a slow classifier
+	// fails as a classifier failure rather than using up the whole assessment.
+	if cli.AssessmentTimeout > 0 && cls.Timeout() >= cli.AssessmentTimeout {
+		return nil, fmt.Errorf("assessment detector config: classifier.timeout %s must be shorter than --assessment-timeout %s",
+			cls.Timeout(), cli.AssessmentTimeout)
+	}
+	backend, endpoint, hosts, remote := cls.Describe()
+	if cli.AssessmentEnabled {
+		// ADR 0038 section 3b: on every start, not once, and naming where the text goes.
+		slog.Warn("injection assessment: the CLASSIFIER READS THE FULL BODY TEXT OF EVERY INCOMING MESSAGE IT ASSESSES and sends it to the endpoint below",
+			"backend", backend, "endpoint", endpoint, "resolved_hosts", hosts, "off_this_machine", remote)
+	} else {
+		slog.Info("injection assessment: classifier configured and checked, inactive while assessment is disabled",
+			"backend", backend, "endpoint", endpoint, "resolved_hosts", hosts)
+	}
+	return assessor.NewMulti(
+		assessor.Member{Name: assessor.DetectorPattern, Detector: pattern},
+		assessor.Member{Name: assessor.DetectorClassifier, Detector: cls},
+	)
+}
+
 // assessEvidence is what the held-evidence re-run needs from the assessment
 // pipeline: the detector ingest scores with and the screener's extraction limits.
 type assessEvidence struct {
@@ -776,7 +821,20 @@ func outcomeToAssessment(o screener.Outcome) *inbound.Assessment {
 		Summary:     o.Summary,
 		Truncated:   &truncated,
 		Active:      activeStrings(o.Active),
+		Findings:    findingRecords(o.Findings),
 	}
+}
+
+// findingRecords maps the assessor's findings to their stored form.
+func findingRecords(fs []assessor.Finding) []inbound.Finding {
+	if len(fs) == 0 {
+		return nil
+	}
+	out := make([]inbound.Finding, len(fs))
+	for i, f := range fs {
+		out[i] = inbound.Finding{Factor: string(f.Factor), Detector: f.Detector, Label: f.Label, Confidence: f.Confidence}
+	}
+	return out
 }
 
 // activeStrings keeps the three states of the active set: nil stays nil (no

@@ -563,3 +563,63 @@ func TestHeldFullTextMarksTruncation(t *testing.T) {
 	assert.True(t, truncated, "over the part-count cap")
 	assert.True(t, strings.HasPrefix(text, "[TRUNCATED:"), "the document says so at the top")
 }
+
+// ADR 0038 section 4b. The render-time re-run (ADR 0036) re-runs only the
+// patterns, so a factor only the classifier flagged has no matched text. The card
+// must say what flagged it, and must not claim the rules "no longer match".
+func classifierHold(findings []inbound.Finding) inbound.Message {
+	m := evidenceHold()
+	m.Assessment.Findings = findings
+	return m
+}
+
+func TestHoldCardClassifierOnlyFactorSaysWhatFlaggedIt(t *testing.T) {
+	m := classifierHold([]inbound.Finding{
+		{Factor: "secrets_request", Detector: "pattern"},
+		{Factor: "instruction_to_reader", Detector: "classifier", Label: "instruction_to_reader", Confidence: 0.973},
+	})
+	ev := []admin.FactorEvidence{
+		{Factor: "secrets_request", Spans: []assessor.Span{{Source: assessor.SourceBody, Text: "please send me your password"}}},
+		{Factor: "instruction_to_reader", Spans: []assessor.Span{}},
+	}
+	s := formatHoldWithEvidence(m, []byte(evidenceBody), false, ev)
+	assert.Contains(t, s, "flagged by the classifier: instructions to the reader (label instruction_to_reader, confidence 0.97)")
+	assert.Contains(t, s, "instructions to the reader: no matched text: only the classifier flagged this")
+	assert.NotContains(t, s, "no longer match", "an empty re-run for a classifier-only factor is expected, not a disagreement")
+	assert.Contains(t, s, "please send me your password", "the pattern factor's span is still shown")
+}
+
+// Where a pattern ALSO flagged the factor, an empty re-run is a real disagreement
+// and keeps its wording; the classifier line is added beside it.
+func TestHoldCardFactorFlaggedByBothKeepsTheDisagreementLine(t *testing.T) {
+	m := classifierHold([]inbound.Finding{
+		{Factor: "instruction_to_reader", Detector: "pattern"},
+		{Factor: "instruction_to_reader", Detector: "classifier", Label: "instruction_to_reader", Confidence: 0.95},
+	})
+	ev := []admin.FactorEvidence{{Factor: "instruction_to_reader", Spans: []assessor.Span{}}}
+	s := formatHoldWithEvidence(m, []byte(evidenceBody), false, ev)
+	assert.Contains(t, s, "the current rules no longer match this message")
+	assert.Contains(t, s, "flagged by the classifier: instructions to the reader (label instruction_to_reader, confidence 0.95)")
+}
+
+// A record written before findings existed renders exactly as before.
+func TestHoldCardWithoutFindingsIsUnchanged(t *testing.T) {
+	ev := []admin.FactorEvidence{{Factor: "instruction_to_reader", Spans: []assessor.Span{}}}
+	s := formatHoldWithEvidence(evidenceHold(), []byte(evidenceBody), false, ev)
+	assert.NotContains(t, s, "classifier")
+	assert.Contains(t, s, "the current rules no longer match this message")
+}
+
+// The classifier line sits in the header, so it survives the card that cannot
+// show a body.
+func TestHoldCardClassifierLineSurvivesAFailedFetch(t *testing.T) {
+	m := classifierHold([]inbound.Finding{{Factor: "secrets_request", Detector: "classifier", Label: "secrets_request", Confidence: 0.88}})
+	s := formatHoldWithEvidence(m, nil, true, nil)
+	assert.Contains(t, s, "flagged by the classifier: credential requests (label secrets_request, confidence 0.88)")
+}
+
+func TestHoldCardClassifierOutageSaysSo(t *testing.T) {
+	a := &inbound.Assessment{Disposition: inbound.AssessmentHeld, NotCleared: true,
+		Summary: "the classifier did not answer, so this message was not fully assessed"}
+	assert.Equal(t, "could not be assessed — the classifier did not answer, so this message was not fully assessed", holdAssessmentLine(a))
+}

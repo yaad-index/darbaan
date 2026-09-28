@@ -187,6 +187,21 @@ type Assessment struct {
 	// assessed with every factor switched off; otherwise the active factors. A
 	// consumer names what was NOT checked by comparing against the built-in set.
 	Active []string `json:"active"`
+	// Findings says, per flagged factor, which detector flagged it and, for a
+	// classifier, the configured label and its confidence (ADR 0038 section 4b).
+	// The held card shows a classifier-only factor from this, because the
+	// render-time evidence re-run (ADR 0036) re-runs only the patterns. Absent on
+	// records written before this field.
+	Findings []Finding `json:"findings,omitempty"`
+}
+
+// Finding is one detector's report of one factor, stored with the assessment. All
+// fields are system-defined or numeric: Label is a label the operator configured.
+type Finding struct {
+	Factor     string  `json:"factor"`
+	Detector   string  `json:"detector"`
+	Label      string  `json:"label,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
 }
 
 // Assessment disposition values. These mirror the scorer's disposition strings;

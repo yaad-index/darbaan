@@ -16,6 +16,7 @@ package screener
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -35,9 +36,10 @@ type Outcome struct {
 	// Result.Disposition and Result.NotCleared — never on the band/score of a
 	// not-cleared hold, which has no composed score.
 	Result riskscore.Result
-	// Summary is the assessor's sanitized, system-defined summary. It is set only
-	// when the content assessor actually ran (not on a short-circuit hold or a
-	// fail-safe not-cleared), and never contains message bytes.
+	// Summary is the assessor's sanitized, system-defined summary. It is set when
+	// the content assessor actually ran, and on the one fail-safe hold with a known
+	// cause, a classifier failure (ClassifierUnavailableSummary). It never contains
+	// message bytes.
 	Summary string
 	// Truncated reports that the assessed content was extracted on partial bytes
 	// (an extraction cap was hit), so the factors — and the composed score — reflect
@@ -50,7 +52,14 @@ type Outcome struct {
 	// Summary it is set only when the assessor ran; nil otherwise, meaning no
 	// content factor was checked on that path.
 	Active []riskscore.Factor
+	// Findings says which detector flagged each factor (ADR 0038 section 4b). Set
+	// only when the assessor ran.
+	Findings []assessor.Finding
 }
+
+// ClassifierUnavailableSummary is the summary of a hold caused by a classifier
+// failure. It is fixed text, so nothing from the failure reaches the operator.
+const ClassifierUnavailableSummary = "the classifier did not answer, so this message was not fully assessed"
 
 // Screener orchestrates one message's assessment.
 type Screener struct {
@@ -120,7 +129,14 @@ func (s *Screener) Screen(ctx context.Context, raw []byte, trust string, recipie
 	}
 	assessment, err := s.assessor.Assess(ctx, content)
 	if err != nil {
-		return Outcome{Result: riskscore.NotCleared(fmt.Sprintf("held: assessment did not complete: %v", err))}
+		o := Outcome{Result: riskscore.NotCleared(fmt.Sprintf("held: assessment did not complete: %v", err))}
+		if errors.Is(err, assessor.ErrClassifierUnavailable) {
+			// A fixed sentence, never the error: the operator should be able to tell a
+			// classifier outage, which holds every message (ADR 0038 section 4), from
+			// any other failure, and the error may wrap a remote reply.
+			o.Summary = ClassifierUnavailableSummary
+		}
+		return o
 	}
 	result := s.scorer.Compose(cheap, assessment.Factors)
 	if assessment.Truncated {
@@ -131,6 +147,7 @@ func (s *Screener) Screen(ctx context.Context, raw []byte, trust string, recipie
 		Summary:   assessment.Summary,
 		Truncated: assessment.Truncated,
 		Active:    assessment.Active,
+		Findings:  assessment.Findings,
 	}
 }
 

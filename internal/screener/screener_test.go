@@ -3,6 +3,7 @@ package screener
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/yaad-index/darbaan/internal/assessor"
@@ -253,4 +254,31 @@ func TestResolveRecipientUnknownHasNoAdjustment(t *testing.T) {
 	bcc := s.CheapScore(provenance.TrustTrusted, riskscore.RecipientBcc)
 	assert.Equal(t, 0, unknown.Recipient, "unknown position adds nothing")
 	assert.Equal(t, 10, bcc.Recipient, "Bcc still carries its +10")
+}
+
+// ADR 0038 section 4: a classifier failure holds like any assessor failure, and
+// its summary says so in fixed words, so an operator can tell an outage (which
+// holds every message) from anything else. Any other failure keeps no summary.
+func TestScreenClassifierFailureIsNotClearedAndSaysSo(t *testing.T) {
+	sc := mustScorer(t, nil)
+	cls := &spyDetector{err: fmt.Errorf("%w: endpoint answered 503", assessor.ErrClassifierUnavailable)}
+	out := mustScreener(t, sc, cls, WithExtractor(okContent)).
+		Screen(context.Background(), []byte("raw"), provenance.TrustTrusted, riskscore.RecipientTo)
+	assert.True(t, out.Result.NotCleared)
+	assert.Equal(t, ClassifierUnavailableSummary, out.Summary)
+	assert.NotContains(t, out.Summary, "503", "nothing from the failure reaches the summary")
+
+	other := &spyDetector{err: errors.New("detector down")}
+	out = mustScreener(t, sc, other, WithExtractor(okContent)).
+		Screen(context.Background(), []byte("raw"), provenance.TrustTrusted, riskscore.RecipientTo)
+	assert.True(t, out.Result.NotCleared)
+	assert.Empty(t, out.Summary)
+}
+
+func TestScreenCarriesFindings(t *testing.T) {
+	sc := mustScorer(t, nil)
+	det := &spyDetector{ret: []riskscore.Factor{riskscore.FactorSecretsRequest}}
+	out := mustScreener(t, sc, det, WithExtractor(okContent)).
+		Screen(context.Background(), []byte("raw"), provenance.TrustTrusted, riskscore.RecipientTo)
+	assert.Equal(t, []assessor.Finding{{Factor: riskscore.FactorSecretsRequest, Detector: assessor.DetectorPattern}}, out.Findings)
 }

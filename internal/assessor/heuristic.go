@@ -17,9 +17,9 @@ import (
 //
 // It is BEST-EFFORT / DEFENSE-IN-DEPTH, not the gate. Pattern matching will miss
 // novel phrasing (false negatives are expected); the human send-gate and the
-// sender-baseline term of the score remain the real backstops. A model-backed
-// detector is a fast-follow that drops in behind the same Detector contract,
-// behind the isolation this slice proves out.
+// sender-baseline term of the score remain the real backstops. A classifier
+// detector (ADR 0038) can run beside it behind the same Detector contract; Multi
+// composes the two.
 //
 // Not emitted in v1: hidden_directives. Distinguishing hidden text from visible
 // requires hidden-segment tagging in the extraction step (a tracked follow-up).

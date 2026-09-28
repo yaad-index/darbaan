@@ -28,6 +28,9 @@ type DetectorConfig struct {
 	Disabled bool
 	// Factors holds per-factor settings, keyed by the scorer's factor names.
 	Factors map[riskscore.Factor]FactorConfig
+	// Classifier is the optional classifier detector (`classifier:`, ADR 0038).
+	// Nil means none is configured.
+	Classifier *ClassifierConfig
 }
 
 // FactorConfig is one factor's entry under `detector:`.
@@ -73,6 +76,14 @@ func ParseDetectorConfig(section []byte) (DetectorConfig, error) {
 			cfg.Disabled = !on
 			continue
 		}
+		if key == "classifier" {
+			cc, err := decodeStrictAs[ClassifierConfig](val)
+			if err != nil {
+				return cfg, fmt.Errorf("assessor: detector.classifier: %w", err)
+			}
+			cfg.Classifier = &cc
+			continue
+		}
 		fc, err := decodeStrict(val)
 		if err != nil {
 			return cfg, fmt.Errorf("assessor: detector.%s: %w", key, err)
@@ -88,17 +99,21 @@ func ParseDetectorConfig(section []byte) (DetectorConfig, error) {
 // decodeStrict decodes one factor entry, rejecting unknown keys. yaml.Node.Decode
 // has no strict mode, so the node is re-encoded and read by a strict decoder.
 func decodeStrict(n *yaml.Node) (FactorConfig, error) {
-	var fc FactorConfig
+	return decodeStrictAs[FactorConfig](n)
+}
+
+func decodeStrictAs[T any](n *yaml.Node) (T, error) {
+	var v T
 	raw, err := yaml.Marshal(n)
 	if err != nil {
-		return fc, err
+		return v, err
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
-	if err := dec.Decode(&fc); err != nil {
-		return fc, err
+	if err := dec.Decode(&v); err != nil {
+		return v, err
 	}
-	return fc, nil
+	return v, nil
 }
 
 // BuiltinFactors returns the factors the built-in detector emits, sorted. A
