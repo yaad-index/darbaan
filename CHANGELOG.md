@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.21.0](https://github.com/yaad-index/darbaan/compare/v0.20.0...v0.21.0) (2026-09-28)
+
+
+### Features
+
+* **assessor:** classifier detector beside the patterns (ADR 0038) ([#349](https://github.com/yaad-index/darbaan/issues/349)) ([04609e0](https://github.com/yaad-index/darbaan/commit/04609e04f028184d4de05ef70f459dc1cc712823))
+* **assessor:** classify each body variant once and attachment text as its own source ([#352](https://github.com/yaad-index/darbaan/issues/352)) ([07aecfe](https://github.com/yaad-index/darbaan/commit/07aecfede99b239302bd5336f5bc5d893d2cd3f9))
+* **inbound:** store a bounce-shape flag so the lazy read face can see a non-daemon DSN ([#322](https://github.com/yaad-index/darbaan/issues/322)) ([a47c3bd](https://github.com/yaad-index/darbaan/commit/a47c3bd6f93b316cc14e377a4f7144d6369d8efe))
+* **inboxcfg:** gate trusted outcomes on the upstream's Authentication-Results ([#345](https://github.com/yaad-index/darbaan/issues/345)) ([33ab223](https://github.com/yaad-index/darbaan/commit/33ab2238a0dff9feffecf56f247db74b4ce70374))
+
 ## [0.20.0](https://github.com/yaad-index/darbaan/compare/v0.19.0...v0.20.0) (2026-09-26)
 
 
