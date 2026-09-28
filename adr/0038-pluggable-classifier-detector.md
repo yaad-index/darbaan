@@ -69,13 +69,30 @@ one.
 endpoint is possible in principle, but it would move untrusted and private content off the
 operator's machines, so it needs an explicit operator setting and is not the default.
 
-### 4. A detector failure is a flag, not a pass
+### 4. A classifier failure holds the message, exactly as an assessor failure does today
 
-If the classifier endpoint times out, errors, or returns something unparsable, the detector
-reports that and the assessment proceeds with the pattern detector's flags plus a
-**`classifier_unavailable`** factor carrying a configurable (default non-zero) weight. An
-outage therefore raises scrutiny instead of silently reverting to patterns-only, and an
-operator can see from the factor list that the classifier did not run.
+ADR 0032's fail-safe already says an assessment that errors or times out is **not cleared**,
+and the screener holds such a message today. A configured classifier is part of that
+assessment, so the same rule applies unchanged: if the classifier endpoint times out, errors,
+or returns something unparsable, **the assessment fails and the message is held
+(NotCleared)**. It is never replaced by a weighted factor, because any weight low enough to
+be tuned would let through mail that the current code holds.
+
+- The classifier gets **its own timeout, nested inside** the assessor's, so a slow classifier
+  fails the assessment explicitly rather than consuming the whole budget.
+- The assessment's list of **active factors includes the classifier's factors only when the
+  classifier actually ran**, so a result never implies coverage it did not have.
+- Trading holding for availability (patterns-only when the classifier is down) would change
+  ADR 0032's fail-safe, so it is out of scope here and would need an amendment to 0032.
+
+### 4b. Each flagged factor records which detector flagged it, and the classifier's evidence
+
+The assessment result records, **per flagged factor, the detector that flagged it**. For a
+classifier hit it also records the **label and confidence** that produced it. ADR 0036 builds
+held-message evidence by re-running the *patterns* at render time, which finds nothing for a
+factor only the classifier flagged; the recorded label and confidence are what the held card
+shows for those factors instead. They are metadata about the classification, never text from
+the message, so they carry no attacker content across the boundary.
 
 ### 5. Scope: open question for the maintainer
 
@@ -90,8 +107,8 @@ mechanism above does not change.
 
 - No classifier configured: identical to today.
 - Classifier configured and healthy: flags can only be added, never removed.
-- Classifier configured and failing: `classifier_unavailable` is flagged, so the score goes
-  up, not down.
+- Classifier configured and failing: the assessment fails and the message is held, the same
+  outcome ADR 0032 already gives an assessor failure.
 
 ## Consequences
 
@@ -101,8 +118,9 @@ mechanism above does not change.
   sized and monitored. Its latency adds to assessment time at ingest.
 - False positives can rise, because union can only add flags. The per-factor confidence
   threshold and the existing point-table are the tuning levers.
-- The assessment result now records which detector flagged each factor, so an operator can
-  tell a pattern hit from a classifier hit when tuning.
+- An operator can tell a pattern hit from a classifier hit when tuning (section 4b).
+- A classifier outage holds every incoming message it would have assessed, so the classifier
+  server needs the same monitoring as the gate itself.
 
 ## Boundaries
 
