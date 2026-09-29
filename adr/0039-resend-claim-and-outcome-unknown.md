@@ -63,13 +63,23 @@ two ways:
   write the body, close the data stream) instead of one combined call, so it can tell where a
   failure happened:
   - a failure **before** the body is closed is an ordinary transient failure, as today;
-  - the server **answering** with a permanent rejection at close stays a permanent failure;
+  - the server **answering** at close decides it: a permanent (5xx) rejection stays permanent, a
+    temporary (4xx) rejection is an ordinary transient failure (it answered and did not accept);
   - **no answer** at close (connection dropped, deadline, cancellation) returns a distinct
     outcome-unknown error, recorded as the outcome-unknown `SendErr` (reason: no final reply) with an
     audit event.
+  - **once close returns success, the attempt is sent**, whatever happens afterwards: a failure on
+    `QUIT` or on closing the connection must never turn a delivered message into a failure, because
+    that is exactly the duplicate this ADR prevents.
+  - This send-side path applies to **every** send, including the first send after approve, not only
+    re-sends.
+- **Outcome unknown never triggers the delivery-failure bounce** sent to the agent: the message may
+  have been delivered, so reporting it as failed would be false.
 
 The queue listing and the Telegram card show "outcome unknown" distinctly from an ordinary failure,
-so an operator never re-sends one without seeing that warning.
+and **re-sending an outcome-unknown message requires an explicit acknowledgement**: a field on the
+re-send request that the admin API rejects without, a two-step button on the card, and a flag on the
+CLI. Showing the warning is not enough, because the API and CLI can re-send by id without looking.
 
 ### 4. What this does not solve
 
@@ -87,4 +97,7 @@ interrupted re-send, and never present a possibly-delivered message as a plain f
 - Tests the implementation must include: two concurrent re-sends against a blocking sender, asserting
   exactly one delivery and one in-progress conflict; a record reopened with a leftover claim,
   asserting the outcome-unknown state and the audit event; a send cut off after the body, asserting
-  outcome-unknown rather than transient; a permanent rejection at close staying permanent.
+  outcome-unknown rather than transient; a permanent rejection at close staying permanent; a temporary rejection at close staying transient;
+  a success at close followed by a dropped connection recording the message as sent; an
+  outcome-unknown message producing no bounce; a re-send of an outcome-unknown message refused without
+  the acknowledgement.
