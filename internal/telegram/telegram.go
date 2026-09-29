@@ -372,6 +372,10 @@ const fullBodyFilename = "full-message-body.txt"
 // a failed upload degrades to the truncated inline preview, never blocks the
 // decision. Sent before the email's own attachments so it is the first document
 // under the decision message.
+//
+// The card has already been posted saying the full body is attached, so a failed
+// upload is followed by a notice threaded onto the same message (#320), which
+// withdraws that promise instead of leaving it standing.
 func (c *Client) sendFullBody(ctx context.Context, queueID string, anchorID int, body string) {
 	// Defence in depth, and unreachable by construction: the caller only calls this
 	// when formatNotification reported the body as offloadable, which is the same
@@ -393,7 +397,30 @@ func (c *Client) sendFullBody(ctx context.Context, queueID string, anchorID int,
 	}
 	if _, err := c.bot.SendDocument(ctx, params); err != nil {
 		c.logger.Warn("telegram upload full body failed", "id", queueID, "err", err)
+		c.sendFullBodyFailedNotice(ctx, queueID, anchorID)
 	}
+}
+
+// sendFullBodyFailedNotice tells the operator that the full body promised by the
+// card's marker could not be attached, so the inline preview is all they have.
+// Best-effort like the upload it follows: a failed notice is logged, never
+// retried, and never blocks the decision.
+func (c *Client) sendFullBodyFailedNotice(ctx context.Context, queueID string, anchorID int) {
+	params := &bot.SendMessageParams{
+		ChatID: c.operatorID,
+		Text:   fullBodyFailedNotice(queueID),
+	}
+	if anchorID != 0 {
+		params.ReplyParameters = &models.ReplyParameters{MessageID: anchorID}
+	}
+	if _, err := c.bot.SendMessage(ctx, params); err != nil {
+		c.logger.Warn("telegram full body failure notice failed", "id", queueID, "err", err)
+	}
+}
+
+// fullBodyFailedNotice is the text of that notice.
+func fullBodyFailedNotice(queueID string) string {
+	return fmt.Sprintf("msg %s - the full message body could not be attached; the preview above is truncated", queueID)
 }
 
 // fullBodyCaption is the trust anchor for the offloaded body (ADR 0025): it states
