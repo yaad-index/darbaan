@@ -51,3 +51,4 @@ incoming-message injection assessment.
 | [0036](0036-held-evidence-render-time.md) | Show the matched evidence on a held message, at render time only |
 | [0037](0037-amending-accepted-adrs.md) | Amending accepted ADRs: dated, append-only amendments; the Status line lists them |
 | [0038](0038-pluggable-classifier-detector.md) | A pluggable classifier detector beside the pattern detector |
+| [0039](0039-resend-claim-and-outcome-unknown.md) | A crash-safe re-send claim and an "outcome unknown" state |
