@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.21.4](https://github.com/yaad-index/darbaan/compare/v0.21.3...v0.21.4) (2026-09-29)
+
+
+### Bug Fixes
+
+* **backend:** bound an SMTP send with one deadline and honour cancellation ([#363](https://github.com/yaad-index/darbaan/issues/363)) ([411a44a](https://github.com/yaad-index/darbaan/commit/411a44a52c9bef377b1653b2649c57baa4dd5acb))
+* **telegram:** tell the operator when the full-body upload fails ([#361](https://github.com/yaad-index/darbaan/issues/361)) ([6172a77](https://github.com/yaad-index/darbaan/commit/6172a7740047fec20849b73bcaada69dd0c987dc))
+
 ## [0.21.3](https://github.com/yaad-index/darbaan/compare/v0.21.2...v0.21.3) (2026-09-28)
 
 
