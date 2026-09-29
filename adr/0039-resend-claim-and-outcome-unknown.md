@@ -16,7 +16,7 @@ Two further cases leave the operator unable to tell whether a message went out:
    next re-send happens blind.
 2. **A send cut off after the body was transmitted but before the server's final reply** (the
    connection drops or the overall send deadline, #362, fires at that point). The server may have
-   accepted and delivered the message, but today this is classed as a transient failure and is
+   accepted and delivered the message, but it is classed as a transient failure and is
    re-sendable without any warning.
 
 Three facts from the current code make a simple design sufficient:
@@ -62,7 +62,7 @@ two ways:
 - **During a send:** the sender runs the SMTP transaction step by step (mail, recipients, data,
   write the body, close the data stream) instead of one combined call, so it can tell where a
   failure happened:
-  - a failure **before** the body is closed is an ordinary transient failure, as today;
+  - a failure **before** the body is closed is an ordinary transient failure, as before this ADR;
   - the server **answering** at close decides it: a permanent (5xx) rejection stays permanent, a
     temporary (4xx) rejection is an ordinary transient failure (it answered and did not accept);
   - **no answer** at close (connection dropped, deadline, cancellation) returns a distinct
