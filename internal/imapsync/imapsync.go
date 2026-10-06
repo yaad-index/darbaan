@@ -14,6 +14,7 @@ import (
 
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/inbound"
+	"github.com/yaad-index/darbaan/internal/telemetry"
 )
 
 // DialFunc opens a logged-in client to the upstream IMAP server. It is injected
@@ -23,6 +24,8 @@ type DialFunc func() (*imapclient.Client, error)
 
 // Syncer pulls new messages from one upstream mailbox into the inbound store.
 type Syncer struct {
+	// metrics records each sync run (ADR 0040); nil records nothing.
+	metrics    *telemetry.Metrics
 	dial       DialFunc
 	mailbox    string
 	owner      string // the agent whose mailbox this is
@@ -41,6 +44,9 @@ type Syncer struct {
 	onRemovalFailed func()
 	onLabelsPending func(n int)
 }
+
+// SetMetrics records each sync run through m (ADR 0040).
+func (s *Syncer) SetMetrics(m *telemetry.Metrics) { s.metrics = m }
 
 // SetLabelHealth installs the label-write visibility hooks: onRemovalFailed runs
 // for every label write that fails while removing labels, which no later sync
@@ -139,6 +145,14 @@ func Dialer(addr, username, password string) DialFunc {
 // re-syncs from scratch. The upstream is read-only (no flag/delete write-back,
 // v1). Returns the count stored this run.
 func (s *Syncer) Sync(ctx context.Context) (int, error) {
+	start := time.Now()
+	n, err := s.sync(ctx)
+	s.metrics.SyncRun(ctx, time.Since(start), err)
+	return n, err
+}
+
+// sync is the run Sync measures.
+func (s *Syncer) sync(ctx context.Context) (int, error) {
 	c, err := s.dialContext(ctx)
 	if err != nil {
 		return 0, err

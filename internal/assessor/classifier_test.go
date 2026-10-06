@@ -528,3 +528,28 @@ func TestClassifierDoesNotSendURLsFromAttachments(t *testing.T) {
 	assert.NotContains(t, sent[0], "sig=")
 	assert.Contains(t, sent[0], "Terms.\nYou are receiving")
 }
+
+// WrapTransport sees every request the detector makes, and the wrapped
+// transport still reaches the classifier.
+func TestClassifierTransportCanBeWrapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, labelsReply(false, map[string]float64{"instruction_to_reader": 0, "secrets_request": 0}))
+	}))
+	defer srv.Close()
+	var seen int
+	wrap := func(base http.RoundTripper) http.RoundTripper {
+		return roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			seen++
+			return base.RoundTrip(r)
+		})
+	}
+	d, err := NewClassifierDetector(context.Background(), ClassifierConfig{Enabled: true, Endpoint: srv.URL, WrapTransport: wrap}, "")
+	require.NoError(t, err)
+	_, err = d.DetectFindings(context.Background(), body("x"))
+	require.NoError(t, err)
+	assert.Equal(t, 1, seen)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

@@ -102,6 +102,36 @@ docker compose up -d
 The agent faces bind to `127.0.0.1` by default (set `DARBAAN_FACE_BIND=0.0.0.0`
 to reach them from a trusted LAN); the admin API is always localhost-only.
 
+## Metrics
+
+Darbaan can send OpenTelemetry metrics over OTLP to a collector you run. It is off
+unless `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`) is
+set; `OTEL_EXPORTER_OTLP_PROTOCOL` is `http/protobuf` (the default) or `grpc`, and
+`OTEL_SDK_DISABLED=true` turns it off. The service is `darbaan` at its build
+version; add `OTEL_RESOURCE_ATTRIBUTES` (for example `service.instance.id=...`) to
+tell two deployments apart. Darbaan exports metrics only, never traces.
+
+No metric carries mail (ADR 0040): no address, name, subject, body, message or
+hold id, host or domain from mail, label, rule text or error message, and no
+inbox, agent or admin-client name. Every attribute takes values from a fixed set
+in the code.
+
+| Metric | Unit | Attributes | What it measures |
+|--------|------|------------|------------------|
+| `darbaan.outbound.messages` | `{message}` | `darbaan.outbound.event` (`queued`, `approved`, `rejected`, `sent`, `send_failed`), `error.type` on `send_failed` | Outbound messages by what happened to them. |
+| `darbaan.outbound.pending` | `{message}` | none | Outbound messages waiting for a decision, read at each collection. |
+| `darbaan.send.duration` | `s` | `darbaan.outcome` (`ok`, `failed`), `error.type` on a failure | How long releasing an approved message upstream took. |
+| `darbaan.inbound.hold_decisions` | `{message}` | `darbaan.hold.decision` (`exposed`, `dropped`) | Held inbound messages an operator exposed or dropped. |
+| `darbaan.sync.runs` | `{run}` | `darbaan.outcome` (`ok`, `failed`), `error.type` on a failure | Upstream IMAP sync runs, scheduled and on demand. |
+| `darbaan.sync.duration` | `s` | as `darbaan.sync.runs` | How long a sync run took. |
+| `http.server.request.duration` | `s` | `http.request.method`, `http.response.status_code`, `http.route` (the template, e.g. `/queue/{id}`), `url.scheme`, `error.type` on a 5xx | The admin API's requests. |
+| `http.client.request.duration` | `s` | `http.request.method`, `http.response.status_code` or `error.type`, `server.address`, `server.port` | Requests to the classifier endpoint. |
+
+`error.type` is one of `dial`, `tls`, `auth`, `timeout`, `canceled`, `protocol`,
+`4xx`, `5xx` (an SMTP reply, by class only) and `_OTHER`; for HTTP it is the
+status code of a 5xx. Durations use the bucket boundaries 0.01 s to 81.92 s,
+doubling.
+
 ## Design notes
 
 The architecture and the reasoning behind each decision are recorded as
