@@ -221,6 +221,22 @@ docker exec darbaan-darbaan-1 darbaan queue reject <id> --reason "not allowed"
 set, the `darbaan-telegram` container messages you on each held item with
 approve/reject buttons.
 
+**Re-sending a failed send.** An approved message whose upstream send failed
+stays `approved` with its error in the `SEND ERR` column; re-send it with:
+
+```sh
+docker exec darbaan-darbaan-1 darbaan queue resend <id>
+```
+
+Only one re-send of a message runs at a time; a second one is refused while
+the first is in flight. A message marked `approved (OUTCOME UNKNOWN)` may
+already have been delivered: the server got the whole message but gave no
+final reply, or Darbaan stopped in the middle of a re-send. No bounce is sent
+for it. Check with the recipient first; re-sending it needs
+`--acknowledge-outcome-unknown`. If Darbaan could not record a re-send's
+result, the message stays "re-sending" and further re-sends are refused until
+Darbaan restarts, which turns it into an unknown outcome.
+
 ## 9. End-to-end smoke test
 
 1. Submit a message through the SMTP face (any SMTP client, agent creds, STARTTLS).

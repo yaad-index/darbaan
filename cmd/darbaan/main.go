@@ -1879,11 +1879,24 @@ func (*QueueLsCmd) Run(cli *CLI) error {
 		// SendErr can carry the upstream server's response text, so sanitize it like
 		// the other operator-table fields (C22) before display (C21).
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
-			m.ID, m.Status, sanitizeField(m.Agent), sanitizeField(m.Inbox), sanitizeField(m.From),
+			m.ID, queueStatus(m), sanitizeField(m.Agent), sanitizeField(m.Inbox), sanitizeField(m.From),
 			truncate(sanitizeField(m.Subject), 40), len(m.Rcpt), m.Size, m.ReceivedAt.Format(time.RFC3339),
 			truncate(sanitizeField(m.SendErr), 40))
 	}
 	return w.Flush()
+}
+
+// queueStatus is a message's status as the queue table shows it: a re-send in
+// flight and a send whose outcome is unknown are told apart from an ordinary
+// approved message with a failed send (ADR 0039).
+func queueStatus(m sluice.Meta) string {
+	switch {
+	case m.ResendInProgress:
+		return string(m.Status) + " (re-sending)"
+	case m.OutcomeUnknown:
+		return string(m.Status) + " (OUTCOME UNKNOWN)"
+	}
+	return string(m.Status)
 }
 
 // truncate shortens s to at most n runes for table display.
@@ -1986,6 +1999,9 @@ func (c *QueueApproveCmd) Run(cli *CLI) error {
 // send failed (C4), recovering a message stranded in `approved` with a send error.
 type QueueResendCmd struct {
 	ID string `arg:"" help:"Message id."`
+	// AcknowledgeOutcomeUnknown is required to re-send a message whose last send
+	// may already have been delivered (ADR 0039).
+	AcknowledgeOutcomeUnknown bool `name:"acknowledge-outcome-unknown" help:"Re-send even though the last send's outcome is unknown and a copy may already have been delivered. Check with the recipient first."`
 }
 
 func (c *QueueResendCmd) Run(cli *CLI) error {
@@ -1993,8 +2009,11 @@ func (c *QueueResendCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
-	out, err := client.ReSend(context.Background(), c.ID)
-	if err != nil {
+	out, err := client.ReSend(context.Background(), c.ID, c.AcknowledgeOutcomeUnknown)
+	switch {
+	case errors.Is(err, admin.ErrAckRequired):
+		return fmt.Errorf("%w\nre-run with --acknowledge-outcome-unknown once you have checked it was not delivered", err)
+	case err != nil:
 		return err
 	}
 	return printOutcome(out)

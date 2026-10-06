@@ -214,8 +214,51 @@ func (c *Client) ApproveAs(ctx context.Context, id, inbox string) (Outcome, erro
 
 // ReSend retries the upstream delivery of an approved message whose previous send
 // failed (C4). Only valid for a message stranded in `approved` with a send error.
-func (c *Client) ReSend(ctx context.Context, id string) (Outcome, error) {
-	return c.action(ctx, "/queue/"+url.PathEscape(id)+"/resend", nil)
+// ReSend retries the upstream send of an approved message whose last send
+// failed. ackOutcomeUnknown acknowledges that a message whose last outcome is
+// unknown may already have been delivered (ADR 0039); without it the service
+// refuses such a re-send with ErrAckRequired. ErrResendInProgress means another
+// re-send of the message is running.
+func (c *Client) ReSend(ctx context.Context, id string, ackOutcomeUnknown bool) (Outcome, error) {
+	var body io.Reader
+	if ackOutcomeUnknown {
+		b, _ := json.Marshal(ResendRequest{AcknowledgeOutcomeUnknown: true})
+		body = bytes.NewReader(b)
+	}
+	resp, err := c.request(ctx, http.MethodPost, "/queue/"+url.PathEscape(id)+"/resend", body)
+	if err != nil {
+		return Outcome{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusConflict:
+		return Outcome{}, codedFrom(resp, map[string]error{codeResendInProgress: ErrResendInProgress, codeAckRequired: ErrAckRequired})
+	default:
+		return Outcome{}, errorFrom(resp)
+	}
+	var out Outcome
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return Outcome{}, err
+	}
+	return out, nil
+}
+
+// codedFrom returns the sentinel the response's code marks, and otherwise the
+// body's own error text, as notFoundFrom does for one code.
+func codedFrom(resp *http.Response, sentinels map[string]error) error {
+	var e struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&e)
+	if s, ok := sentinels[e.Code]; ok && e.Code != "" {
+		return s
+	}
+	if e.Error == "" {
+		e.Error = resp.Status
+	}
+	return fmt.Errorf("admin: %s", e.Error)
 }
 
 // Inboxes lists the configured inbox identities for the Change-sender picker

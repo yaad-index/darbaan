@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -258,15 +259,35 @@ func (s *Server) handleApproveAs(w http.ResponseWriter, r *http.Request) {
 // handleResend retries the upstream send of an approved-but-stranded message (C4).
 // ErrNotResendable is a 409 (the message is not in a re-sendable state), distinct
 // from the 404 for an unknown id.
+// ResendRequest is the optional body of a re-send. AcknowledgeOutcomeUnknown
+// confirms re-sending a message whose last send may already have been
+// delivered (ADR 0039); without it such a re-send is refused.
+type ResendRequest struct {
+	AcknowledgeOutcomeUnknown bool `json:"acknowledge_outcome_unknown"`
+}
+
 func (s *Server) handleResend(w http.ResponseWriter, r *http.Request) {
-	out, err := s.svc.ReSend(r.Context(), r.PathValue("id"))
-	// Both are 409: the message is either not in a re-sendable state, or its
-	// approved-as inbox no longer resolves (removed from config while stranded).
-	if errors.Is(err, ErrNotResendable) || errors.Is(err, ErrUnknownInbox) {
-		writeErr(w, http.StatusConflict, err)
-		return
+	var req ResendRequest
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("admin: bad re-send request: %w", err))
+			return
+		}
 	}
-	writeAction(w, out, err)
+	out, err := s.svc.ReSend(r.Context(), r.PathValue("id"), req.AcknowledgeOutcomeUnknown)
+	switch {
+	// All are 409. The message is not in a re-sendable state, or its approved-as
+	// inbox no longer resolves (removed from config while stranded), or another
+	// re-send holds it, or its last outcome is unknown and was not acknowledged.
+	case errors.Is(err, ErrResendInProgress):
+		writeErrWithCode(w, http.StatusConflict, err, codeResendInProgress)
+	case errors.Is(err, ErrAckRequired):
+		writeErrWithCode(w, http.StatusConflict, err, codeAckRequired)
+	case errors.Is(err, ErrNotResendable) || errors.Is(err, ErrUnknownInbox):
+		writeErr(w, http.StatusConflict, err)
+	default:
+		writeAction(w, out, err)
+	}
 }
 
 func (s *Server) handleInboxes(w http.ResponseWriter, _ *http.Request) {
