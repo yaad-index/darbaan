@@ -52,3 +52,4 @@ incoming-message injection assessment.
 | [0037](0037-amending-accepted-adrs.md) | Amending accepted ADRs: dated, append-only amendments; the Status line lists them |
 | [0038](0038-pluggable-classifier-detector.md) | A pluggable classifier detector beside the pattern detector |
 | [0039](0039-resend-claim-and-outcome-unknown.md) | A crash-safe re-send claim and an "outcome unknown" state |
+| [0040](0040-telemetry-exports-counts-never-mail.md) | Telemetry exports counts, never mail: metrics only, attributes from fixed sets in the code |
