@@ -132,6 +132,7 @@ func TestTheServerMetricCarriesTheRouteNotThePath(t *testing.T) {
 
 	got := collect()["http.server.request.duration"]
 	assert.Equal(t, "s", got.Unit)
+	assert.Equal(t, httpBuckets, got.Bounds, "the HTTP conventions' boundaries, as the README says")
 	routes := map[string]string{}
 	for _, p := range got.Points {
 		for k, v := range p.Attrs {
@@ -167,6 +168,7 @@ func TestTheClientMetricLeavesOutThePath(t *testing.T) {
 
 	got := collect()["http.client.request.duration"]
 	require.Len(t, got.Points, 2)
+	assert.Equal(t, httpBuckets, got.Bounds)
 	for _, p := range got.Points {
 		for k, v := range p.Attrs {
 			assert.False(t, strings.Contains(v, "SECRET") || strings.Contains(v, "in-a-"), "attribute %s = %q", k, v)
@@ -194,3 +196,7 @@ func TestNilMetricsRecordNothing(t *testing.T) {
 		assert.Equal(t, http.DefaultTransport, m.Transport(http.DefaultTransport))
 	})
 }
+
+// httpBuckets are the HTTP conventions' advised boundaries, which the httpconv
+// constructors apply.
+var httpBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10}
