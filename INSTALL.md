@@ -237,6 +237,10 @@ for it. Check with the recipient first; re-sending it needs
 result, the message stays "re-sending" and further re-sends are refused until
 Darbaan restarts, which turns it into an unknown outcome.
 
+On Telegram, the bot posts a card for each failed send with a **Re-send**
+button. An outcome-unknown card warns that the message may already have been
+delivered, and its Re-send asks you to confirm before it sends.
+
 ## 9. End-to-end smoke test
 
 1. Submit a message through the SMTP face (any SMTP client, agent creds, STARTTLS).

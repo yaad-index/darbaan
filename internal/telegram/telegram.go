@@ -77,6 +77,7 @@ type Client struct {
 	posted        map[string]bool     // sluice message ids already sent to the operator
 	postedHolds   map[string]bool     // inbound-hold ids already sent (separate id space)
 	postedLatches map[string]bool     // reconcile-latched inbox names already alerted (#149); cleared on un-suspend so a re-latch re-notifies
+	postedFailed  map[string]bool     // approved messages with a failed send already carded (ADR 0039); cleared on re-send or recovery
 	pending       map[int]rejectState // reject reason prompts awaiting the operator's reply, keyed by prompt message id
 }
 
@@ -132,6 +133,7 @@ func New(token string, operatorID int64, pollInterval time.Duration, adminClient
 		posted:        make(map[string]bool),
 		postedHolds:   make(map[string]bool),
 		postedLatches: make(map[string]bool),
+		postedFailed:  make(map[string]bool),
 		pending:       make(map[int]rejectState),
 	}
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbApprove, bot.MatchTypePrefix, c.handleApprove)
@@ -146,6 +148,11 @@ func New(token string, operatorID int64, pollInterval time.Duration, adminClient
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbApproveAs, bot.MatchTypePrefix, c.handleApproveAs)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbChangeBack, bot.MatchTypePrefix, c.handleChangeBack)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbChange, bot.MatchTypePrefix, c.handleChange)
+	// The failed-send card's re-send (ADR 0039). "resend:" prefixes neither
+	// "resend_ack:" nor "resend_back:".
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbResendAck, bot.MatchTypePrefix, c.handleResendAck)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbResendBack, bot.MatchTypePrefix, c.handleResendBack)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbResend, bot.MatchTypePrefix, c.handleResend)
 	// The reason force-reply arrives as a normal reply message, not a callback.
 	b.RegisterHandlerMatchFunc(isReply, c.handleReasonReply)
 	return c, nil
@@ -243,6 +250,7 @@ func (c *Client) poll(ctx context.Context) {
 		}
 		c.markPosted(m.ID)
 	}
+	c.pollFailed(ctx, metas)
 }
 
 func (c *Client) notify(ctx context.Context, m sluice.Meta) error {
