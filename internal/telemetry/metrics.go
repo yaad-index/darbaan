@@ -2,12 +2,15 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/semconv/v1.41.0/httpconv"
+
+	"github.com/yaad-index/darbaan/internal/sluice"
 )
 
 // scope is the instrumentation scope Darbaan's metrics are under.
@@ -25,6 +28,7 @@ const (
 	keyHoldDecision      = attribute.Key("darbaan.hold.decision")
 	keyOutcome           = attribute.Key("darbaan.outcome")
 	outcomeOK, outcomeKO = "ok", "failed"
+	outcomeUnknown       = "unknown"
 )
 
 // Event is what happened to an outbound message: darbaan.outbound.event.
@@ -40,6 +44,10 @@ const (
 	// Sent and SendFailed are attempts to release an approved message upstream.
 	Sent       Event = "sent"
 	SendFailed Event = "send_failed"
+	// OutcomeUnknown is an attempt after which the message may or may not have
+	// been delivered (ADR 0039): counted apart from send_failed, since it may
+	// not have failed.
+	OutcomeUnknown Event = "outcome_unknown"
 )
 
 // Decision is an operator's verdict on a held inbound message:
@@ -112,10 +120,16 @@ func (m *Metrics) Outbound(ctx context.Context, e Event) {
 	m.outbound.Add(ctx, 1, metric.WithAttributes(keyOutboundEvent.String(string(e))))
 }
 
-// Send records an attempt to release a message upstream: how long it took,
-// and Sent or SendFailed with the failure's kind.
+// Send records an attempt to release a message upstream, a first send or a
+// re-send: how long it took, and Sent, OutcomeUnknown, or SendFailed with the
+// failure's kind.
 func (m *Metrics) Send(ctx context.Context, took time.Duration, err error) {
 	if m == nil {
+		return
+	}
+	if errors.Is(err, sluice.ErrOutcomeUnknown) {
+		m.sendDuration.Record(ctx, took.Seconds(), metric.WithAttributes(keyOutcome.String(outcomeUnknown)))
+		m.outbound.Add(ctx, 1, metric.WithAttributes(keyOutboundEvent.String(string(OutcomeUnknown))))
 		return
 	}
 	if err != nil {

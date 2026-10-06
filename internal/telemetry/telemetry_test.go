@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/yaad-index/darbaan/internal/sluice"
 	"github.com/yaad-index/darbaan/internal/telemetry"
 	"github.com/yaad-index/darbaan/internal/telemetry/telemetrytest"
 )
@@ -56,6 +57,7 @@ func TestTheApprovalChainIsCounted(t *testing.T) {
 	m.Outbound(ctx, telemetry.Approved)
 	m.Send(ctx, 2*time.Second, nil)
 	m.Send(ctx, time.Second, fmt.Errorf("backend: send: %w", &smtp.SMTPError{Code: 550, Message: "words-in-a-reply"}))
+	m.Send(ctx, 3*time.Second, fmt.Errorf("backend: send: %w: %w", sluice.ErrOutcomeUnknown, net.ErrClosed))
 	m.HoldDecision(ctx, telemetry.Exposed)
 	m.HoldDecision(ctx, telemetry.Dropped)
 
@@ -66,6 +68,7 @@ func TestTheApprovalChainIsCounted(t *testing.T) {
 		{Attrs: map[string]string{"darbaan.outbound.event": "approved"}, Value: 1},
 		{Attrs: map[string]string{"darbaan.outbound.event": "sent"}, Value: 1},
 		{Attrs: map[string]string{"darbaan.outbound.event": "send_failed", "error.type": "5xx"}, Value: 1},
+		{Attrs: map[string]string{"darbaan.outbound.event": "outcome_unknown"}, Value: 1},
 	}, got["darbaan.outbound.messages"].Points)
 
 	send := got["darbaan.send.duration"]
@@ -74,6 +77,7 @@ func TestTheApprovalChainIsCounted(t *testing.T) {
 	assert.ElementsMatch(t, []telemetrytest.Point{
 		{Attrs: map[string]string{"darbaan.outcome": "ok"}, Value: 1, Sum: 2},
 		{Attrs: map[string]string{"darbaan.outcome": "failed", "error.type": "5xx"}, Value: 1, Sum: 1},
+		{Attrs: map[string]string{"darbaan.outcome": "unknown"}, Value: 1, Sum: 3},
 	}, send.Points)
 
 	assert.ElementsMatch(t, []telemetrytest.Point{

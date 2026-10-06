@@ -74,26 +74,28 @@ func (f fakeSender) Send(context.Context, sluice.Message) error { return f.err }
 func TestTheSenderRecordsEachAttempt(t *testing.T) {
 	m, collect := telemetrytest.New(t)
 	senders := meterSenders(map[string]backend.Sender{
-		"ok":   fakeSender{},
-		"5xx":  fakeSender{err: fmt.Errorf("backend: send: %w", &smtp.SMTPError{Code: 550})},
-		"stub": backend.StubSender{},
+		"ok":      fakeSender{},
+		"5xx":     fakeSender{err: fmt.Errorf("backend: send: %w", &smtp.SMTPError{Code: 550})},
+		"stub":    backend.StubSender{},
+		"unknown": fakeSender{err: fmt.Errorf("backend: send: %w: %w", sluice.ErrOutcomeUnknown, context.DeadlineExceeded)},
 	}, m)
 	ctx := context.Background()
 	assert.NoError(t, senders["ok"].Send(ctx, sluice.Message{}))
 	assert.Error(t, senders["5xx"].Send(ctx, sluice.Message{}))
 	assert.ErrorIs(t, senders["stub"].Send(ctx, sluice.Message{}), backend.ErrSendPending)
+	assert.ErrorIs(t, senders["unknown"].Send(ctx, sluice.Message{}), sluice.ErrOutcomeUnknown)
 
 	got := collect()
 	counts := map[string]int64{}
 	for _, p := range got["darbaan.outbound.messages"].Points {
 		counts[p.Attrs["darbaan.outbound.event"]+"|"+p.Attrs["error.type"]] = p.Value
 	}
-	assert.Equal(t, map[string]int64{"sent|": 1, "send_failed|5xx": 1}, counts)
+	assert.Equal(t, map[string]int64{"sent|": 1, "send_failed|5xx": 1, "outcome_unknown|": 1}, counts)
 	var attempts int64
 	for _, p := range got["darbaan.send.duration"].Points {
 		attempts += p.Value
 	}
-	assert.Equal(t, int64(2), attempts)
+	assert.Equal(t, int64(3), attempts)
 }
 
 // With metrics on, the classifier's requests are measured.
