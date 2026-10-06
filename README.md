@@ -129,8 +129,9 @@ in the code.
 
 `error.type` is one of `dial`, `tls`, `auth`, `timeout`, `canceled`, `protocol`,
 `4xx`, `5xx` (an SMTP reply, by class only) and `_OTHER`; for HTTP it is the
-status code of a 5xx. Durations use the bucket boundaries 0.01 s to 81.92 s,
-doubling.
+status code of a 5xx. The send and sync durations use the bucket boundaries
+0.01 s to 81.92 s, doubling; the two HTTP durations use the HTTP conventions'
+own, 0.005 s to 10 s.
 
 ## Design notes
 

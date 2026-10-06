@@ -60,9 +60,11 @@ const (
 	Dropped Decision = "dropped"
 )
 
-// DurationBuckets are the bucket boundaries of every duration histogram, in
-// seconds: the semantic conventions' advised set, 10ms to about 82s. The SDK's
-// defaults (0, 5, 10, 25 ...) are sized for milliseconds.
+// DurationBuckets are the bucket boundaries of Darbaan's own duration
+// histograms (send and sync), in seconds: the GenAI conventions' advised set,
+// 10ms to about 82s. The SDK's defaults (0, 5, 10, 25 ...) are sized for
+// milliseconds. The two HTTP histograms keep the HTTP conventions' own
+// advised set (0.005 to 10 s), which their constructors always apply.
 var DurationBuckets = []float64{0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92}
 
 // Metrics records Darbaan's metrics. A nil *Metrics records nothing.
@@ -103,10 +105,12 @@ func New(mp metric.MeterProvider) (*Metrics, error) {
 		metric.WithDescription("How long an upstream IMAP sync run took."), buckets); err != nil {
 		return nil, err
 	}
-	if out.httpServer, err = httpconv.NewServerRequestDuration(m, buckets); err != nil {
+	// The httpconv constructors append the HTTP conventions' boundaries after
+	// any option given, so those are the ones recorded.
+	if out.httpServer, err = httpconv.NewServerRequestDuration(m); err != nil {
 		return nil, err
 	}
-	if out.httpClient, err = httpconv.NewClientRequestDuration(m, buckets); err != nil {
+	if out.httpClient, err = httpconv.NewClientRequestDuration(m); err != nil {
 		return nil, err
 	}
 	return out, nil
