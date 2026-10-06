@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.22.0](https://github.com/yaad-index/darbaan/compare/v0.21.4...v0.22.0) (2026-10-06)
+
+
+### Features
+
+* count an unknown send outcome on its own ([#371](https://github.com/yaad-index/darbaan/issues/371)) ([4fdcc0a](https://github.com/yaad-index/darbaan/commit/4fdcc0ad25434dbee4af45a9e9e30aaa9c1b82be))
+* crash-safe re-send claim and an outcome-unknown state (ADR 0039) ([#368](https://github.com/yaad-index/darbaan/issues/368)) ([e92d215](https://github.com/yaad-index/darbaan/commit/e92d215cb70a55bd4ddb0ef49881a8ff1228a4ea))
+* OpenTelemetry metrics per ADR 0040 ([#367](https://github.com/yaad-index/darbaan/issues/367)) ([164e984](https://github.com/yaad-index/darbaan/commit/164e9848d25f80329b81eeae8707db6c47b95964))
+* Telegram card for a failed or outcome-unknown send (ADR 0039) ([#370](https://github.com/yaad-index/darbaan/issues/370)) ([d8e6447](https://github.com/yaad-index/darbaan/commit/d8e64473cf4fd16624befe46aca489c9d707bbc7))
+
 ## [0.21.4](https://github.com/yaad-index/darbaan/compare/v0.21.3...v0.21.4) (2026-09-29)
 
 
