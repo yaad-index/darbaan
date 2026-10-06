@@ -53,7 +53,12 @@ import (
 	"github.com/yaad-index/darbaan/internal/signer"
 	"github.com/yaad-index/darbaan/internal/sluice"
 	"github.com/yaad-index/darbaan/internal/telegram"
+	"github.com/yaad-index/darbaan/internal/telemetry"
 )
+
+// telemetryFlushTimeout bounds how long shutdown waits to send the metrics
+// still buffered.
+const telemetryFlushTimeout = 5 * time.Second
 
 // version is the build version, overridden at link time via -ldflags.
 var version = "dev"
@@ -61,6 +66,10 @@ var version = "dev"
 // CLI is the Darbaan command surface and its configuration. Every config value
 // resolves through file < env < flag (see config.go).
 type CLI struct {
+	// metrics is set by serve when telemetry is exported (ADR 0040); nil
+	// records nothing. Not a flag.
+	metrics *telemetry.Metrics
+
 	Config string `help:"Path to a YAML config file (also searched at /etc/darbaan/config.yaml)." placeholder:"PATH" type:"path"`
 
 	StoreType string `name:"store-type" default:"bbolt" help:"Message store backend." enum:"bbolt"`
@@ -643,6 +652,7 @@ func (cli *CLI) newSyncers(inboxes []inboxcfg.Inbox, store inbound.InboundStore,
 		// Gmail label write-through (ADR 0020 20c): capability-gated, harmless on a
 		// non-Gmail backend (reports not-supported → WriteKeywords uses plain keywords).
 		syn.SetLabelStore(imapsync.RawGmailLabelStore(in.Backend.IMAPHost, in.Backend.IMAPUsername, pass, mailbox))
+		syn.SetMetrics(cli.metrics)
 		syncers[in.Name] = syn
 	}
 	return syncers, stop, nil
@@ -768,7 +778,11 @@ func (cli *CLI) composeDetectors(pattern *assessor.HeuristicDetector, cc *assess
 	if !cc.Enabled {
 		return pattern, nil
 	}
-	cls, err := assessor.NewClassifierDetector(context.Background(), *cc, os.Getenv(assessor.ClassifierTokenEnv))
+	ccfg := *cc
+	if cli.metrics != nil {
+		ccfg.WrapTransport = cli.metrics.Transport
+	}
+	cls, err := assessor.NewClassifierDetector(context.Background(), ccfg, os.Getenv(assessor.ClassifierTokenEnv))
 	if err != nil {
 		return nil, fmt.Errorf("assessment detector config: %w", err)
 	}
@@ -1497,6 +1511,27 @@ func (*ServeCmd) Run(cli *CLI) error {
 		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 	}
 
+	// Telemetry (ADR 0040): metrics only, sent only when the environment names
+	// an OTLP endpoint. Set up first, so everything built below records, and
+	// flushed last.
+	exp, err := telemetry.Setup(context.Background(), version)
+	if err != nil {
+		return err
+	}
+	if exp != nil {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), telemetryFlushTimeout)
+			defer cancel()
+			if err := exp.Shutdown(ctx); err != nil {
+				slog.Warn("telemetry flush at shutdown failed", "err", err)
+			}
+		}()
+		if cli.metrics, err = telemetry.New(exp.MeterProvider); err != nil {
+			return err
+		}
+		slog.Info("telemetry export on", "signals", "metrics")
+	}
+
 	// The audit log is opened once and shared: the message store writes verdict
 	// entries to it, and the reconcile pass writes a retract entry per retraction
 	// (ADR 0026). Closed last (after the stores) so a final commit can still audit.
@@ -1511,6 +1546,12 @@ func (*ServeCmd) Run(cli *CLI) error {
 		return err
 	}
 	defer closeStore()
+	if cli.metrics != nil {
+		q = meteredStore{MessageStore: q, metrics: cli.metrics}
+		if err := cli.metrics.ObservePending(pendingCount(q)); err != nil {
+			return err
+		}
+	}
 
 	// Resolve the configured inboxes (ADR 0023) up front: the inbound store needs
 	// them to stamp X-Darbaan-Trust by authenticated inbox (ADR 0030), and the
@@ -1536,6 +1577,9 @@ func (*ServeCmd) Run(cli *CLI) error {
 	if err != nil {
 		return err
 	}
+	if cli.metrics != nil {
+		sender = meteredSender{Sender: sender, metrics: cli.metrics}
+	}
 	// serve handles reject and approve-failure bounces, which must be signed
 	// (ADR 0007) — so the running daemon requires the DKIM signer (fail closed).
 	sgn, err := cli.openSigner()
@@ -1549,6 +1593,7 @@ func (*ServeCmd) Run(cli *CLI) error {
 	// Inbound hold verdicts (expose/drop) audit to the same shared log the message
 	// store writes outbound verdicts to (ADR 0011, C29).
 	svc.SetAuditLog(al)
+	svc.SetMetrics(cli.metrics)
 	if adminAddrIsExposed(cli.AdminAddr) {
 		slog.Warn("admin-addr binds the admin API beyond loopback (a routable address, or every interface via 0.0.0.0/:: or a bare :port). It is token-gated but is intended to be reachable only from loopback or a container-internal network (ADR 0029). If this is a container that publishes the port as 127.0.0.1:PORT on the host, this is expected — confirm the host narrows it; otherwise bind a loopback address.",
 			"admin_addr", cli.AdminAddr)
@@ -1556,6 +1601,9 @@ func (*ServeCmd) Run(cli *CLI) error {
 	adminSrv, err := admin.NewServer(cli.AdminAddr, os.Getenv("DARBAAN_ADMIN_TOKEN"), svc)
 	if err != nil {
 		return err
+	}
+	if cli.metrics != nil {
+		adminSrv.Instrument(cli.metrics)
 	}
 
 	// Per-client scoped admin tokens (ADR 0029): register each configured
@@ -1615,6 +1663,9 @@ func (*ServeCmd) Run(cli *CLI) error {
 	senders, err := cli.newSenders(inboxes)
 	if err != nil {
 		return err
+	}
+	if cli.metrics != nil {
+		senders = meterSenders(senders, cli.metrics)
 	}
 	svc.SetSenders(senders)
 

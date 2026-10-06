@@ -76,6 +76,11 @@ type ClassifierConfig struct {
 	// at or above which it does. A label the classifier returns that is not listed
 	// here flags nothing. Empty selects DefaultClassifierLabels.
 	Labels map[string]LabelConfig `yaml:"labels"`
+
+	// WrapTransport, when set, wraps the transport the detector builds, as for
+	// measuring its requests (ADR 0040). The wrapped transport still dials
+	// through the address check. Not configuration: set in code only.
+	WrapTransport func(http.RoundTripper) http.RoundTripper `yaml:"-"`
 }
 
 // LabelConfig maps one classifier label to the factor it flags in the body and,
@@ -149,8 +154,12 @@ func NewClassifierDetector(ctx context.Context, cfg ClassifierConfig, token stri
 		MaxIdleConns:           4,
 		IdleConnTimeout:        90 * time.Second,
 	}
+	var rt http.RoundTripper = transport
+	if cfg.WrapTransport != nil {
+		rt = cfg.WrapTransport(transport)
+	}
 	client := &http.Client{
-		Transport: transport,
+		Transport: rt,
 		// A redirect would send the text to a second address the startup check
 		// never saw, so none is followed.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },

@@ -29,6 +29,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/provenance"
 	"github.com/yaad-index/darbaan/internal/riskscore"
 	"github.com/yaad-index/darbaan/internal/sluice"
+	"github.com/yaad-index/darbaan/internal/telemetry"
 )
 
 // Signer signs a bounce before it is stored. *signer.Signer implements it.
@@ -38,6 +39,8 @@ type Signer interface {
 
 // Service runs the approval orchestration against the stores serve owns.
 type Service struct {
+	// metrics counts hold decisions (ADR 0040); nil counts nothing.
+	metrics    *telemetry.Metrics
 	store      sluice.MessageStore
 	inbox      inbound.InboundStore
 	senders    map[string]backend.Sender // per-inbox upstream sender (ADR 0023), keyed by inbox name
@@ -200,6 +203,9 @@ func NewService(store sluice.MessageStore, inbox inbound.InboundStore, sender ba
 // message is delivered via the sender of the inbox it was submitted as. serve
 // builds one per configured inbox; tests/callers that only need one inbox keep
 // using NewService's single sender.
+// SetMetrics counts the operator's hold decisions through m (ADR 0040).
+func (s *Service) SetMetrics(m *telemetry.Metrics) { s.metrics = m }
+
 func (s *Service) SetSenders(senders map[string]backend.Sender) {
 	if len(senders) > 0 {
 		s.senders = senders
@@ -469,6 +475,11 @@ func (s *Service) setHold(ctx context.Context, id, decision string) (inbound.Mes
 		m, err := s.inbox.SetHoldDecision(s.inboxOwner(inbox), inbox, id, decision)
 		if err == nil {
 			s.auditHold(ctx, m, decision)
+			if decision == inbound.HoldApproved {
+				s.metrics.HoldDecision(ctx, telemetry.Exposed)
+			} else {
+				s.metrics.HoldDecision(ctx, telemetry.Dropped)
+			}
 			return m, nil
 		}
 		if !errors.Is(err, inbound.ErrNotFound) {

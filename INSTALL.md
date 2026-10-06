@@ -170,6 +170,20 @@ If you do not want phone approval, leave these two values unset and remove the
 `darbaan-telegram` service from `docker-compose.yml`; the CLI (section 8) approves
 mail on its own.
 
+### Metrics (default: off)
+
+To send metrics to an OpenTelemetry collector, set its OTLP endpoint in the
+`darbaan` service's `environment:`:
+
+```yaml
+OTEL_EXPORTER_OTLP_ENDPOINT: "http://<collector-host>:4318"
+# optional: tell deployments apart
+OTEL_RESOURCE_ATTRIBUTES: "service.instance.id=main"
+```
+
+Darbaan exports metrics only, and none of them carries mail. The README's
+"Metrics" section lists them.
+
 ## 6. Start it
 
 ```sh

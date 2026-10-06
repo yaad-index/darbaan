@@ -16,6 +16,7 @@ import (
 	"github.com/yaad-index/darbaan/internal/audit"
 	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/sluice"
+	"github.com/yaad-index/darbaan/internal/telemetry"
 )
 
 // credential is one admin-API bearer credential (ADR 0029): the acting client's
@@ -112,6 +113,13 @@ func NewServer(addr, token string, svc *Service) (*Server, error) {
 
 	s.http = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
+}
+
+// Instrument records every request the API serves through m (ADR 0040): the
+// method, status code and route template, never the path. Call it before
+// ListenAndServe.
+func (s *Server) Instrument(m *telemetry.Metrics) {
+	s.http.Handler = m.Handler(s.http.Handler)
 }
 
 // SetScopedClients registers the configured per-client scoped credentials
