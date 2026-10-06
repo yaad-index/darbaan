@@ -931,9 +931,6 @@ func (s *Service) ReSend(ctx context.Context, id string, ackOutcomeUnknown bool)
 	if m.Status != sluice.StatusApproved || m.SendErr == "" {
 		return Outcome{}, fmt.Errorf("%w: message %s is %s", ErrNotResendable, id, m.Status)
 	}
-	if sluice.IsOutcomeUnknown(m.SendErr) && !ackOutcomeUnknown {
-		return Outcome{}, fmt.Errorf("%w: message %s", ErrAckRequired, id)
-	}
 
 	sendInbox, sendMsg := m.Inbox, m
 	var identity string
@@ -952,10 +949,12 @@ func (s *Service) ReSend(ctx context.Context, id string, ackOutcomeUnknown bool)
 		sendMsg.From = identity      // envelope MAIL FROM
 		sendMsg.Released = rewritten // send-time rewrite only; the stored record is untouched
 	}
-	if _, err := s.store.ClaimResend(m.ID, actorFrom(ctx)); err != nil {
+	if _, err := s.store.ClaimResend(m.ID, actorFrom(ctx), ackOutcomeUnknown); err != nil {
 		switch {
 		case errors.Is(err, sluice.ErrResendInProgress):
 			return Outcome{}, fmt.Errorf("%w: message %s", ErrResendInProgress, id)
+		case errors.Is(err, sluice.ErrAckRequired):
+			return Outcome{}, fmt.Errorf("%w: message %s", ErrAckRequired, id)
 		case errors.Is(err, sluice.ErrNotResendable):
 			return Outcome{}, fmt.Errorf("%w: message %s", ErrNotResendable, id)
 		}

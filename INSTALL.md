@@ -233,7 +233,9 @@ the first is in flight. A message marked `approved (OUTCOME UNKNOWN)` may
 already have been delivered: the server got the whole message but gave no
 final reply, or Darbaan stopped in the middle of a re-send. No bounce is sent
 for it. Check with the recipient first; re-sending it needs
-`--acknowledge-outcome-unknown`.
+`--acknowledge-outcome-unknown`. If Darbaan could not record a re-send's
+result, the message stays "re-sending" and further re-sends are refused until
+Darbaan restarts, which turns it into an unknown outcome.
 
 ## 9. End-to-end smoke test
 

@@ -355,7 +355,7 @@ func (s *bboltStore) RecordSendAttempt(id string, sendErr error, resend bool, ac
 	return out, nil
 }
 
-func (s *bboltStore) ClaimResend(id, actor string) (Message, error) {
+func (s *bboltStore) ClaimResend(id, actor string, ackOutcomeUnknown bool) (Message, error) {
 	var out Message
 	err := s.db.Update(func(tx *bbolt.Tx) error {
 		rec, key, err := loadStored(tx, id)
@@ -367,6 +367,8 @@ func (s *bboltStore) ClaimResend(id, actor string) (Message, error) {
 			return fmt.Errorf("%w: message %s is %s", ErrNotResendable, id, rec.Status)
 		case rec.ResendClaim != nil:
 			return ErrResendInProgress
+		case IsOutcomeUnknown(rec.SendErr) && !ackOutcomeUnknown:
+			return ErrAckRequired
 		}
 		// SendErr stays: the message is visibly failed while the attempt runs.
 		rec.ResendClaim = &ResendClaim{Since: time.Now().UTC(), Actor: actor}

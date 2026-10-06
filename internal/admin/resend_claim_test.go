@@ -183,3 +183,26 @@ func TestTheAPICarriesTheResendConflicts(t *testing.T) {
 	close(release)
 	assert.NoError(t, <-done, "the acknowledged re-send ran (and failed transiently)")
 }
+
+// The acknowledgement is checked in the claim's own transaction, so a re-send
+// that recorded an unknown outcome just before is seen: the next re-send
+// without the acknowledgement is refused, not sent.
+func TestAnOutcomeRecordedByTheLastResendNeedsTheAcknowledgement(t *testing.T) {
+	var delivered atomic.Int32
+	attempt := 0
+	svc, _, _, id := stranded(t, errors.New("dial tcp: connection refused"), func(sluice.Message) error {
+		attempt++
+		if attempt == 1 {
+			return unknownOutcome()
+		}
+		delivered.Add(1)
+		return nil
+	})
+	out, err := svc.ReSend(context.Background(), id, false)
+	require.NoError(t, err)
+	assert.Contains(t, out.Warn, "outcome unknown")
+
+	_, err = svc.ReSend(context.Background(), id, false)
+	assert.ErrorIs(t, err, admin.ErrAckRequired)
+	assert.Zero(t, delivered.Load())
+}

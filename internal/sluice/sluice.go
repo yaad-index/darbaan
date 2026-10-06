@@ -41,6 +41,11 @@ var ErrNotResendable = errors.New("sluice: message is not re-sendable")
 // message already holds its claim (ADR 0039).
 var ErrResendInProgress = errors.New("sluice: a re-send of this message is already in progress")
 
+// ErrAckRequired is returned by ClaimResend for a message whose last outcome is
+// unknown when the claim did not acknowledge that a copy may already have been
+// delivered (ADR 0039 section 3).
+var ErrAckRequired = errors.New("sluice: the last send's outcome is unknown; re-sending needs an acknowledgement")
+
 // Status is the disposition of a queued message. New messages are Pending; the
 // approval pipeline transitions them to Approved or Rejected. Default-deny means
 // nothing leaves on Approved either until a real Sender is wired (ADR 0003) —
@@ -192,9 +197,12 @@ type MessageStore interface {
 	RecordSendAttempt(id string, sendErr error, resend bool, actor, asIdentity string) (Message, error)
 	// ClaimResend claims an approved message with a recorded send failure for a
 	// re-send, in one transaction (ADR 0039): ErrNotResendable if it is not one,
-	// ErrResendInProgress if another re-send holds the claim. RecordSendAttempt
-	// releases the claim with the outcome.
-	ClaimResend(id, actor string) (Message, error)
+	// ErrResendInProgress if another re-send holds the claim, and ErrAckRequired
+	// if its last outcome is unknown and ackOutcomeUnknown is false. The check
+	// reads the record in the same transaction that sets the claim, so an outcome
+	// recorded by a re-send that just finished is seen. RecordSendAttempt releases
+	// the claim with the outcome.
+	ClaimResend(id, actor string, ackOutcomeUnknown bool) (Message, error)
 	// Close releases the underlying resources.
 	Close() error
 }

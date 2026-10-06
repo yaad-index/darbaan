@@ -31,10 +31,10 @@ func TestAResendClaimIsExclusiveAndReleasedWithTheOutcome(t *testing.T) {
 	q, _ := newStore(t)
 	id := failedSend(t, q)
 
-	m, err := q.ClaimResend(id, "op")
+	m, err := q.ClaimResend(id, "op", false)
 	require.NoError(t, err)
 	assert.Equal(t, "451 try later", m.SendErr, "the failure stays visible while the attempt runs")
-	_, err = q.ClaimResend(id, "op")
+	_, err = q.ClaimResend(id, "op", false)
 	assert.ErrorIs(t, err, sluice.ErrResendInProgress)
 	metas, err := q.List()
 	require.NoError(t, err)
@@ -45,22 +45,22 @@ func TestAResendClaimIsExclusiveAndReleasedWithTheOutcome(t *testing.T) {
 	got, err := q.Get(id)
 	require.NoError(t, err)
 	assert.Nil(t, got.ResendClaim)
-	_, err = q.ClaimResend(id, "op")
+	_, err = q.ClaimResend(id, "op", false)
 	assert.NoError(t, err, "a released claim can be taken again")
 
 	_, err = q.RecordSendAttempt(id, nil, true, "op", "")
 	require.NoError(t, err)
-	_, err = q.ClaimResend(id, "op")
+	_, err = q.ClaimResend(id, "op", false)
 	assert.ErrorIs(t, err, sluice.ErrNotResendable, "a sent message is not re-sendable")
 
 	pending, err := q.Enqueue(sluice.Submission{Agent: "agent", Raw: []byte("x")})
 	require.NoError(t, err)
-	_, err = q.ClaimResend(pending.ID, "op")
+	_, err = q.ClaimResend(pending.ID, "op", false)
 	assert.ErrorIs(t, err, sluice.ErrNotResendable, "a pending message is not re-sendable")
 
 	_, err = q.Approve(pending.ID, "manual", nil, "", "")
 	require.NoError(t, err)
-	_, err = q.ClaimResend(pending.ID, "op")
+	_, err = q.ClaimResend(pending.ID, "op", false)
 	assert.ErrorIs(t, err, sluice.ErrNotResendable, "an approved message with no recorded failure is not re-sendable")
 }
 
@@ -103,7 +103,7 @@ func TestALeftoverClaimBecomesAnUnknownOutcomeAtOpen(t *testing.T) {
 	require.NoError(t, err)
 	id := failedSend(t, q)
 	other := failedSend(t, q)
-	_, err = q.ClaimResend(id, "op-client")
+	_, err = q.ClaimResend(id, "op-client", false)
 	require.NoError(t, err)
 	require.NoError(t, q.Close()) // the process stops mid-send
 
@@ -125,6 +125,8 @@ func TestALeftoverClaimBecomesAnUnknownOutcomeAtOpen(t *testing.T) {
 	assert.Equal(t, id, last.MessageID)
 	assert.Equal(t, "op-client", last.Actor)
 
-	_, err = q.ClaimResend(id, "op")
-	assert.NoError(t, err, "it stays re-sendable")
+	_, err = q.ClaimResend(id, "op", false)
+	assert.ErrorIs(t, err, sluice.ErrAckRequired, "an unknown outcome is not re-sent without the acknowledgement")
+	_, err = q.ClaimResend(id, "op", true)
+	assert.NoError(t, err, "it stays re-sendable with it")
 }
