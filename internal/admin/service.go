@@ -758,6 +758,10 @@ func (s *Service) approve(ctx context.Context, id, asInbox string) (Outcome, err
 		out.Detail = "approved; no real Sender configured — nothing left Darbaan"
 	case errors.Is(sendErr, errNoSender):
 		out.Warn = "inbox has no configured sender (removed from config?); not sent — stays approved"
+	case errors.Is(sendErr, sluice.ErrOutcomeUnknown):
+		// May have been delivered: no bounce, which would report it failed
+		// (ADR 0039 section 3).
+		out.Warn = outcomeUnknownWarn
 	case backend.IsPermanent(sendErr):
 		// Permanent failure: bounce the agent with a generic reason (never the
 		// upstream body). The verdict still committed.
@@ -877,6 +881,26 @@ func bypassDetail(matched []string) string {
 // message carrying a recorded send error — the only state a manual re-send acts on.
 var ErrNotResendable = errors.New("admin: message is not awaiting re-send (needs an approved message with a recorded send error)")
 
+// ErrResendInProgress is returned by ReSend when another re-send of the
+// message is already running (ADR 0039).
+var ErrResendInProgress = errors.New("admin: a re-send of this message is already in progress")
+
+// ErrAckRequired is returned by ReSend for a message whose last outcome is
+// unknown when the request did not acknowledge that a copy may already have
+// been delivered (ADR 0039 section 3).
+var ErrAckRequired = errors.New("admin: the last send's outcome is unknown and a copy may already have been delivered; re-send only with an explicit acknowledgement")
+
+// codeResendInProgress and codeAckRequired are the machine-readable markers of
+// the two re-send conflicts, so a client maps them to ErrResendInProgress and
+// ErrAckRequired only on this service's word, as codeNotFound does.
+const (
+	codeResendInProgress = "resend_in_progress"
+	codeAckRequired      = "ack_required"
+)
+
+// outcomeUnknownWarn is the warning on a send that may have been delivered.
+const outcomeUnknownWarn = "outcome unknown: the server got the whole message but gave no final reply, so it may have been delivered; no bounce sent; re-send only after checking, with an explicit acknowledgement"
+
 // ReSend retries the upstream delivery of an approved message whose previous send
 // failed (C4). It is the only recovery for a message stranded in `approved` with a
 // SendErr: decide() refuses non-pending messages, so a plain re-approve returns
@@ -891,19 +915,24 @@ var ErrNotResendable = errors.New("admin: message is not awaiting re-send (needs
 // message was stranded), the re-send is refused fail-closed rather than delivered
 // under the wrong identity.
 //
-// NOTE: the approved+SendErr check and the send are not atomic, so two concurrent
-// re-sends of the same id can both deliver (duplicate mail). The RecordSendAttempt
-// guard keeps the loser from corrupting the record (a failure can't stamp a sent
-// message), but full de-duplication needs an in-flight marker — tracked as a #232
-// follow-up; clearing SendErr before the attempt is NOT an option (it reintroduces
-// the stranded-invisible state).
-func (s *Service) ReSend(ctx context.Context, id string) (Outcome, error) {
+// The re-send claims the message first, in one store transaction (ADR 0039), so
+// two concurrent re-sends of one id cannot both deliver: the second gets
+// ErrResendInProgress. The claim is released in the transaction that records
+// the attempt. Checks that read only configuration run before the claim, so no
+// early return leaves one behind.
+//
+// A message whose last outcome is unknown may already have been delivered; it
+// is re-sent only with ackOutcomeUnknown, else ErrAckRequired.
+func (s *Service) ReSend(ctx context.Context, id string, ackOutcomeUnknown bool) (Outcome, error) {
 	m, err := s.store.Get(id)
 	if err != nil {
 		return Outcome{}, err
 	}
 	if m.Status != sluice.StatusApproved || m.SendErr == "" {
 		return Outcome{}, fmt.Errorf("%w: message %s is %s", ErrNotResendable, id, m.Status)
+	}
+	if sluice.IsOutcomeUnknown(m.SendErr) && !ackOutcomeUnknown {
+		return Outcome{}, fmt.Errorf("%w: message %s", ErrAckRequired, id)
 	}
 
 	sendInbox, sendMsg := m.Inbox, m
@@ -923,7 +952,16 @@ func (s *Service) ReSend(ctx context.Context, id string) (Outcome, error) {
 		sendMsg.From = identity      // envelope MAIL FROM
 		sendMsg.Released = rewritten // send-time rewrite only; the stored record is untouched
 	}
-	slog.Info("resend", "message_id", m.ID, "inbox", inbound.NormInbox(sendInbox), "identity", identity)
+	if _, err := s.store.ClaimResend(m.ID, actorFrom(ctx)); err != nil {
+		switch {
+		case errors.Is(err, sluice.ErrResendInProgress):
+			return Outcome{}, fmt.Errorf("%w: message %s", ErrResendInProgress, id)
+		case errors.Is(err, sluice.ErrNotResendable):
+			return Outcome{}, fmt.Errorf("%w: message %s", ErrNotResendable, id)
+		}
+		return Outcome{}, err
+	}
+	slog.Info("resend", "message_id", m.ID, "inbox", inbound.NormInbox(sendInbox), "identity", identity, "acknowledged_outcome_unknown", ackOutcomeUnknown)
 
 	sendErr := s.sendVia(ctx, sendInbox, sendMsg)
 	final, rerr := s.store.RecordSendAttempt(m.ID, sendErr, true, actorFrom(ctx), identity)
@@ -938,6 +976,8 @@ func (s *Service) ReSend(ctx context.Context, id string) (Outcome, error) {
 		out.Detail = "re-send: no real Sender configured — nothing left Darbaan"
 	case errors.Is(sendErr, errNoSender):
 		out.Warn = "inbox has no configured sender (removed from config?); not sent — stays approved"
+	case errors.Is(sendErr, sluice.ErrOutcomeUnknown):
+		out.Warn = outcomeUnknownWarn
 	case backend.IsPermanent(sendErr):
 		if bErr := s.deliverBounce(m, "upstream delivery failed permanently", false); bErr != nil {
 			out.Warn = fmt.Sprintf("re-send failed permanently AND bounce delivery failed: %v", bErr)

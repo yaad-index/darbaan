@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"mime"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/emersion/go-message"
@@ -31,6 +32,14 @@ var ErrNotPending = errors.New("sluice: message is not pending")
 // recorded against an approved message (or re-recorded against an already-sent one,
 // idempotently).
 var ErrNotApproved = errors.New("sluice: message is not approved")
+
+// ErrNotResendable is returned by ClaimResend when the message is not an
+// approved message with a recorded send failure.
+var ErrNotResendable = errors.New("sluice: message is not re-sendable")
+
+// ErrResendInProgress is returned by ClaimResend when another re-send of the
+// message already holds its claim (ADR 0039).
+var ErrResendInProgress = errors.New("sluice: a re-send of this message is already in progress")
 
 // Status is the disposition of a queued message. New messages are Pending; the
 // approval pipeline transitions them to Approved or Rejected. Default-deny means
@@ -77,7 +86,42 @@ type Message struct {
 	// so a re-send delivers what the operator approved rather than the original
 	// From. "" means the message was approved to send as-stamped.
 	AsInbox string `json:"as_inbox,omitempty"`
+	// ResendClaim marks a re-send in flight (ADR 0039): set by ClaimResend,
+	// cleared in the transaction that records the attempt's outcome. nil, the
+	// zero value of every record written before it existed, is not in flight.
+	ResendClaim *ResendClaim `json:"resend_claim,omitempty"`
 }
+
+// ResendClaim is a re-send in flight: when it started and the operator client
+// that started it.
+type ResendClaim struct {
+	Since time.Time `json:"since"`
+	Actor string    `json:"actor,omitempty"`
+}
+
+// OutcomeUnknownPrefix starts the SendErr of a message whose last attempt may
+// or may not have been delivered (ADR 0039 section 3): the upstream server was
+// sent the whole body but gave no final reply, or a re-send was interrupted.
+// It stays re-sendable, but re-sending it needs an explicit acknowledgement.
+const OutcomeUnknownPrefix = "outcome unknown: "
+
+// The reasons an outcome is unknown.
+const (
+	ReasonResendInterrupted = "re-send interrupted"
+	ReasonNoFinalReply      = "no final reply from the server"
+)
+
+// ErrOutcomeUnknown marks a send error after which the message may or may not
+// have been delivered: the server was sent the whole body and gave no final
+// reply. RecordSendAttempt records any error wrapping it as
+// OutcomeUnknown(ReasonNoFinalReply).
+var ErrOutcomeUnknown = errors.New("outcome unknown")
+
+// OutcomeUnknown is the SendErr recorded for reason.
+func OutcomeUnknown(reason string) string { return OutcomeUnknownPrefix + reason }
+
+// IsOutcomeUnknown reports whether a SendErr records an unknown outcome.
+func IsOutcomeUnknown(sendErr string) bool { return strings.HasPrefix(sendErr, OutcomeUnknownPrefix) }
 
 // Meta is the listing view of a queued message: everything but the raw body.
 // Subject is derived from the raw message at list time (not separately stored),
@@ -94,6 +138,11 @@ type Meta struct {
 	ReceivedAt time.Time
 	Status     Status
 	SendErr    string // the last send attempt's error, so a stranded approved message is visible
+	// OutcomeUnknown is set when SendErr records that the last attempt may have
+	// been delivered (ADR 0039).
+	OutcomeUnknown bool
+	// ResendInProgress is set while a re-send holds the message's claim.
+	ResendInProgress bool
 }
 
 // subjectFromRaw extracts the Subject header from a stored message for display
@@ -141,6 +190,11 @@ type MessageStore interface {
 	// already-sent message admits only an idempotent success — never a failure
 	// stamp onto a sent record.
 	RecordSendAttempt(id string, sendErr error, resend bool, actor, asIdentity string) (Message, error)
+	// ClaimResend claims an approved message with a recorded send failure for a
+	// re-send, in one transaction (ADR 0039): ErrNotResendable if it is not one,
+	// ErrResendInProgress if another re-send holds the claim. RecordSendAttempt
+	// releases the claim with the outcome.
+	ClaimResend(id, actor string) (Message, error)
 	// Close releases the underlying resources.
 	Close() error
 }

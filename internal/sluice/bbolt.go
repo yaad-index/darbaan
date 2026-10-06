@@ -2,6 +2,7 @@ package sluice
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -76,7 +77,55 @@ func newBbolt(path string, al audit.AuditLog) (MessageStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("sluice: sweep orphan blobs: %w", err)
 	}
+	if err := store.reconcileClaims(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("sluice: reconcile re-send claims: %w", err)
+	}
 	return store, nil
+}
+
+// reconcileClaims turns every re-send claim left at open into an unknown
+// outcome (ADR 0039 section 3). Only one process can hold the store, so a claim
+// still present belongs to a process that stopped mid-send: the message may or
+// may not have gone out. Each record is cleared in its own transaction and
+// audited as resend_interrupted.
+func (s *bboltStore) reconcileClaims() error {
+	var ids []string
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketMessages).ForEach(func(_, v []byte) error {
+			var rec stored
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return err
+			}
+			if rec.ResendClaim != nil {
+				ids = append(ids, rec.ID)
+			}
+			return nil
+		})
+	}); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		var out Message
+		var claim ResendClaim
+		if err := s.db.Update(func(tx *bbolt.Tx) error {
+			rec, key, err := loadStored(tx, id)
+			if err != nil {
+				return err
+			}
+			claim = *rec.ResendClaim
+			rec.ResendClaim = nil
+			rec.SendErr = OutcomeUnknown(ReasonResendInterrupted)
+			out = rec.Message
+			return putStored(tx, key, rec)
+		}); err != nil {
+			return err
+		}
+		slog.Warn("a re-send was interrupted: its outcome is unknown", "message_id", id, "claimed_at", claim.Since.UTC().Format(time.RFC3339))
+		s.writeAudit(audit.Record{Event: "resend_interrupted", Agent: out.Agent, Inbox: out.Inbox, Actor: claim.Actor, MessageID: id,
+			Detail: "re-send started " + claim.Since.UTC().Format(time.RFC3339) + " did not record an outcome"})
+	}
+	return nil
 }
 
 // sweepOrphans deletes blobs with no referencing metadata record (#83). It is
@@ -182,6 +231,9 @@ func (s *bboltStore) List() ([]Meta, error) {
 				ReceivedAt: rec.ReceivedAt,
 				Status:     rec.Status,
 				SendErr:    rec.SendErr,
+
+				OutcomeUnknown:   IsOutcomeUnknown(rec.SendErr),
+				ResendInProgress: rec.ResendClaim != nil,
 			})
 			return nil
 		})
@@ -257,12 +309,20 @@ func (s *bboltStore) RecordSendAttempt(id string, sendErr error, resend bool, ac
 		default:
 			return fmt.Errorf("%w: message %s is %s", ErrNotApproved, id, rec.Status)
 		}
-		if sendErr != nil {
+		switch {
+		case errors.Is(sendErr, ErrOutcomeUnknown):
+			// The fixed text, however the error was wrapped, so every reader
+			// recognises it (ADR 0039 section 3).
+			rec.SendErr = OutcomeUnknown(ReasonNoFinalReply)
+		case sendErr != nil:
 			rec.SendErr = sendErr.Error() // stays approved for a manual re-send
-		} else {
+		default:
 			rec.Status = StatusSent // delivered upstream
 			rec.SendErr = ""
 		}
+		// The claim is released in the transaction that records the outcome,
+		// so there is no moment with neither (ADR 0039 section 2).
+		rec.ResendClaim = nil
 		// The caller uses only the updated status; the raw body is not
 		// reassembled here, so a send never re-reads a (possibly large) blob.
 		out = rec.Message
@@ -283,7 +343,39 @@ func (s *bboltStore) RecordSendAttempt(id string, sendErr error, resend bool, ac
 	if resend {
 		event = "resend_attempt"
 	}
+	// An attempt that may have been delivered is its own event, so the log
+	// never shows it as a plain failure (ADR 0039 section 3).
+	if errors.Is(sendErr, ErrOutcomeUnknown) {
+		event = "send_outcome_unknown"
+		if resend {
+			event = "resend_outcome_unknown"
+		}
+	}
 	s.writeAudit(audit.Record{Event: event, Agent: out.Agent, Inbox: out.Inbox, Actor: actor, MessageID: id, Detail: detail})
+	return out, nil
+}
+
+func (s *bboltStore) ClaimResend(id, actor string) (Message, error) {
+	var out Message
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		rec, key, err := loadStored(tx, id)
+		if err != nil {
+			return err
+		}
+		switch {
+		case rec.Status != StatusApproved || rec.SendErr == "":
+			return fmt.Errorf("%w: message %s is %s", ErrNotResendable, id, rec.Status)
+		case rec.ResendClaim != nil:
+			return ErrResendInProgress
+		}
+		// SendErr stays: the message is visibly failed while the attempt runs.
+		rec.ResendClaim = &ResendClaim{Since: time.Now().UTC(), Actor: actor}
+		out = rec.Message
+		return putStored(tx, key, rec)
+	})
+	if err != nil {
+		return Message{}, fmt.Errorf("sluice: claim re-send: %w", err)
+	}
 	return out, nil
 }
 

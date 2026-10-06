@@ -45,7 +45,7 @@ func TestReSendRecoversStrandedApproved(t *testing.T) {
 
 	// Re-send now delivers and clears the error.
 	fail = false
-	out, err = svc.ReSend(context.Background(), m.ID)
+	out, err = svc.ReSend(context.Background(), m.ID, false)
 	require.NoError(t, err)
 	assert.Equal(t, string(sluice.StatusSent), out.Status)
 	sent, err := q.Get(m.ID)
@@ -93,7 +93,7 @@ func TestReSendApprovedAsRecomputesIdentity(t *testing.T) {
 
 	// Re-send delivers via the chosen inbox with the rewritten From — never the original.
 	fail = false
-	out, err = svc.ReSend(context.Background(), m.ID)
+	out, err = svc.ReSend(context.Background(), m.ID, false)
 	require.NoError(t, err)
 	assert.Equal(t, string(sluice.StatusSent), out.Status)
 	assert.Equal(t, "work", sentVia, "re-send routes through the chosen inbox's sender")
@@ -132,7 +132,7 @@ func TestReSendApprovedAsRefusesVanishedInbox(t *testing.T) {
 	// The work inbox is removed from config before the operator retries.
 	svc.SetInboxIdentities(map[string]string{inbound.DefaultInbox: "default@x.test"})
 
-	_, err = svc.ReSend(context.Background(), m.ID)
+	_, err = svc.ReSend(context.Background(), m.ID, false)
 	assert.ErrorIs(t, err, admin.ErrUnknownInbox)
 
 	stored, err := q.Get(m.ID)
@@ -193,7 +193,7 @@ func TestReSendRefusesWhenInboxSenderRemoved(t *testing.T) {
 		inbound.DefaultInbox: senderFunc(func(sluice.Message) error { return nil }),
 	})
 
-	out, err := svc.ReSend(context.Background(), m.ID)
+	out, err := svc.ReSend(context.Background(), m.ID, false)
 	require.NoError(t, err)
 	assert.Equal(t, string(sluice.StatusApproved), out.Status, "refused re-send stays approved")
 	assert.NotEmpty(t, out.Warn)
@@ -215,13 +215,13 @@ func TestReSendRejectsNonResendable(t *testing.T) {
 	})
 
 	// Pending → not resendable.
-	_, err = svc.ReSend(context.Background(), m.ID)
+	_, err = svc.ReSend(context.Background(), m.ID, false)
 	assert.ErrorIs(t, err, admin.ErrNotResendable)
 
 	// Clean approve → sent → not resendable.
 	_, err = svc.ApproveID(context.Background(), m.ID)
 	require.NoError(t, err)
-	_, err = svc.ReSend(context.Background(), m.ID)
+	_, err = svc.ReSend(context.Background(), m.ID, false)
 	assert.ErrorIs(t, err, admin.ErrNotResendable)
 }
 
