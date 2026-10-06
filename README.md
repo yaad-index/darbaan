@@ -118,9 +118,9 @@ in the code.
 
 | Metric | Unit | Attributes | What it measures |
 |--------|------|------------|------------------|
-| `darbaan.outbound.messages` | `{message}` | `darbaan.outbound.event` (`queued`, `approved`, `rejected`, `sent`, `send_failed`), `error.type` on `send_failed` | Outbound messages by what happened to them. |
+| `darbaan.outbound.messages` | `{message}` | `darbaan.outbound.event` (`queued`, `approved`, `rejected`, `sent`, `send_failed`, `outcome_unknown`), `error.type` on `send_failed` | Outbound messages by what happened to them. `outcome_unknown` is a send, first or re-send, that may have been delivered (ADR 0039). |
 | `darbaan.outbound.pending` | `{message}` | none | Outbound messages waiting for a decision, read at each collection. |
-| `darbaan.send.duration` | `s` | `darbaan.outcome` (`ok`, `failed`), `error.type` on a failure | How long releasing an approved message upstream took. |
+| `darbaan.send.duration` | `s` | `darbaan.outcome` (`ok`, `failed`, `unknown`), `error.type` on a failure | How long releasing an approved message upstream took. |
 | `darbaan.inbound.hold_decisions` | `{message}` | `darbaan.hold.decision` (`exposed`, `dropped`) | Held inbound messages an operator exposed or dropped. |
 | `darbaan.sync.runs` | `{run}` | `darbaan.outcome` (`ok`, `failed`), `error.type` on a failure | Upstream IMAP sync runs, scheduled and on demand. |
 | `darbaan.sync.duration` | `s` | as `darbaan.sync.runs` | How long a sync run took. |
