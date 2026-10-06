@@ -1,4 +1,4 @@
-# ADR 0039: Telemetry exports counts, never mail
+# ADR 0040: Telemetry exports counts, never mail
 
 **Status:** Proposed (2026-10-06)
 
