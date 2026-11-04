@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/yaad-index/darbaan/compare/v0.22.0...v0.23.0) (2026-11-04)
+
+
+### Features
+
+* **agents:** send-only and read-only agents ([#378](https://github.com/yaad-index/darbaan/issues/378)) ([eabe960](https://github.com/yaad-index/darbaan/commit/eabe960306903778eca898a51a0e2da286353200)), closes [#376](https://github.com/yaad-index/darbaan/issues/376)
+
 ## [0.22.0](https://github.com/yaad-index/darbaan/compare/v0.21.4...v0.22.0) (2026-10-06)
 
 
