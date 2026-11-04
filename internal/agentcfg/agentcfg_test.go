@@ -156,24 +156,26 @@ func TestDefaultInboxErrors(t *testing.T) {
 			}},
 			"default_inbox is required",
 		},
-		// A send-only default_inbox would be an un-SELECTable INBOX.
-		"send-only default": {
+		// For an agent that can log in over IMAP, a default it may only send as would
+		// be an un-SELECTable INBOX.
+		"send-only default of a reading agent": {
 			agentcfg.Agent{Name: "agent-a", DefaultInbox: "inbox-a", Grants: []agentcfg.Grant{
 				{Inbox: "inbox-a", Access: []string{"send"}},
+				{Inbox: "inbox-b", Access: []string{"read"}},
 			}},
 			"must have read access",
+		},
+		"send-only agent, default not granted": {
+			agentcfg.Agent{Name: "agent-a", DefaultInbox: "inbox-z", Grants: []agentcfg.Grant{
+				{Inbox: "inbox-a", Access: []string{"send"}},
+			}},
+			"not a granted inbox",
 		},
 		"default not granted": {
 			agentcfg.Agent{Name: "agent-a", DefaultInbox: "inbox-z", Grants: []agentcfg.Grant{
 				{Inbox: "inbox-a", Access: []string{"read"}},
 			}},
 			"not a granted inbox",
-		},
-		"no read grant at all": {
-			agentcfg.Agent{Name: "agent-a", Grants: []agentcfg.Grant{
-				{Inbox: "inbox-a", Access: []string{"send"}},
-			}},
-			"no read grant",
 		},
 		"conflicting field and marked grant": {
 			agentcfg.Agent{Name: "agent-a", DefaultInbox: "inbox-a", Grants: []agentcfg.Grant{
@@ -189,6 +191,46 @@ func TestDefaultInboxErrors(t *testing.T) {
 			require.ErrorContains(t, err, tc.want)
 		})
 	}
+}
+
+// ADR 0027, amendment of 2026-11-04: an agent with no read grant is send-only. Its
+// default_inbox is optional and, when given, is only its send catch-all.
+func TestSendOnlyAgent(t *testing.T) {
+	bare := agentcfg.Agent{Name: "notifier", Grants: []agentcfg.Grant{
+		{Inbox: "inbox-a", Access: []string{"send"}},
+		{Inbox: "inbox-b", Access: []string{"send"}},
+	}}
+	assert.True(t, agentcfg.SendOnly(bare))
+	def, err := agentcfg.DefaultInbox(bare)
+	require.NoError(t, err)
+	assert.Equal(t, "", def, "no default given: no catch-all")
+	require.NoError(t, agentcfg.Validate([]agentcfg.Agent{bare}, inboxSet("inbox-a", "inbox-b")))
+
+	withDefault := bare
+	withDefault.DefaultInbox = "inbox-b"
+	def, err = agentcfg.DefaultInbox(withDefault)
+	require.NoError(t, err)
+	assert.Equal(t, "inbox-b", def)
+
+	// The ambiguity rule is about INBOX, which a send-only agent does not have: two
+	// send grants and no default is fine (above), and a marked grant works too.
+	marked := agentcfg.Agent{Name: "notifier", Grants: []agentcfg.Grant{
+		{Inbox: "inbox-a", Access: []string{"send"}, Default: true},
+		{Inbox: "inbox-b", Access: []string{"send"}},
+	}}
+	def, err = agentcfg.DefaultInbox(marked)
+	require.NoError(t, err)
+	assert.Equal(t, "inbox-a", def)
+
+	// One read grant anywhere and the agent is no longer send-only: the old rules hold.
+	reader := agentcfg.Agent{Name: "agent-a", Grants: []agentcfg.Grant{
+		{Inbox: "inbox-a", Access: []string{"send"}},
+		{Inbox: "inbox-b", Access: []string{"read", "send"}},
+	}}
+	assert.False(t, agentcfg.SendOnly(reader))
+	def, err = agentcfg.DefaultInbox(reader)
+	require.NoError(t, err)
+	assert.Equal(t, "inbox-b", def, "inferred from the lone read grant, as before")
 }
 
 // ADR 0027: an agent named the same as an inbox collides in the store owner

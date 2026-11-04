@@ -1298,3 +1298,26 @@ func TestIMAPRejectedGuardHoldIsTombstone(t *testing.T) {
 	assert.Contains(t, body, "obey me", "approved: the message itself, not a tombstone")
 	assert.NotContains(t, body, "reviewed out by the operator")
 }
+
+// ADR 0027, amendment of 2026-11-04: a send-only agent (no read grant) has no IMAP
+// face. Its LOGIN fails exactly like a wrong password; an agent that reads logs in.
+func TestIMAPSendOnlyAgentCannotLogIn(t *testing.T) {
+	auth := listener.NewAuth([]listener.Principal{
+		{Name: "notifier", Password: "pw", Reads: map[string]bool{}, Sends: map[string]bool{"work": true}},
+		{Name: "reader", Password: "pw", DefaultInbox: "work", Reads: map[string]bool{"work": true}, Sends: map[string]bool{}},
+	})
+	filters := map[string]*filter.Filter{inbound.DefaultInbox: nil, "work": nil}
+	addr := startIMAPAuth(t, seedInbound(t), filters, auth)
+	login := func(user, pass string) error {
+		c, err := imapclient.DialInsecure(addr, nil)
+		require.NoError(t, err)
+		defer func() { _ = c.Close() }()
+		return c.Login(user, pass).Wait()
+	}
+	sendOnly := login("notifier", "pw")
+	require.Error(t, sendOnly, "a send-only agent has no IMAP login")
+	wrong := login("notifier", "wrong")
+	require.Error(t, wrong)
+	assert.Equal(t, wrong.Error(), sendOnly.Error(), "indistinguishable from a wrong password")
+	require.NoError(t, login("reader", "pw"), "a read-only agent still logs in over IMAP")
+}

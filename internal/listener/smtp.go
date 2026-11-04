@@ -76,7 +76,9 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 	}
 	return sasl.NewPlainServer(func(_, username, password string) error {
 		p, ok := s.backend.auth.Verify(username, password)
-		if !ok {
+		// A read-only agent has no SMTP face: refused exactly like a wrong password
+		// (ADR 0027, amendment of 2026-11-04).
+		if !ok || !p.HasSMTP() {
 			return smtp.ErrAuthFailed
 		}
 		s.principal = p
@@ -93,9 +95,12 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 	// Route the From to an inbox (ADR 0023): its matching identity, else the
 	// catch-all — the connecting agent's default_inbox (per-agent, ADR 0027), or
 	// the global default at N=1 (empty DefaultInbox). Refuse a From that matches no
-	// inbox and has no catch-all, fail-fast at MAIL FROM.
+	// inbox and has no catch-all, fail-fast at MAIL FROM. A configured agent's
+	// catch-all is its own default_inbox and nothing else: a send-only agent with no
+	// default has none, rather than the global default that belongs to the
+	// unrestricted single agent (ADR 0027, amendment of 2026-11-04).
 	catchAll := inbound.DefaultInbox
-	if s.principal != nil && s.principal.DefaultInbox != "" {
+	if s.principal.restricted() {
 		catchAll = s.principal.DefaultInbox
 	}
 	inbox, ok := s.backend.resolveInbox(from, catchAll)

@@ -86,7 +86,9 @@ func (g Grant) HasAccess(dir string) bool {
 // names, unique password-env names (the many-to-one mangle must not silently
 // share a secret), and, per agent, a non-empty well-formed grant set whose
 // inboxes all exist, plus exactly one resolvable default_inbox with read access
-// (ADR 0027). inboxNames is the set of configured inbox names (ADR 0023).
+// (ADR 0027), or, for a send-only agent, an optional default with send access (ADR
+// 0027, amendment of 2026-11-04). inboxNames is the set of configured inbox names
+// (ADR 0023).
 func Validate(agents []Agent, inboxNames map[string]bool) error {
 	if len(agents) == 0 {
 		return fmt.Errorf("agentcfg: no agents configured")
@@ -165,6 +167,18 @@ func validateGrants(agent string, grants []Grant, inboxNames map[string]bool) er
 	return nil
 }
 
+// SendOnly reports whether the agent has no read grant: it has no IMAP face, and
+// its default_inbox, if any, is only its send catch-all (ADR 0027, amendment of
+// 2026-11-04).
+func SendOnly(a Agent) bool {
+	for _, g := range a.Grants {
+		if g.HasAccess(AccessRead) {
+			return false
+		}
+	}
+	return true
+}
+
 // DefaultInbox resolves an agent's default inbox — the mailbox it sees as IMAP
 // INBOX and the target of its send catch-all (ADR 0027). Resolution order:
 //   - the explicit `default_inbox` field, if set;
@@ -175,6 +189,10 @@ func validateGrants(agent string, grants []Grant, inboxNames map[string]bool) er
 // grants with no explicit default is ambiguous and rejected, as is an explicit
 // default that conflicts with a `default: true` grant. Assumes grants are already
 // well-formed (see validateGrants).
+//
+// A send-only agent (SendOnly) has no INBOX: its default is optional, "" when not
+// given, and when given must be a grant with send access, since it is only the
+// send catch-all (ADR 0027, amendment of 2026-11-04).
 func DefaultInbox(a Agent) (string, error) {
 	name := strings.TrimSpace(a.Name)
 
@@ -197,6 +215,10 @@ func DefaultInbox(a Agent) (string, error) {
 		want = marked
 	}
 
+	sendOnly := SendOnly(a)
+	if want == "" && sendOnly {
+		return "", nil
+	}
 	if want == "" {
 		// Infer from a lone read grant; ambiguous with two or more.
 		var readable []string
@@ -216,10 +238,17 @@ func DefaultInbox(a Agent) (string, error) {
 		}
 	}
 
-	// Explicit (or marked) default must be a granted inbox with read access.
+	// Explicit (or marked) default must be a granted inbox with read access, or, for
+	// a send-only agent, with send access.
 	for _, g := range a.Grants {
 		if strings.TrimSpace(g.Inbox) != want {
 			continue
+		}
+		if sendOnly {
+			if !g.HasAccess(AccessSend) {
+				return "", fmt.Errorf("agentcfg: agent %q: default_inbox %q must have send access (the agent is send-only)", name, want)
+			}
+			return want, nil
 		}
 		if !g.HasAccess(AccessRead) {
 			return "", fmt.Errorf("agentcfg: agent %q: default_inbox %q must have read access (it is send-only)", name, want)

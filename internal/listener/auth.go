@@ -35,6 +35,26 @@ func (p *Principal) CanSend(inbox string) bool {
 	return p != nil && (p.Sends == nil || p.Sends[inbox])
 }
 
+// HasIMAP reports whether the principal may log in over IMAP: it may read some inbox.
+// A send-only agent (no read grant) has no IMAP face (ADR 0027, amendment of
+// 2026-11-04). Nil Reads is the unrestricted single agent.
+func (p *Principal) HasIMAP() bool {
+	return p != nil && (p.Reads == nil || len(p.Reads) > 0)
+}
+
+// HasSMTP reports whether the principal may authenticate for SMTP submission: it
+// may send as some inbox. A read-only agent (no send grant) has no SMTP face (ADR
+// 0027, amendment of 2026-11-04). Nil Sends is the unrestricted single agent.
+func (p *Principal) HasSMTP() bool {
+	return p != nil && (p.Sends == nil || len(p.Sends) > 0)
+}
+
+// restricted reports whether the principal carries an ADR 0027 grant list, as every
+// configured agent does; nil Reads and Sends is the unrestricted single agent.
+func (p *Principal) restricted() bool {
+	return p != nil && (p.Reads != nil || p.Sends != nil)
+}
+
 // Auth resolves a presented (username, password) to a configured Principal. The
 // password comparison is constant-time, and an unknown username still runs a
 // comparison against a fixed value, so authentication fails identically whether

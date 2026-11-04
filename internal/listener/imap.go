@@ -359,7 +359,9 @@ func (s *imapSession) Close() error { return nil }
 
 func (s *imapSession) Login(username, password string) error {
 	p, ok := s.auth.Verify(username, password)
-	if !ok {
+	// A send-only agent has no IMAP face: refused exactly like a wrong password, so a
+	// login cannot be probed for what it may do (ADR 0027, amendment of 2026-11-04).
+	if !ok || !p.HasIMAP() {
 		return imapserver.ErrAuthFailed
 	}
 	s.principal = p
