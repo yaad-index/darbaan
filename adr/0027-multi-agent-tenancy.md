@@ -1,6 +1,6 @@
 # ADR 0027: Multi-agent tenancy — per-agent logins, grants, and per-principal mailbox naming
 
-**Status:** Accepted (2026-07-01); amended 2026-09-26 (see the end)
+**Status:** Accepted (2026-07-01); amended 2026-09-26, 2026-11-04 (see the end)
 
 ## Context
 
@@ -337,3 +337,31 @@ is not true by construction, since an agent could be named like an inbox. It is
   (`agentcfg.Validate`), so the two owner spaces cannot overlap;
 - the owner rekey touches only synced records, which carry an upstream UID, and
   never bounces, which do not (`UpstreamUID == 0`).
+
+## Amendment (2026-11-04): send-only and read-only agents
+
+Extends "Grants" and "`default_inbox`" above, which stay as written (ADR 0037). Issue #376.
+
+An agent whose only job is one direction still gets both. A login that should only submit
+mail (an alerting host, a notifier) must hold `read` on its `default_inbox`, so a leaked
+password also opens that mailbox over IMAP. A login that should only read can still pass
+SMTP `AUTH`, and is refused only later, at `MAIL FROM`. Both are now explicit modes, decided
+from the agent's grants alone; no new config field.
+
+- **Send-only agent: no grant has `read`.** Its IMAP `LOGIN` is refused, with the same
+  failure as a wrong password (no oracle for which logins exist or what they may do).
+  `default_inbox` is optional for it and, when set, must be one of its grants with
+  **`send`**: it has no `INBOX` to show, so the default is only the send catch-all. The
+  rule above that the default needs `read` ("a `send`-only default would be an
+  un-`SELECT`able `INBOX`") still holds for every agent that can log in over IMAP, which is
+  exactly the agents with a `read` grant.
+- **No implicit catch-all for a send-only agent.** Without a `default_inbox`, a send-only
+  agent's `From` must resolve to the identity of an inbox it may send as; it does **not**
+  fall back to the instance's global default inbox (the single-agent catch-all), because
+  that would hand it a catch-all nobody configured.
+- **Read-only agent: no grant has `send`.** Its SMTP `AUTH` is refused, with the same
+  failure as a wrong password. Its `default_inbox` rules are unchanged.
+- **Unchanged:** an agent with both directions, the implicit single agent, the grant
+  syntax, and the requirement of at least one grant. An agent with neither direction
+  cannot exist, since every grant's access set is non-empty.
+
