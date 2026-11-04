@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/yaad-index/darbaan/internal/audit"
+	"github.com/yaad-index/darbaan/internal/inbound"
 	"github.com/yaad-index/darbaan/internal/listener"
 	"github.com/yaad-index/darbaan/internal/sluice"
 )
@@ -329,4 +330,51 @@ func TestNewServerRequiresTLS(t *testing.T) {
 
 	_, err = listener.NewServer(listener.ServerConfig{AllowInsecure: true}, testAuth, q, nil)
 	require.NoError(t, err)
+}
+
+// ADR 0027, amendment of 2026-11-04: a read-only agent (no send grant) has no SMTP
+// face, refused exactly like a wrong password; a send-only agent submits as the
+// inboxes it may send as and has no catch-all unless it is given a default. The
+// global default inbox is NOT its catch-all, even though it may send as it.
+func TestSubmitSendOnlyAndReadOnlyAgents(t *testing.T) {
+	q := newSluice(t)
+	route := func(from, catchAll string) (string, bool) {
+		if from == "work@x.test" {
+			return "work", true
+		}
+		if catchAll != "" {
+			return catchAll, true
+		}
+		return "", false
+	}
+	auth := listener.NewAuth([]listener.Principal{
+		{Name: "notifier", Password: "pw", Reads: map[string]bool{}, Sends: map[string]bool{"work": true, inbound.DefaultInbox: true}},
+		{Name: "reader", Password: "pw", DefaultInbox: "work", Reads: map[string]bool{"work": true}, Sends: map[string]bool{}},
+	})
+	addr := startServerAuth(t, listener.ServerConfig{
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{selfSigned(t)}},
+	}, q, route, auth)
+	auth1 := func(user, pass string) (*smtp.Client, error) {
+		c, err := smtp.DialStartTLS(addr, &tls.Config{InsecureSkipVerify: true})
+		require.NoError(t, err)
+		return c, c.Auth(sasl.NewPlainClient("", user, pass))
+	}
+
+	c, readOnly := auth1("reader", "pw")
+	_ = c.Close()
+	require.Error(t, readOnly, "a read-only agent has no SMTP login")
+	c, wrong := auth1("reader", "wrong")
+	_ = c.Close()
+	require.Error(t, wrong)
+	assert.Equal(t, wrong.Error(), readOnly.Error(), "indistinguishable from a wrong password")
+
+	c, err := auth1("notifier", "pw")
+	require.NoError(t, err, "a send-only agent logs in over SMTP")
+	require.NoError(t, c.Mail("work@x.test", nil), "its own identity is accepted")
+	_ = c.Close()
+
+	c, err = auth1("notifier", "pw")
+	require.NoError(t, err)
+	require.Error(t, c.Mail("stranger@elsewhere.test", nil), "no default_inbox: no catch-all, not the global default")
+	_ = c.Close()
 }

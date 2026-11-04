@@ -300,6 +300,12 @@ assessment-timeout: 5s
 # sees as IMAP INBOX and the target of its send catch-all; it must be a granted
 # inbox with read access. An agent name may not equal an inbox name.
 #
+# One-direction agents (ADR 0027, amendment of 2026-11-04): an agent with no read
+# grant is SEND-ONLY — its IMAP login is refused, and its default_inbox is optional
+# (if set, an inbox it may send as: only its send catch-all; if not, its From must
+# match an inbox it may send as). An agent with no send grant is READ-ONLY — its
+# SMTP login is refused. Both refusals look like a wrong password.
+#
 # On-demand sync (ADR 0028, opt-in per inbox): when sync_on_status is set, an IMAP
 # STATUS for that inbox triggers an immediate upstream pull before the counts are
 # returned, so an agent can "sync now" instead of waiting out the background poll
@@ -337,3 +343,7 @@ assessment-timeout: 5s
 #     default_inbox: inbox-b
 #     grants:
 #       - { inbox: inbox-b, access: [read, send] }
+#   - name: notifier                               # send-only: an alerting host
+#     # password from DARBAAN_AGENT_NOTIFIER_PASSWORD
+#     grants:
+#       - { inbox: inbox-a, access: [send] }
